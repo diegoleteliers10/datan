@@ -1,0 +1,14 @@
+[package]
+name = "datan-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Binario thin. Solo wiring de GPUI."
+
+[dependencies]
+gpui-kit.workspace = true
+datan-storage = { path = "../datan-storage" }
+
+[dev-dependencies]
+criterion = "0.7"

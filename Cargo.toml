@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/datan-app",
+    "crates/datan-storage",
+    "crates/datan-model",
+    "crates/datan-dax-syntax",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# UI
+gpui-kit = "0.7.3"
+
+# Motor y cache. `duckdb::arrow` es el unico camino a Arrow en este workspace.
+duckdb = { version = "1.10506.0", features = ["bundled"] }
+
+# Error handling
+thiserror = "2"
+
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

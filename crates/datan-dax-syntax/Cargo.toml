@@ -1,0 +1,10 @@
+[package]
+name = "datan-dax-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tokens, spans, lexer y parser de DAX."
+
+[dependencies]
+thiserror.workspace = true

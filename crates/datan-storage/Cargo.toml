@@ -1,0 +1,11 @@
+[package]
+name = "datan-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Unico crate que toca duckdb::Connection. Sin gpui, sin arrow directo."
+
+[dependencies]
+duckdb.workspace = true
+thiserror.workspace = true

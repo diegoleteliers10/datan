@@ -1,0 +1,10 @@
+[package]
+name = "datan-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tablas, columnas, lineage, relaciones, jerarquias, medidas, RLS."
+
+[dependencies]
+thiserror.workspace = true
