@@ -5,6 +5,7 @@ members = [
     "crates/datan-storage",
     "crates/datan-model",
     "crates/datan-dax-syntax",
+    "crates/datan-dax-check",
 ]
 
 [workspace.package]

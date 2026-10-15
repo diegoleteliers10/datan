@@ -121,12 +121,10 @@ impl<'a> Lexer<'a> {
             });
         };
 
-        // Numero. DuckDB de DAX acepta `1`, `1.5`, `.5` y notacion exponencial.
+        // Numero. El lexer de DAX acepta `1`, `1.5`, `.5` y notacion exponencial.
         if byte.is_ascii_digit() || (byte == b'.' && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()))
         {
-            let mut end = self.position;
             while self.peek().is_some_and(|b| b.is_ascii_digit()) {
-                end += 1;
                 self.position += 1;
             }
             if self.peek() == Some(b'.') {
@@ -146,6 +144,7 @@ impl<'a> Lexer<'a> {
                         self.position += 1;
                     }
                 } else {
+                    // Una `e` suelta no es parte del numero: `1e` es `1` seguido de `e`.
                     self.position = save;
                 }
             }

@@ -1,0 +1,12 @@
+[package]
+name = "datan-dax-check"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Resolucion de nombres, typecheck y lint de DAX contra el modelo. Puro, headless."
+
+[dependencies]
+datan-dax-syntax = { path = "../datan-dax-syntax" }
+datan-model = { path = "../datan-model" }
+thiserror.workspace = true

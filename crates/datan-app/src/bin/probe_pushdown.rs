@@ -98,12 +98,6 @@ fn probe_pushdown_directo(url: &str) {
     println!("   las filas viajan todas y no hay pushdown de agregacion.");
 }
 
-fn conclusion() {
-    println!("\nConclusion:");
-    println!("  El pushdown es real si la consulta contra la fuente remota tarda poco y");
-    println!("  devuelve pocas filas. La cache local sirve cuando el agregado es caro y");
-    println!("  la fuente es lenta. La eleccion es por query, no por proyecto.");
-}
 
 /// La forma real de BI: un GROUP BY con join a una dimension.
 ///
