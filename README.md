@@ -11,6 +11,7 @@ App de escritorio multiplataforma para analisis de datos. Local first, sin servi
 | --- | --- |
 | 0, el spike | Completada 14 Oct 2026. Ambas puertas pasaron. |
 | R2, conectores | Resuelto 14 Oct 2026. La extension se precarga, no se compila. |
+| Apuesta 2, pushdown | Medida 14 Oct 2026. La cache local es 20x mas rapida. |
 | 1, Postgres -> modelo -> medidas -> grid de 1M | Pendiente |
 
 El plan completo esta en [PLAN.md](PLAN.md). Las decisiones de arquitectura, los riesgos y las

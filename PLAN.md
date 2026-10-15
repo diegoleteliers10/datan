@@ -452,6 +452,20 @@ tener un motor en vez de dos. Solo se sostiene si se mantiene Postgres como fuen
 DuckDB como store local, que es exactamente la arquitectura decidida, asi que la apuesta ya esta
 pagada.
 
+**Medido 14 Oct 2026 contra Postgres 18 local, 10M de ventas** (`probe_pushdown --bi`):
+
+| Consulta | Postgres directo | Cache DuckDB | Factor |
+| --- | --- | --- | --- |
+| `GROUP BY region, quarter` con join, `SUM(qty * price)` | 372 ms | 18.8 ms | **20x** |
+
+La cache gana por mucho, lo que confirma el valor de la apuesta. Deja una duda abierta: el
+plan muestra `TABLE_SCAN`, no `POSTGRES_SCAN`, y la agregacion no aparece como
+`POSTGRES_SCAN_PUSHDOWN`. Puede que las filas enteras viajan y la agregacion se resuelva en
+DuckDB. **Pendiente de investigar, no bloquea la Fase 1** porque la cache ya es 20x mas rapida.
+
+Complicacion extra: `postgres_scan_pushdown()` acepta una **cadena de conexion**, no el alias
+del `ATTACH`. La via manual exige la URL de nuevo.
+
 **3. Un language server real para DAX, porque DAX es un programa real de Rust.** Rename,
 find-references, go-to-definition a traves del modelo, y tests unitarios para medidas. La barra de
 formulas de Power BI no tiene nada de esto. Esta apuesta depende **enteramente** del layout de la
