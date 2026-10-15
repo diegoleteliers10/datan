@@ -1,0 +1,13 @@
+[package]
+name = "datan-dax-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Algebra de filter context, propagacion por relaciones y extraccion de atomos. Puro."
+
+[dependencies]
+datan-dax-syntax = { path = "../datan-dax-syntax" }
+datan-dax-check = { path = "../datan-dax-check" }
+datan-model = { path = "../datan-model" }
+thiserror.workspace = true
