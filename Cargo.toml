@@ -7,6 +7,7 @@ members = [
     "crates/datan-dax-syntax",
     "crates/datan-dax-check",
     "crates/datan-dax-eval",
+    "crates/datan-dax-sql",
 ]
 
 [workspace.package]

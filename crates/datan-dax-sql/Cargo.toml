@@ -1,0 +1,12 @@
+[package]
+name = "datan-dax-sql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Baja el AtomSet a SQL de DuckDB. Aislado de storage para poder diffearlo y testearlo sin base de datos."
+
+[dependencies]
+datan-dax-eval = { path = "../datan-dax-eval" }
+datan-model = { path = "../datan-model" }
+thiserror.workspace = true

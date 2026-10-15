@@ -310,6 +310,21 @@ agrupado por region y quarter resuelve en una sola pasada. El backend SQL es via
 
 Codigo: `crates/datan-app/src/bin/spike_day2.rs`.
 
+**Dia 4: el lowering a SQL.** `datan-dax-sql` baja el `AtomSet` a una unica query de DuckDB.
+Verificado contra DuckDB real en `verify_pipeline`: el SQL generado da **el mismo resultado**
+que la consulta manual del spike, con `HASH_GROUP_BY` y 27 ms sobre 10M de filas.
+
+Decisiones del lowering:
+
+- Un filtro propagado se baja como `IN (SELECT ... FROM dim WHERE ...)`, **no** como JOIN. Un
+  JOIN con la dimension multiplica filas y rompe `COUNT(DISTINCT)` y los `SUM` sobre
+  columnas de la dimension. Un `IN` es semijoin.
+- Una columna de agrupamiento que vive en otra tabla si requiere `JOIN`, con alias `t0`, `t1`
+  porque `fact_sales` y `dim_product` comparten el nombre `product_id`.
+- Un semijoin por tabla de dimension, no por columna. Repetirlo es correcto pero ilegible.
+- Las columnas de agrupamiento NO se aliasean en el `SELECT`: DuckDB rechaza un alias dentro
+  del `GROUP BY` incluso cuando el alias es identico al nombre de la columna.
+
 **Dia 3, bonus: R2, los conectores.** Resultado: **RESUELTO**, con un metodo distinto al que
 el plan asumia. El tarball de `libduckdb-sys` no trae `CMakeLists.txt`, asi que compilar la
 extension desde fuente era imposible con crates.io. La via que si funciona es precargarla.

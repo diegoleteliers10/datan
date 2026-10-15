@@ -9,3 +9,10 @@ description = "Unico crate que toca duckdb::Connection. Sin gpui, sin arrow dire
 [dependencies]
 duckdb.workspace = true
 thiserror.workspace = true
+
+# Reexport de arrow. Es el UNICO camino a Arrow en todo el workspace: `duckdb` pinnea
+# `arrow ^58` y el crate suelto esta en 60. Dos majors en el arbol dan dos tipos
+# `RecordBatch` incompatibles. Ver seccion 2.3 de PLAN.md.
+[dependencies.arrow]
+package = "arrow"
+version = "58.4"

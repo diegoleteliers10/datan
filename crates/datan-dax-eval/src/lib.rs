@@ -31,7 +31,9 @@ mod filter;
 mod modifiers;
 
 pub use atom::{Atom, AtomKind, AtomSet, Granularity};
-pub use filter::{ColumnInfo, Filter, FilterContext, FilterOperator, FilterValue};
+pub use filter::{
+    ColumnInfo, Filter, FilterContext, FilterOperator, FilterSource, FilterValue,
+};
 pub use modifiers::{Modifier, ModifierError, apply_modifiers};
 
 use datan_dax_check::{Checked, CheckedExpr, check};

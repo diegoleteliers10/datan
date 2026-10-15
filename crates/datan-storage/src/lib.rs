@@ -8,6 +8,14 @@
 use duckdb::arrow::array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
 use duckdb::{Connection, InterruptHandle};
 use std::path::Path;
+
+/// Reexport de Arrow.
+///
+/// Es el unico camino a Arrow en todo el workspace. `duckdb` pinnea `arrow ^58` y el crate
+/// suelto esta en 60: dos majors en el arbol dan dos tipos `RecordBatch` incompatibles, y el
+/// error de compilacion aparece en el fondo de una funcion del motor. Ver seccion 2.3 de
+/// PLAN.md.
+pub use duckdb::arrow;
 use std::sync::Arc;
 use thiserror::Error;
 

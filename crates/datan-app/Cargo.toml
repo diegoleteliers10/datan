@@ -9,6 +9,9 @@ description = "Binario thin. Solo wiring de GPUI."
 [dependencies]
 gpui-kit.workspace = true
 datan-storage = { path = "../datan-storage" }
+datan-model = { path = "../datan-model" }
+datan-dax-eval = { path = "../datan-dax-eval" }
+datan-dax-sql = { path = "../datan-dax-sql" }
 
 [dev-dependencies]
 criterion = "0.7"

@@ -145,9 +145,7 @@ impl Extractor<'_> {
                     self.extract_calculate(args, context)?;
                 } else {
                     for arg in args {
-                        self.depth += 1;
                         self.extract(arg, context)?;
-                        self.depth -= 1;
                     }
                 }
             }
@@ -158,30 +156,25 @@ impl Extractor<'_> {
                 self.extract_calculate(args, context)?;
             }
 
+            // Un binario NO sube la profundidad. `SUM(A) + COUNT(B)` son dos agregaciones al
+            // mismo nivel, no una anidada: bajan a dos agregados en el mismo SELECT.
+            // Solo los iteradores y CALCULATE crean un nivel mas.
             CheckedExpr::Binary { left, right, .. } => {
-                self.depth += 1;
                 self.extract(left, context)?;
                 self.extract(right, context)?;
-                self.depth -= 1;
             }
 
             CheckedExpr::Unary { operand, .. } => {
-                self.depth += 1;
                 self.extract(operand, context)?;
-                self.depth -= 1;
             }
 
             // Un bloque VAR no cambia el contexto. Se recorren sus bindings por si
             // contienen agregaciones.
             CheckedExpr::Block { vars, body, .. } => {
                 for var in vars {
-                    self.depth += 1;
                     self.extract(var, context)?;
-                    self.depth -= 1;
                 }
-                self.depth += 1;
                 self.extract(body, context)?;
-                self.depth -= 1;
             }
 
             CheckedExpr::RowConstructor { values, .. } => {
@@ -193,9 +186,7 @@ impl Extractor<'_> {
             }
 
             CheckedExpr::Variable { value, .. } => {
-                self.depth += 1;
                 self.extract(value, context)?;
-                self.depth -= 1;
             }
 
             // Una referencia a medida no trae atomos propios: trae los de su expresion. Es
@@ -350,15 +341,6 @@ impl Extractor<'_> {
             }
             other => format!("{other:?}"),
         }
-    }
-}
-
-impl Atom {
-    /// La columna que define la granularidad de este atomo.
-    fn granularity_key(&self, grouping: Option<&ObjectId>) -> ObjectId {
-        self.column
-            .or_else(|| grouping.copied())
-            .unwrap_or(ObjectId(0))
     }
 }
 
