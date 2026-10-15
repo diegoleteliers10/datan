@@ -7,6 +7,7 @@
 
 use duckdb::arrow::array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
 use duckdb::{Connection, InterruptHandle};
+use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -146,6 +147,23 @@ pub fn extract_columns(batches: &[RecordBatch], names: &[(&str, ColumnKind)]) ->
     Ok(ColumnarTable { columns, row_count })
 }
 
+/// Concatena la primera columna de texto de un conjunto de batches.
+/// Sirve para volcar resultados pequenos a la terminal en probes y diagnostico. No es el
+/// camino de la app: el grid usa [`extract_columns`].
+pub fn text_of_first_column(batches: &[RecordBatch]) -> String {
+    let mut out = String::new();
+    for batch in batches {
+        let Some(array) = batch.column(0).as_any().downcast_ref::<StringArray>() else {
+            continue;
+        };
+        for value in array.iter().flatten() {
+            out.push_str(value);
+            out.push_str(", ");
+        }
+    }
+    out
+}
+
 /// Tipo esperado de una columna. Determina el downcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnKind {
@@ -194,6 +212,32 @@ impl Engine {
     pub fn execute(&self, sql: &str) -> Result<()> {
         self.conn.execute_batch(sql)?;
         Ok(())
+    }
+
+    /// Abre un motor con las extensiones precargadas desde el bundle de la app.
+    ///
+    /// Resuelve R2 de PLAN.md. La extension de Postgres son 31 MB y no se puede enlazar
+    /// desde crates.io, porque el tarball de `libduckdb-sys` es una amalgamacion de unidades
+    /// de compilacion sin `CMakeLists.txt`. La app la empaqueta y la carga de aqui.
+    ///
+    /// `extension_directory` es la **raiz**, no la carpeta de la plataforma. DuckDB le anade
+    /// `v<version>/<platform>/` por debajo. Apuntarlo a la carpeta equivocada produce una ruta
+    /// duplicada y un "not found".
+    ///
+    /// El path debe ser el directorio que el sistema operativo da al proceso, con separadores
+    /// nativos. En Windows las barras invertidas hay que escapear.
+    pub fn open_with_bundled_extensions(db_path: &str, extension_root: &Path) -> Result<Self> {
+        let engine = Self::open(db_path)?;
+        let escaped = extension_root.to_string_lossy().replace('\\', "\\\\").replace('\'', "''");
+        engine.execute("SET autoinstall_known_extensions = false")?;
+        engine.execute("SET autoinstall_extension_repository = ''")?;
+        engine.execute(&format!("SET extension_directory = '{escaped}'"))?;
+        Ok(engine)
+    }
+
+    /// Carga una extension desde el directorio precargado. No toca la red.
+    pub fn load_bundled_extension(&self, name: &str) -> Result<()> {
+        self.execute(&format!("LOAD {name}"))
     }
 
     /// Devuelve el texto de `EXPLAIN ANALYZE` para una sentencia.
@@ -278,6 +322,72 @@ mod tests {
         let result = engine.query_arrow("CREATE TABLE t (n INT)");
         assert!(matches!(result, Err(StorageError::EmptyResult)));
     }
+
+    /// El motor precargado nunca intenta descargar. Este test falla si alguien deja el
+    /// autoinstall activo, que es exactamente el bug que rompe la apuesta offline.
+    #[test]
+    fn el_motor_precargado_no_puede_descargar() {
+        let home = std::env::var("HOME").expect("HOME");
+        let root = Path::new(&home).join(".duckdb/extensions");
+        if !root.exists() {
+            // La extension no esta descargada en esta maquina. Ejecuta `probe_connectors`.
+            return;
+        }
+
+        let engine = Engine::open_with_bundled_extensions(":memory:", &root)
+            .expect("abre motor con extensiones precargadas");
+
+        // `current_setting` devuelve vacio para valores booleanos. La via correcta es
+        // `duckdb_settings()`.
+        let setting = engine
+            .query_arrow(
+                "SELECT value FROM duckdb_settings() WHERE name = 'autoinstall_known_extensions'",
+            )
+            .expect("lee el setting");
+        assert_eq!(
+            text_of_first_column(&setting).trim().trim_end_matches(',').trim(),
+            "false",
+            "autoinstall deberia estar desactivado: la app no puede descargar en el primer uso"
+        );
+
+        let directory = engine
+            .query_arrow("SELECT value FROM duckdb_settings() WHERE name = 'extension_directory'")
+            .expect("lee el directorio");
+        assert!(
+            text_of_first_column(&directory).contains(".duckdb/extensions"),
+            "extension_directory deberia apuntar al bundle"
+        );
+    }
+
+    /// La extension de Postgres se carga desde disco sin red. Este es el test que protege
+    /// la apuesta 4 del plan.
+    #[test]
+    fn postgres_carga_desde_el_bundle_sin_descargar() {
+        let home = std::env::var("HOME").expect("HOME");
+        let root = Path::new(&home).join(".duckdb/extensions");
+        if !root.exists() {
+            // La extension no esta descargada en esta maquina. Ejecuta `probe_connectors`.
+            return;
+        }
+
+        let engine = Engine::open_with_bundled_extensions(":memory:", &root)
+            .expect("abre motor con extensiones precargadas");
+        engine
+            .load_bundled_extension("postgres")
+            .expect("carga postgres desde disco");
+
+        let functions = engine
+            .query_arrow(
+                "SELECT function_name FROM duckdb_functions() \
+                 WHERE function_name LIKE 'postgres%' ORDER BY 1",
+            )
+            .expect("lista las funciones del scanner");
+        let names = text_of_first_column(&functions);
+        assert!(
+            names.contains("postgres_scan"),
+            "el scanner deberia exponer postgres_scan, encontro: {names}"
+        );
+    }
 }
 #[cfg(test)]
 mod explain_tests {
@@ -317,3 +427,5 @@ mod explain_tests {
         );
     }
 }
+
+

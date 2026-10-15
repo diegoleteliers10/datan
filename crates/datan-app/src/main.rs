@@ -35,6 +35,9 @@ struct Table {
 }
 
 impl Table {
+    /// Acceso por indice. Lo usa el test de la Fase 0 y sirve de referencia para el
+    /// `Element` custom del grid de la Fase 1.
+    #[cfg(test)]
     fn cell(&self, row: usize, col: usize) -> &SharedString {
         &self.columns[col].values[row]
     }
@@ -203,7 +206,7 @@ fn render_grid(
             let started = Instant::now();
             let rows = range.map(|row| {
                 div().flex().flex_row().children(columns.iter().enumerate().map(
-                    |(index, column)| {
+                    |(_index, column)| {
                         let cell = &column.values[row];
                         if column.numeric {
                             div().flex_1().px_3().flex().justify_end().child(cell.clone())

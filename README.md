@@ -10,6 +10,7 @@ App de escritorio multiplataforma para analisis de datos. Local first, sin servi
 | Fase | Estado |
 | --- | --- |
 | 0, el spike | Completada 14 Oct 2026. Ambas puertas pasaron. |
+| R2, conectores | Resuelto 14 Oct 2026. La extension se precarga, no se compila. |
 | 1, Postgres -> modelo -> medidas -> grid de 1M | Pendiente |
 
 El plan completo esta en [PLAN.md](PLAN.md). Las decisiones de arquitectura, los riesgos y las
@@ -23,6 +24,10 @@ cargo test -p datan-storage
 
 # pregunta que decide la arquitectura: una query o N subconsultas?
 cargo run --release -p datan-app --bin spike_day2
+
+# R2: como se llega a Postgres sin red en el primer uso
+cargo run --release -p datan-app --bin probe_connectors
+cargo run --release -p datan-app --bin probe_offline
 
 # el grid de 1M filas. Requiere pantalla.
 cargo run --release -p datan-app
@@ -52,3 +57,5 @@ PLAN.md.
    DuckDB tiene lock de escritor unico.
 4. **El motor no se importa en el hilo de UI.** La extraccion de Arrow a `ColumnarTable` ocurre
    en `datan-storage`, en el hilo de trabajo.
+5. **Las extensiones van precargadas, no descargadas.** `autoinstall_known_extensions = false`
+   y `extension_directory` apuntando al bundle. La extension de Postgres pesa 31 MB.

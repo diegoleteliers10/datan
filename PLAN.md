@@ -23,21 +23,39 @@ Estado del plan: aprobado en conversacion. Ningun codigo escrito.
 
 Estas dos verificaciones cambiaron la arquitectura. Aplicarlas antes de escribir codigo.
 
-### 2.1 El scanner de Postgres de DuckDB no se enlaza desde crates.io
+### 2.1 El scanner de Postgres de DuckDB no se enlaza desde crates.io — RESUELTO 14 Oct 2026
 
-`libduckdb-sys` 1.10506.0 expone `extensions-full = ["json", "parquet"]`. El scanner de Postgres
-no esta. `INSTALL postgres` descarga un binario firmado en el primer uso.
+**Lo que se creo:** `libduckdb-sys` de crates.io no trae `CMakeLists.txt`. Su `duckdb.tar.gz` es una
+amalgamacion de unidades de compilacion, no un arbol de fuentes de DuckDB. Su `manifest.json`
+lista exactamente tres extensiones: `core_functions`, `json`, `parquet`. No hay
+`BUILD_POSTGRES_EXTENSION` que activar, porque no hay sistema de build. `build_bundled_cc.rs`
+filtra con `extension_enabled()`, que es codigo compilado en el crate, no configuracion.
 
-Consecuencias:
+**Lo que si funciona:** `INSTALL postgres` descarga la extension firmada en el primer uso y
+`LOAD postgres` la activa. `postgres_scan`, `postgres_scan_pushdown`, `postgres_query` y
+`postgres_execute` quedan disponibles.
 
-- Falla en redes enterprise que bloquean descargas.
-- Rompe la apuesta de funcionar offline.
-- Falla en silencio detras de un proxy cautivo.
+**El problema que queda:** descarga en runtime. Falla en redes enterprise que la bloquean, y
+rompe la apuesta 4 (offline, zero-install).
 
-**Guardrail:** construir `libduckdb-sys` desde el codigo de DuckDB con `DUCKDB_EXTENSION_CONFIGS`
-incluyendo el scanner de Postgres. Build del codigo de DuckDB, por plataforma, en CI.
+**La solucion, verificada:** precargar la extension y apuntar DuckDB ahi.
 
-Es un entregable de la Fase 1. Descubrirlo en la semana 6 cuesta la rebanada vertical.
+```sql
+SET autoinstall_known_extensions = false;
+SET autoinstall_extension_repository = '';  -- desactiva cualquier descarga
+SET extension_directory = '<raiz precargada>';
+LOAD postgres;
+```
+
+`extension_directory` es la **raiz**, no la carpeta de la plataforma. DuckDB le anade
+`v<version>/<platform>/` por debajo. Apuntarlo a la carpeta equivocada produce una ruta
+duplicada y un "not found".
+
+**Decision de producto:** la app empaqueta `postgres_scanner.duckdb_extension` y lo carga
+desde su propio directorio. Coste: **31 MB por plataforma** en el instalador. A cambio, la
+apuesta 4 se sostiene entera y el primer uso no toca la red.
+
+Probes: `crates/datan-app/src/bin/probe_connectors.rs` y `probe_offline.rs`.
 
 ### 2.2 `duckdb::Connection` es `Send` pero no `Sync`
 
@@ -292,6 +310,13 @@ agrupado por region y quarter resuelve en una sola pasada. El backend SQL es via
 
 Codigo: `crates/datan-app/src/bin/spike_day2.rs`.
 
+**Dia 3, bonus: R2, los conectores.** Resultado: **RESUELTO**, con un metodo distinto al que
+el plan asumia. El tarball de `libduckdb-sys` no trae `CMakeLists.txt`, asi que compilar la
+extension desde fuente era imposible con crates.io. La via que si funciona es precargarla.
+Ver seccion 2.1. Coste: 31 MB por plataforma en el instalador.
+
+Codigo: `crates/datan-app/src/bin/probe_connectors.rs` y `probe_offline.rs`.
+
 **Correcciones que salieron del spike:**
 
 1. `uniform_list` en gpui 0.3.9 recibe `(range, &mut Window, &mut App)` y devuelve `Vec<R>`.
@@ -310,6 +335,9 @@ Codigo: `crates/datan-app/src/bin/spike_day2.rs`.
    **incorrecta**. DuckDB la optimiza a `HASH_JOIN`. El criterio correcto es si la consulta
    introduce un join extra, no el nombre del nodo. El test
    `la_forma_simple_no_introduce_joins` mide eso.
+7. `libduckdb-sys` no trae `CMakeLists.txt`. Su `duckdb.tar.gz` es una amalgamacion de
+   unidades de compilacion con un `manifest.json` de tres extensiones. La prediccion de Oracle
+   de compilar con `DUCKDB_EXTENSION_CONFIGS` era inviable desde crates.io. Ver seccion 2.1.
 
 ### Fase 1, siguiente: Postgres -> modelo -> medidas -> grid de 1M. P0
 
@@ -430,10 +458,12 @@ formulas de Power BI no tiene nada de esto. Esta apuesta depende **enteramente**
 seccion 4: un front-end de DAX que no se pueda compilar sin gpui nunca puede tener un LSP. El payoff
 esta *aguas arriba* de la UI y es la apuesta con mejor ratio valor/hora de la lista.
 
-**4. Offline total, multiplataforma, zero-install.** Un binario de 30 MB para macOS, Linux y
-Windows que nunca llama a casa. Power BI Desktop es Windows-only y ahora exige conexion a Fabric.
-Forzado por GPUI mas cargo-dist. Es una apuesta de segmento: compradores air-gapped, soberanos y
-regulados. Choca contra la apuesta 2, y por eso el plan necesita que **ambas** sean verdad.
+**4. Offline total, multiplataforma, zero-install.** Un binario para macOS, Linux y Windows que
+nunca llama a casa. Power BI Desktop es Windows-only y ahora exige conexion a Fabric. Forzado por
+GPUI mas cargo-dist, y ahora verificado: la extension de Postgres se precarga en el bundle en vez
+de descargarse en el primer uso. Coste: 31 MB por plataforma en el instalador. Es una apuesta de
+segmento: compradores air-gapped, soberanos y regulados. Choca contra la apuesta 2, y por eso el
+plan necesita que **ambas** sean verdad.
 
 **5. Analisis con presupuesto de frames bajo una query viva.** Power BI bloquea el reporte durante
 el refresh. GPUI tiene un contrato de frames duro y DuckDB corre en su propio hilo con un par
@@ -450,8 +480,9 @@ Para un producto local de escritorio eso es una diferencia sentida, no un benchm
 **R1. Split arrow ^58 / 60.** Cubierto en la seccion 2.3. Guardrail: cero dependencia directa de
 `arrow`, verificado por CI sobre `cargo metadata`.
 
-**R2. Descarga de la extension de Postgres.** Cubierto en la seccion 2.1. Guardrail: build de
-`libduckdb-sys` con `DUCKDB_EXTENSION_CONFIGS`.
+**R2. Descarga de la extension de Postgres.** Resuelto en la seccion 2.1. Guardrail: la app
+precarga `postgres_scanner.duckdb_extension` y usa `extension_directory` con
+`autoinstall_known_extensions = false`. Verificado en `probe_offline`.
 
 **R3. Threading de la conexion DuckDB.** Cubierto en la seccion 2.2. Guardrail: una conexion, un
 hilo de motor, cola serializada.
@@ -537,6 +568,8 @@ de una sola vez.
 - **R2 sale mal** (el build de DuckDB desde fuente duele en CI): volver a leer Postgres con el
   crate `postgres` y hacer `COPY` a DuckDB. Eso mata la apuesta 2 (pushdown) y cambia el modelo de
   refresh. Decide en la semana 1 de la Fase 1.
+  **Estado: no aplica.** R2 se resolvio por precarga, no por build. Ver seccion 2.1. El fallback
+  sigue vivo si el tamano de 31 MB por plataforma resulta inaceptable para el producto.
 - **El fast path SQL cubre menos del 70%** de las medidas reales en la suite de conformidad al
   final de la Fase 2: el backend SQL no se esta ganando su lugar y deberia borrarse para quedarse
   nativo. El Measure IR se queda igual, y por eso construirlo primero es el orden correcto.
