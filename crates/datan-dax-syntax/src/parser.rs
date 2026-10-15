@@ -504,7 +504,7 @@ mod tests {
     fn parsea_precedencia_de_operadores() {
         // `*` liga mas fuerte que `+`: `1 + 2 * 3` es `1 + (2 * 3)`.
         let expr = parse("1 + 2 * 3");
-        let Expr::Binary { op, left, right, .. } = expr else {
+        let Expr::Binary { op, right, .. } = expr else {
             panic!("se esperaba un binario")
         };
         assert_eq!(op, BinaryOp::Add);

@@ -268,12 +268,20 @@ fn owner_of(model: &Model, column: ObjectId) -> ObjectId {
         .unwrap_or(ObjectId(0))
 }
 
+/// La tabla principal de la consulta.
+///
+/// `COUNTROWS` y las agregaciones sobre tabla no tienen columna: su tabla viene en el atomo.
+/// Sin esta rama, `COUNTROWS('Fact Sales')` no baja a SQL y el caso queda sin fast path.
 fn first_fact_table(model: &Model, atoms: &AtomSet) -> Option<ObjectId> {
     atoms
         .atoms
         .iter()
-        .filter_map(|atom| atom.column)
-        .find_map(|column| model.column(column).map(|(table, _)| table.id))
+        .filter_map(|atom| {
+            atom.column
+                .and_then(|column| model.column(column).map(|(table, _)| table.id))
+                .or(atom.table)
+        })
+        .next()
 }
 
 fn lower_atom(
@@ -282,6 +290,11 @@ fn lower_atom(
     aliases: &Aliases,
     atom: &Atom,
 ) -> Result<String, LowerError> {
+    // `COUNTROWS(tabla)` no tiene columna: es `COUNT(*)` sobre el FROM.
+    if atom.kind == AtomKind::CountRows {
+        return Ok("COUNT(*)".to_string());
+    }
+
     let column_id = atom.column.ok_or_else(|| {
         LowerError::Unsupported(format!(
             "el atomo `{}` agrega sobre una expresion, no sobre una columna",
@@ -298,6 +311,7 @@ fn lower_atom(
     let function = match atom.kind {
         AtomKind::Sum => "SUM",
         AtomKind::Count => "COUNT",
+        // `CountRows` se resuelve antes: no lleva columna.
         AtomKind::CountRows => "COUNT(*)",
         AtomKind::Min => "MIN",
         AtomKind::Max => "MAX",

@@ -142,7 +142,7 @@ fn una_columna_debe_calificarse_si_existe_en_varias_tablas() {
     );
 
     // Calificada funciona.
-    check("[Dim Product].[Region]", &model);
+    check("'Dim Product'[Region]", &model).expect("calificada chequea");
     let checked = check("'Dim Product'[Region]", &model).expect("calificada chequea");
     let CheckedExpr::Column { column, .. } = checked.expr else {
         panic!("se esperaba columna")

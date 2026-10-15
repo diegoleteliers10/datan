@@ -34,15 +34,6 @@ struct Table {
     row_count: usize,
 }
 
-impl Table {
-    /// Acceso por indice. Lo usa el test de la Fase 0 y sirve de referencia para el
-    /// `Element` custom del grid de la Fase 1.
-    #[cfg(test)]
-    fn cell(&self, row: usize, col: usize) -> &SharedString {
-        &self.columns[col].values[row]
-    }
-}
-
 enum State {
     Loading,
     Ready(Table),

@@ -28,11 +28,16 @@
 
 mod atom;
 mod filter;
+mod interp;
 mod modifiers;
 
 pub use atom::{Atom, AtomKind, AtomSet, Granularity};
 pub use filter::{
     ColumnInfo, Filter, FilterContext, FilterOperator, FilterSource, FilterValue,
+};
+pub use interp::{
+    CellResult, ColumnView, DataSource, IntColumn, InterpError, Interpreter, MemorySource, Scalar,
+    TextColumn,
 };
 pub use modifiers::{Modifier, ModifierError, apply_modifiers};
 

@@ -50,6 +50,9 @@ pub struct Atom {
     pub kind: AtomKind,
     /// Columna agregada, si la hay.
     pub column: Option<ObjectId>,
+    /// Tabla agregada. Solo la usan `COUNTROWS` y las agregaciones sobre tabla, que no
+    /// tienen columna.
+    pub table: Option<ObjectId>,
     /// Expresion agregada, para los iteradores. Es el AST resuelto.
     pub expression: Option<CheckedExpr>,
     /// El conjunto de filtros bajo el que se evalua. Ya propagado y resuelto.
@@ -292,9 +295,11 @@ impl Extractor<'_> {
         context: &FilterContext,
         function: &str,
     ) -> Result<(), crate::EvalError> {
-        let (column, expression) = match argument {
-            CheckedExpr::Column { column, .. } => (Some(*column), None),
-            other => (None, Some(other.clone())),
+        let (column, table, expression) = match argument {
+            CheckedExpr::Column { column, .. } => (Some(*column), None, None),
+            // `COUNTROWS('Fact Sales')` recibe una tabla, no una columna.
+            CheckedExpr::Table { table, .. } => (None, Some(*table), None),
+            other => (None, None, Some(other.clone())),
         };
 
         // La granularidad de un atomo NO depende de que su columna este en el GROUP BY.
@@ -319,6 +324,7 @@ impl Extractor<'_> {
         self.atoms.push(Atom {
             kind,
             column,
+            table,
             expression,
             context: context.propagate(self.model),
             granularity,

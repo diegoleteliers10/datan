@@ -1,0 +1,17 @@
+[package]
+name = "datan-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Suite de conformidad DAX y runner diferencial. Dev-only."
+
+[dependencies]
+datan-dax-eval = { path = "../datan-dax-eval" }
+datan-dax-sql = { path = "../datan-dax-sql" }
+datan-model = { path = "../datan-model" }
+datan-storage = { path = "../datan-storage" }
+thiserror.workspace = true
+
+[dev-dependencies]
+datan-dax-eval = { path = "../datan-dax-eval" }

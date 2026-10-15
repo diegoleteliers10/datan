@@ -27,7 +27,9 @@ const DATE: ObjectId = ObjectId(4);
 const FACT_PRODUCT_ID: ObjectId = ObjectId(13);
 const FACT_QTY: ObjectId = ObjectId(11);
 const PRODUCT_REGION: ObjectId = ObjectId(23);
+#[allow(dead_code)]
 const PRODUCT_PRICE: ObjectId = ObjectId(24);
+#[allow(dead_code)]
 const CUSTOMER_REGION: ObjectId = ObjectId(32);
 const DATE_YEAR: ObjectId = ObjectId(41);
 
@@ -332,7 +334,7 @@ fn un_calculate_con_modificadores_fuerza_el_interprete() {
     )
     .expect("extrae");
 
-    for a in &atoms.atoms {
+    for _a in &atoms.atoms {
     }
     assert!(
         atoms.needs_interpreter(),

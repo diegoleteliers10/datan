@@ -280,7 +280,35 @@ impl Engine {
         out
     }
 
-    /// Genera el handle que permite cancelar la consulta en curso desde otro hilo.
+    /// Lee el primer valor de la primera fila de una consulta, como texto.
+///
+/// Es para diagnostico y comparacion. La app usa [`Engine::query_arrow`] y
+/// [`extract_columns`], que dan la forma columnar que el grid necesita.
+pub fn scalar(&self, sql: &str, column: usize) -> Result<Option<String>> {
+    // Un filtro que no deja filas devuelve cero filas, y eso NO es un error: es un
+    // resultado valido. `query_arrow` lo marca como `EmptyResult`, asi que aqui se
+    // distingue "sin filas" de "la consulta fallo".
+    let batches = match self.query_arrow(sql) {
+        Ok(batches) => batches,
+        Err(StorageError::EmptyResult) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(batch) = batches.first() else {
+        return Ok(None);
+    };
+    if column >= batch.num_columns() {
+        return Ok(None);
+    }
+    let array = batch.column(column);
+    let Some(array) = array.as_any().downcast_ref::<StringArray>() else {
+        // Un valor numerico llega aqui cuando el harness compara un `SUM` de enteros.
+        // Se castea a texto en la consulta, pero si no, se devuelve el tipo.
+        return Ok(Some(format!("{:?}", array.data_type())));
+    };
+    Ok(array.iter().next().flatten().map(|value| value.to_string()))
+}
+
+/// Genera el handle que permite cancelar la consulta en curso desde otro hilo.
     ///
     /// Es lo que hace que el usuario pueda seguir filtrando y editando mientras una query
     /// corre. Apuesta 5 de PLAN.md.
