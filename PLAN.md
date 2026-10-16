@@ -382,6 +382,21 @@ nodo hash aggregate y ningun `DELIM_JOIN`.
 
 Ademas arrancar el grid custom el dia 1 de esta fase, no en la Fase 5. Ver R7.
 
+**Informe, hecho antes del grid.** `datan-report` construye la matriz sin GPU, para que la
+logica del producto sea testeable: dimensiones, medidas, filtros, y el cross-filter que
+cambia el filtro de todas las medidas a la vez.
+
+Las medidas se agrupan por conjunto de atomos y cada grupo es UNA consulta. Con dos medidas
+que comparten hojas, el informe cuesta una consulta y no dos. Las filas de consultas
+distintas se pegan por las columnas de dimension, no por posicion: es seguro porque todas
+las medidas se evaluan bajo el mismo filtro y el mismo agrupamiento, y el `ORDER BY` del
+lowering las ordena igual. Sin el `ORDER BY` seria suposicion, porque DuckDB devuelve los
+grupos en el orden de su hash y dos consultas pueden diferir.
+
+Hay un test que mira el TOTAL de cada columna de la matriz, no celdas sueltas. Si `Margin` se
+pegara en la columna de `Qty`, la suma de la columna de `Margin` seria la de `Qty` y no se
+notaria mirando una celda.
+
 **Test de semana 1, ejecutado: PASA.** Sobre 1.000.000 de lineas, `1 HASH_GROUP_BY`, `0
 DELIM_JOIN`, p50 1 ms, p95 4 ms. El conjunto fijo de medidas SI colapsa en una pasada, y el
 presupuesto de 300 ms no esta en riesgo.

@@ -236,7 +236,12 @@ pub fn lower(
         }
     }
 
-    let where_clause = lower_filters(model, sources, &aliases, &atoms.grouping, filters)?;
+    // El `WHERE` necesita un salto detras: pegado al `JOIN` produce `t1."id"WHERE`, que
+    // DuckDB acepta como un identificador raro y falla con un error que no senala el sitio.
+    let where_clause = match lower_filters(model, sources, &aliases, &atoms.grouping, filters)? {
+        empty if empty.is_empty() => String::new(),
+        clause => format!("\n{clause}"),
+    };
 
     // El `GROUP BY` repite el nombre de la columna, NO el alias. DuckDB rechaza un alias
     // dentro del `GROUP BY`: "aliases cannot be used as part of an expression in the GROUP
@@ -642,7 +647,7 @@ fn lower_filter(
             Ok(format!(
                 "{target} IN (SELECT {} FROM {}{})",
                 quote_identifier(&origin_physical),
-                quote_identifier(&table_physical),
+                quote_qualified(&table_physical),
                 inner_where
             ))
         }

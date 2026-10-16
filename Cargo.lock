@@ -1598,6 +1598,7 @@ dependencies = [
  "datan-dax-eval",
  "datan-dax-sql",
  "datan-model",
+ "datan-report",
  "datan-storage",
  "gpui-kit",
 ]
@@ -1653,6 +1654,18 @@ dependencies = [
 name = "datan-model"
 version = "0.1.0"
 dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "datan-report"
+version = "0.1.0"
+dependencies = [
+ "datan-dax-eval",
+ "datan-dax-sql",
+ "datan-model",
+ "datan-storage",
+ "datan-testkit",
  "thiserror 2.0.21",
 ]
 

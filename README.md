@@ -17,7 +17,7 @@ App de escritorio multiplataforma para analisis de datos. Local first, sin servi
 | 2, CALCULATE y modifiers | Completa. `ALL`, `ALLEXCEPT`, `KEEPFILTERS`, `CROSSFILTER`, `USERELATIONSHIP`. |
 | 3, ciclos y time intelligence | Completa. `DATEADD`, `DATESYTD`, `PARALLELPERIOD`, `PREVIOUSYEAR`. |
 | 1, aritmetica entre medidas | Completa. `Margin` baja a SQL con `NULLIF`. |
-| 1, Postgres -> modelo -> medidas -> grid de 1M | El motor y la conexion funcionan. Falta pintar el grid. |
+| 1, Postgres -> modelo -> medidas -> grid de 1M | El motor, la conexion y el informe funcionan. Falta pintar el grid. |
 | 4, import de PBIP / TMDL | Pendiente. Reservar Windows + humano en la semana 1. |
 
 El plan completo esta en [PLAN.md](PLAN.md). Las decisiones de arquitectura, los riesgos y las
@@ -34,6 +34,9 @@ cargo run --release -p datan-testkit --bin conformance
 
 # el lowering produce la misma query que el spike, verificado por EXCEPT
 cargo run --release -p datan-app --bin verify_pipeline
+
+# un informe de punta a punta contra Postgres, con cross-filter
+cargo run --release -p datan-app --bin informe_postgres
 
 # pregunta que decide la arquitectura: una query o N subconsultas?
 cargo run --release -p datan-app --bin spike_day2
@@ -57,6 +60,7 @@ cargo run --release -p datan-app
 | `datan-dax-eval` | Algebra de filtros, modificadores, atomos, interprete por celda. |
 | `datan-dax-sql` | Bajo de un `AtomSet` a una unica query de DuckDB. |
 | `datan-connect` | De una base conectada a un modelo. DuckDB lee datos, Postgres lee el catalogo. |
+| `datan-report` | Un informe: dimensiones, medidas, filtros y la consulta que lo llena. Sin gpui. |
 | `datan-testkit` | Suite de conformidad diferencial entre los dos caminos. |
 | `datan-app` | Binario thin. Todo gpui vive aqui por ahora. |
 
