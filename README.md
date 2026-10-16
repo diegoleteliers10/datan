@@ -17,7 +17,7 @@ App de escritorio multiplataforma para analisis de datos. Local first, sin servi
 | 2, CALCULATE y modifiers | Completa. `ALL`, `ALLEXCEPT`, `KEEPFILTERS`, `CROSSFILTER`, `USERELATIONSHIP`. |
 | 3, ciclos y time intelligence | Completa. `DATEADD`, `DATESYTD`, `PARALLELPERIOD`, `PREVIOUSYEAR`. |
 | 1, aritmetica entre medidas | Completa. `Margin` baja a SQL con `NULLIF`. |
-| 1, Postgres -> modelo -> medidas -> grid de 1M | La app abre, conecta, elige y cruza datos. Falta pulir la ventana de conexion. |
+| 1, Postgres -> modelo -> medidas -> grid de 1M | La app abre, elige conexion, muestra el informe, cruza datos, guarda y exporta CSV. |
 | 4, import de PBIP / TMDL | Pendiente. Reservar Windows + humano en la semana 1. |
 
 El plan completo esta en [PLAN.md](PLAN.md). Las decisiones de arquitectura, los riesgos y las
@@ -37,6 +37,9 @@ cargo run --release -p datan-app --bin verify_pipeline
 
 # un informe de punta a punta contra Postgres, con cross-filter
 cargo run --release -p datan-app --bin informe_postgres
+
+# tests de exportacion a CSV y de informes guardados
+cargo test -p datan-report
 
 # pregunta que decide la arquitectura: una query o N subconsultas?
 cargo run --release -p datan-app --bin spike_day2

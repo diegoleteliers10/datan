@@ -155,6 +155,57 @@ impl Datan {
         list.into_any_element()
     }
 
+    /// Guarda el informe actual. Sin nombre de archivo elegido a mano: el informe se llama
+    /// por la conexion y la primera dimension, que es lo que lo distingue. Un dialogo de
+    /// nombre no se puede verificar sin pantalla.
+    fn save_report(&mut self, cx: &mut Context<Self>) {
+        let Some(report) = self.report.clone() else {
+            return;
+        };
+        let Some(matrix) = self.matrix.clone() else {
+            return;
+        };
+
+        let name = report
+            .model
+            .column(*report.dimensions.first().unwrap_or(&ObjectId(0)))
+            .map(|(_, c)| c.name.clone())
+            .unwrap_or_else(|| "informe".to_string());
+        let label = format!("{name} ({} filas)", matrix.row_count());
+
+        match datan_report::saved::save(&report, &name) {
+            Ok(()) => {
+                self.stats = Some(format!("guardado como `{label}`"));
+                cx.notify();
+            }
+            Err(error) => {
+                self.stats = Some(format!("no se pudo guardar: {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Exporta la matriz a CSV junto a la carpeta del usuario.
+    fn export_csv(&mut self, cx: &mut Context<Self>) {
+        let Some(matrix) = self.matrix.clone() else {
+            return;
+        };
+        let path = std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(home).join("Desktop").join("datan.csv"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("datan.csv"));
+
+        match datan_report::export::write_csv(&matrix, &path) {
+            Ok(()) => {
+                self.stats = Some(format!("exportado a {}", path.display()));
+                cx.notify();
+            }
+            Err(error) => {
+                self.stats = Some(format!("no se pudo exportar: {error}"));
+                cx.notify();
+            }
+        }
+    }
+
     /// Conecta y monta el modelo. Todo en el hilo de fondo.
     fn connect(&mut self, database: &str, cx: &mut Context<Self>) {
         self.state = State::Connecting;
@@ -690,6 +741,12 @@ impl Datan {
             filter_bar = filter_bar.child(clear_button(&theme, cx));
         }
 
+        // Guardar y exportar. Van aqui y no en un menu porque son las dos acciones que
+        // existen sobre un informe, y un menu que no se abre no ensena sus opciones.
+        filter_bar = filter_bar.child(div().flex_1());
+        filter_bar = filter_bar.child(save_button(&theme, cx));
+        filter_bar = filter_bar.child(export_button(&theme, cx));
+
         // --- El grid ---
         let body: AnyElement = if self.grid.is_some() {
             self.render_grid(cx).into_any_element()
@@ -869,6 +926,18 @@ impl Datan {
             .child(body)
             .into_any_element()
     }
+}
+
+fn save_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+    clickable(theme, "Guardar".to_string(), cx.listener(
+        |view, _event, _window, cx| view.save_report(cx),
+    ))
+}
+
+fn export_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+    clickable(theme, "CSV".to_string(), cx.listener(
+        |view, _event, _window, cx| view.export_csv(cx),
+    ))
 }
 
 /// Un `Div` con estilo de hover.

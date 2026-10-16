@@ -11,7 +11,9 @@ datan-dax-eval = { path = "../datan-dax-eval" }
 datan-dax-sql = { path = "../datan-dax-sql" }
 datan-model = { path = "../datan-model" }
 datan-storage = { path = "../datan-storage" }
+serde = { version = "1", features = ["derive"] }
 thiserror.workspace = true
+toml = "0.9"
 
 [dev-dependencies]
 datan-testkit = { path = "../datan-testkit" }

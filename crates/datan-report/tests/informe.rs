@@ -212,3 +212,82 @@ fn una_medida_que_cae_al_interprete_sin_origen_falla_en_vez_de_dar_blanco() {
     assert!(report.execute(&engine().expect("motor"), None).is_ok());
     let _ = calculate;
 }
+#[test]
+fn un_informe_guardado_vuelve_a_dar_los_mismos_numeros() {
+    // El viaje completo: guardar la definicion, abrirla contra el modelo, ejecutarla y
+    // comparar. Los ids de columnas y medidas son internos y cambian entre ejecuciones, asi
+    // que lo que viaja son los NOMBRES y al abrir se resuelven contra el modelo.
+    //
+    // Si se guardaran ids, el informe se abriria sin error y con la matriz vacia: el fallo
+    // mas caro de esta pieza, porque parece un informe sin datos y no un informe roto.
+    let model = model();
+    let report = datan_report::Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), measure("Amount")]);
+    let engine = engine().expect("motor");
+
+    let antes = report.execute(&engine, None).expect("corre");
+
+    datan_report::saved::save(&report, "informe de prueba").expect("guarda");
+
+    // Se abre contra el mismo modelo, que es lo que pasa al reabrir la app.
+    let reabierto = datan_report::saved::open("informe de prueba", &model).expect("abre");
+    assert_eq!(reabierto.dimensions, vec![ObjectId(21)]);
+    assert_eq!(reabierto.measures.len(), 2);
+
+    let despues = reabierto.execute(&engine, None).expect("corre");
+    assert_eq!(antes.rows, despues.rows, "los numeros no cambian al reabrir");
+
+    let _ = std::fs::remove_file(
+        datan_report::saved::folder()
+            .join("informe de prueba.toml"),
+    );
+}
+
+#[test]
+fn los_filtros_se_guardan_y_se_vuelven_a_aplicar() {
+    // Sin los filtros, un informe guardado abriria con todos los datos y el usuario
+    // pensaria que el informe cambio de numero.
+    let model = model();
+    let report = datan_report::Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")])
+        .filtered_by(ObjectId(21), FilterValue::Text("Norte".to_string()));
+    let engine = engine().expect("motor");
+
+    datan_report::saved::save(&report, "informe filtrado").expect("guarda");
+    let reabierto = datan_report::saved::open("informe filtrado", &model).expect("abre");
+    let matrix = reabierto.execute(&engine, None).expect("corre");
+
+    assert_eq!(matrix.row_count(), 1, "solo la fila filtrada");
+    assert_eq!(matrix.cell(0, 0), Some("Norte"));
+
+    let _ = std::fs::remove_file(
+        datan_report::saved::folder()
+            .join("informe filtrado.toml"),
+    );
+}
+
+#[test]
+fn los_nombres_de_medidas_guardadas_resuelven_contra_el_modelo() {
+    // Guardar los NOMBRES y no los ids es la razon de que este viaje funcione. Un id
+    // interno cambia entre ejecuciones; un nombre no.
+    let model = model();
+    let report = datan_report::Report::new(model.clone())
+        .with_measures(vec![measure("Qty")]);
+
+    datan_report::saved::save(&report, "informe de nombres").expect("guarda");
+    let reabierto = datan_report::saved::open("informe de nombres", &model).expect("abre");
+
+    let nombres: Vec<&str> = reabierto
+        .measures
+        .iter()
+        .filter_map(|id| reabierto.measure_name(*id))
+        .collect();
+    assert_eq!(nombres, vec!["Qty"]);
+
+    let _ = std::fs::remove_file(
+        datan_report::saved::folder()
+            .join("informe de nombres.toml"),
+    );
+}

@@ -1670,7 +1670,9 @@ dependencies = [
  "datan-model",
  "datan-storage",
  "datan-testkit",
+ "serde",
  "thiserror 2.0.21",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
@@ -1689,6 +1691,7 @@ dependencies = [
  "datan-dax-eval",
  "datan-dax-sql",
  "datan-model",
+ "datan-report",
  "datan-storage",
  "thiserror 2.0.21",
 ]

@@ -436,6 +436,31 @@ con "UnsupportedType", no al compilar. Va dentro de una tabla.
 Y la app arranca en la pantalla de conexion. No intenta conectar sola: una app que abre una base
 sin preguntar es una app que escribe en la base equivocada.
 
+#### Guardar el informe, y exportarlo
+
+Un informe guardado lleva la DEFINICION, no el resultado. Dimensiones, medidas, filtros y
+conexion, en `~/.datan/reports/`. Al abrir se vuelve a correr contra la base.
+
+Guardar el resultado en vez de la definicion produceria un archivo que se ve bien y miente: el
+informe de ayer con los numeros de ayer, presentados como si fueran de hoy. Es el fallo que un
+producto de datos no puede tener.
+
+Los ids de columnas y medidas son internos del modelo y cambian entre ejecuciones. Lo que viaja
+son los NOMBRES, y al abrir se resuelven contra el modelo de esa conexion. Guardar ids daria un
+informe que se abre sin error y con la matriz vacia: el fallo mas caro de esta pieza, porque
+parece un informe sin datos y no un informe roto.
+
+El nombre del informe ES el nombre del archivo, y se rechaza si trae `/`, `..` o empieza por punto.
+Es la unica barrera entre un nombre de informe y una ruta fuera de la carpeta.
+
+El CSV es el escape de RFC 4180, y el escape es la parte que falla: un valor de dimension es
+texto libre, y `Producto, 1` con una coma parte la fila en dos. Lo grave es que el informe
+seguiria SUMANDO bien y mostrando filas mal: los totales correctos con filas rotas, que es lo
+peor de los dos mundos.
+
+Guardar y exportar viven en la barra de filtros y no en un menu, porque son las dos acciones que
+existen sobre un informe, y un menu que no se abre no ensena sus opciones.
+
 **Test de semana 1, ejecutado: PASA.** Sobre 1.000.000 de lineas, `1 HASH_GROUP_BY`, `0
 DELIM_JOIN`, p50 1 ms, p95 4 ms. El conjunto fijo de medidas SI colapsa en una pasada, y el
 presupuesto de 300 ms no esta en riesgo.
