@@ -17,7 +17,7 @@ App de escritorio multiplataforma para analisis de datos. Local first, sin servi
 | 2, CALCULATE y modifiers | Completa. `ALL`, `ALLEXCEPT`, `KEEPFILTERS`, `CROSSFILTER`, `USERELATIONSHIP`. |
 | 3, ciclos y time intelligence | Completa. `DATEADD`, `DATESYTD`, `PARALLELPERIOD`, `PREVIOUSYEAR`. |
 | 1, aritmetica entre medidas | Completa. `Margin` baja a SQL con `NULLIF`. |
-| 1, Postgres -> modelo -> medidas -> grid de 1M | El motor, la conexion y el informe funcionan. Falta pintar el grid. |
+| 1, Postgres -> modelo -> medidas -> grid de 1M | La app abre, conecta, elige y cruza datos. Falta pulir la ventana de conexion. |
 | 4, import de PBIP / TMDL | Pendiente. Reservar Windows + humano en la semana 1. |
 
 El plan completo esta en [PLAN.md](PLAN.md). Las decisiones de arquitectura, los riesgos y las
@@ -45,7 +45,8 @@ cargo run --release -p datan-app --bin spike_day2
 cargo run --release -p datan-app --bin probe_connectors
 cargo run --release -p datan-app --bin probe_offline
 
-# el grid de 1M filas. Requiere pantalla.
+# la app. Requiere pantalla: conectar, elegir dimensiones y medidas, pinchar celdas.
+# Por defecto lee la base `datan_bench`; se cambia con DATABASE=mi_base
 cargo run --release -p datan-app
 ```
 

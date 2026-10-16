@@ -1,343 +1,816 @@
-//! Spike de la Fase 0. Ver seccion 6, Fase 0 de PLAN.md.
+//! La app. Conectar a Postgres, elegir dimensiones y medidas, y ver el informe.
 //!
-//! Objetivo: validar antes de escribir una linea de motor DAX que
+//! # El reparto entre hilos
 //!
-//! 1. Un resultado de 1M x 9 cruza la frontera hacia el hilo de UI como `Send + Sync`.
-//! 2. El hilo de UI no contiene ningun tipo de `duckdb` ni de `arrow`.
-//! 3. El scroll mantiene 16 ms con la tabla entera residente en memoria.
-//! 4. `cargo tree -d | grep arrow` imprime exactamente una version de arrow.
+//! Todo el trabajo pesado ocurre en `background_spawn`: conectar, leer el catalogo, construir
+//! el modelo y correr las consultas. Al hilo de UI solo llega la matriz ya calculada, como
+//! cadenas.
 //!
-//! Sobre el punto 2: la extraccion de Arrow a `ColumnarTable` ocurre en `datan-storage`,
-//! en el hilo de trabajo. Este archivo no importa `duckdb`. Ese es el protocolo completo del
-//! contrato motor/UI de la seccion 9 de PLAN.md.
+//! `Engine` es `Send` pero no `Sync`, y `Model` es dato plano. La conexion vive en la tarea de
+//! fondo y no se comparte: cada ejecucion abre la suya contra la base adjunta en memoria.
+//!
+//! # Por que `uniform_list` y no el componente `Table` de gpui-kit
+//!
+//! `uniform_list` es lo que la Fase 0 midio a 23 microsegundos por frame con un millón de
+//! filas. El componente `Table` trae su propia virtualizacion, que no se ha medido aqui, y
+//! meterlo seria cambiar la pieza validada por otra sin numero que la compare. gpui-kit se
+//! usa para el tema y los controles, que es donde aporta.
 
-use datan_storage::{ColumnData, ColumnKind};
-use gpui_kit::component::ActiveTheme;
-use gpui_kit::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Columna formateada, lista para pintar. Se construye en el hilo de trabajo.
-///
-/// Cada valor es un `SharedString`, que es un string compartido por referencia y no una
-/// asignacion por celda. Para columnas repetidas el coste real es el numero de valores
-/// distintos, no el de filas.
+use datan_connect::{PostgresCatalog, Source, introspect};
+use datan_model::{DataType, Model, ObjectId, TableKind};
+use datan_report::{Header, Matrix, Report};
+use datan_storage::Engine;
+
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::*;
+// `Div::on_click` vive en este trait y `gpui-kit` reexporta `gpui::*`, asi que entra aqui.
+use gpui_kit::component::Theme;
+// `gpui-kit` es una fachada sobre gpui: reexporta sus tipos pero no sus traits de
+// interactividad, que son los que traen `on_click`, `when` y los estilos de hover.
+// El crate se llama `gpui-pre` pero su libreria se llama `gpui`. Por eso el alias.
+use ::gpui::InteractiveElement;
+use gpui_kit::component::scroll::ScrollableElement;
+
+/// El campo de texto de la conexion.
+#[derive(Clone)]
+struct Connection {
+    database: SharedString,
+}
+
+/// Que se eligio del modelo.
+#[derive(Clone)]
+struct Selection {
+    dimensions: Vec<ObjectId>,
+    measures: Vec<ObjectId>,
+}
+
+/// Un filtro activo, para poder quitarlo con un clic.
+#[derive(Clone)]
+struct ActiveFilter {
+    column: ObjectId,
+    label: SharedString,
+    value: SharedString,
+}
+
+/// La fila lista para pintar. `SharedString` es un string compartido por referencia: una
+/// columna con 500 valores repetidos cuesta 500 asignaciones, no 500 por celda.
+#[derive(Clone)]
 struct Column {
     header: SharedString,
     values: Arc<[SharedString]>,
     numeric: bool,
 }
 
-struct Table {
+#[derive(Clone)]
+struct Grid {
     columns: Arc<[Column]>,
     row_count: usize,
 }
 
 enum State {
-    Loading,
-    Ready(Table),
+    Connecting,
+    Choosing,
+    Ready,
     Failed(String),
 }
 
-struct Spike {
+/// La vista.
+struct Datan {
+    connection: Connection,
     state: State,
+    selection: Selection,
+    /// El informe actual, con sus filtros. Es la fuente de verdad del cross-filter.
+    report: Option<Report>,
+    filters: Vec<ActiveFilter>,
+    /// La matriz, para el cross-filter.
+    ///
+    /// El grid de pintarla es una COPIA con `SharedString`. La matriz se queda porque pinchar
+    /// una celda necesita saber que valor hay en esa posicion, y releerla del grid
+    /// obligaria a desreferenciar los `Arc` en el manejador del clic.
+    matrix: Option<Matrix>,
+    grid: Option<Grid>,
+    /// Cuantas consultas costo el ultimo informe, y cuantos ms.
+    stats: Option<String>,
+    database: Option<String>,
     scroll: UniformListScrollHandle,
-    /// Cuanto falta para el siguiente paso de auto-scroll.
-    scroll_tick: usize,
 }
 
-impl Spike {
-    fn new(cx: &mut Context<Self>) -> Self {
+impl Datan {
+    fn new(_cx: &mut Context<Self>) -> Self {
+        let database = std::env::var("DATABASE").unwrap_or_else(|_| "datan_bench".to_string());
+
+        Self {
+            connection: Connection {
+                database: SharedString::from(database.clone()),
+            },
+            state: State::Connecting,
+            selection: Selection {
+                dimensions: Vec::new(),
+                measures: Vec::new(),
+            },
+            report: None,
+            filters: Vec::new(),
+            matrix: None,
+            grid: None,
+            stats: None,
+            database: Some(database),
+            scroll: UniformListScrollHandle::default(),
+        }
+    }
+
+    /// Conecta y monta el modelo. Todo en el hilo de fondo.
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        let database = self.connection.database.to_string();
+        self.state = State::Connecting;
+
         cx.spawn(async move |this, cx| {
-            // `ColumnarTable` es dato plano sin tipos de GPUI ni de arrow, asi que es
-            // `Send`. Todo el trabajo pesado ocurre en el executor de background.
             let built = cx
-                .background_spawn(async move { build_table() })
+                .background_spawn(async move { build_model(&database) })
                 .await;
 
             _ = this.update(cx, |view, cx| {
-                view.state = match built {
-                    Ok(table) => State::Ready(table),
-                    Err(error) => State::Failed(error),
-                };
+                match built {
+                    Ok((model, report)) => {
+                        view.selection = suggested(&model);
+                        view.report = Some(report);
+                        view.state = State::Choosing;
+                    }
+                    Err(error) => view.state = State::Failed(error),
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
 
-        cx.spawn(async move |this, cx| {
-            // Un timer de 16 ms fuerza un repintado por frame. MacOS bloquea la inyeccion de
-            // eventos del sistema, asi que el spike genera su propio scroll.
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
-                    .await;
-                _ = this.update(cx, |view, cx| view.tick(cx));
+    /// Cambia una dimension o medida de la seleccion y vuelve a correr el informe.
+    fn toggle(&mut self, column: ObjectId, is_measure: bool, cx: &mut Context<Self>) {
+        if is_measure {
+            if let Some(index) = self.selection.measures.iter().position(|id| *id == column)
+            {
+                self.selection.measures.remove(index);
+            } else {
+                self.selection.measures.push(column);
             }
+        } else if let Some(index) =
+            self.selection.dimensions.iter().position(|id| *id == column)
+        {
+            self.selection.dimensions.remove(index);
+        } else {
+            self.selection.dimensions.push(column);
+        }
+        self.refresh(cx);
+    }
+
+    /// Recorre el informe con la seleccion actual.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self.report.clone() else {
+            return;
+        };
+        let mut report = base
+            .with_dimensions(self.selection.dimensions.clone())
+            .with_measures(self.selection.measures.clone());
+        // Los filtros activos se vuelven a aplicar en orden. Vienen del cross-filter, y el
+        // informe base es el que tiene el filtro de la ULTIMA pulsacion: reconstruir desde
+        // cero con la lista de filtros hace que quitar uno no deshaga los de despues.
+        for filter in &self.filters {
+            if let Some(definition) = report.model.column(filter.column) {
+                let value = match definition.1.data_type {
+                    DataType::Integer | DataType::Moneda | DataType::Decimal => {
+                        datan_dax_eval::FilterValue::Integer(filter.value.parse().unwrap_or(0))
+                    }
+                    _ => datan_dax_eval::FilterValue::Text(filter.value.to_string()),
+                };
+                report = report.filtered_by(filter.column, value);
+            }
+        }
+
+        let database = self
+            .database
+            .clone()
+            .unwrap_or_else(|| "datan_bench".to_string());
+        cx.spawn(async move |this, cx| {
+            let built = cx
+                .background_spawn(async move { run_report(report, database) })
+                .await;
+            _ = this.update(cx, |view, cx| {
+                match built {
+                    Ok((matrix, stats)) => {
+                        // Volver arriba tras filtrar. Sin esto, el usuario pincha una fila
+                        // del medio, el resultado baja a tres filas, y se queda mirando la
+                        // posicion 400 de una lista de tres: el grid parece vacio.
+                        view.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                        view.grid = Some(build_grid(&matrix));
+                        view.matrix = Some(matrix);
+                        view.stats = Some(stats);
+                        view.state = State::Ready;
+                    }
+                    Err(error) => view.state = State::Failed(error),
+                }
+                cx.notify();
+            });
         })
         .detach();
+    }
 
-        Self {
-            state: State::Loading,
-            scroll: UniformListScrollHandle::default(),
-            scroll_tick: 0,
+    /// Cross-filter: pinchar una celda de una dimension.
+    fn drill(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
+        let Some(report) = self.report.clone() else {
+            return;
+        };
+        let Some(matrix) = self.matrix() else {
+            return;
+        };
+        let Some(header) = matrix.header(column).cloned() else {
+            return;
+        };
+        if !header.is_dimension() {
+            // Una medida no se puede filtrar. Se avisa en vez de no hacer nada: un clic que
+            // no hace nada parece una app rota.
+            self.stats = Some("una medida no se puede usar como filtro".to_string());
+            cx.notify();
+            return;
+        }
+        let Some(value) = matrix.cell(row, column).map(str::to_string) else {
+            return;
+        };
+
+        // Quitar el filtro anterior de esa columna antes de poner el nuevo. Pinchar dos
+        // veces la misma columna debe CAMBIAR el valor, no acumular dos filtros que se
+        // intersectan y dan una celda vacia.
+        self.filters.retain(|filter| filter.column != header.column);
+        self.filters.push(ActiveFilter {
+            column: header.column,
+            label: SharedString::from(report.model.column(header.column).map(|(_, c)| c.name.clone()).unwrap_or_default()),
+            value: SharedString::from(value),
+        });
+        self.refresh(cx);
+    }
+
+    /// Quita un filtro activo.
+    fn clear_filter(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.filters.len() {
+            self.filters.remove(index);
+            self.refresh(cx);
         }
     }
 
-    /// Auto-scroll. Scrollea el grid desde codigo para que el spike mida frames reales sin
-    /// depender de inyeccion de eventos del sistema, que macOS bloquea.
-    ///
-    /// `scroll_to_item` salta al indice pedido. El spike recorre la tabla completa para
-    /// que `uniform_list` tenga que montar filas distintas en cada frame.
-    fn tick(&mut self, cx: &mut Context<Self>) {
-        let State::Ready(table) = &self.state else {
-            return;
-        };
-        self.scroll_tick += 1;
-        let row_count = table.row_count;
-        let target = (self.scroll_tick * 977) % row_count.max(1);
-        self.scroll.scroll_to_item(target, ScrollStrategy::Top);
-        cx.notify();
+    fn matrix(&self) -> Option<&Matrix> {
+        self.matrix.as_ref()
     }
 }
 
-impl Render for Spike {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let started = Instant::now();
+// ---------------------------------------------------------------------------------------------
+// Trabajo de fondo
+// ---------------------------------------------------------------------------------------------
 
-        let body: AnyElement = match &self.state {
-            State::Loading => div()
+fn extension_root() -> std::path::PathBuf {
+    let home = std::env::var("HOME").expect("HOME");
+    Path::new(&home).join(".duckdb").join("extensions")
+}
+
+/// Abre el motor y lee el modelo.
+///
+/// La extension de Postgres se precarga desde disco, sin red: si aqui falla, la app tampoco
+/// arranca en la maquina de un usuario.
+fn open_engine() -> Result<Engine, String> {
+    let engine = Engine::open_with_bundled_extensions(":memory:", &extension_root())
+        .map_err(|e| format!("no se pudo abrir el motor: {e}"))?;
+    engine
+        .load_bundled_extension("postgres")
+        .map_err(|e| format!("no se pudo cargar la extension de Postgres: {e}"))?;
+    Ok(engine)
+}
+
+fn attach(engine: &Engine, database: &str) -> Result<(), String> {
+    engine
+        .execute(&format!(
+            "ATTACH 'host=localhost dbname={database}' AS pg (TYPE POSTGRES, READ_ONLY)"
+        ))
+        .map_err(|e| {
+            format!(
+                "no se pudo conectar a la base `{database}`: {e}\\n\\n\
+                 Comprueba que el servidor este arriba y que la base exista."
+            )
+        })
+}
+
+fn build_model(database: &str) -> Result<(Model, Report), String> {
+    let engine = open_engine()?;
+    attach(&engine, database)?;
+
+    let mut catalog = PostgresCatalog::connect(&format!("host=localhost dbname={database}"))
+        .map_err(|e| format!("no se pudo leer el catalogo de Postgres: {e}"))?;
+    let model = introspect(&engine, &Source::new("pg"), Some(&mut catalog))
+        .map_err(|e| e.to_string())?
+        .model;
+
+    let report = Report::new(model.clone()).attached_to("pg");
+    Ok((model, report))
+}
+
+fn run_report(report: Report, database: String) -> Result<(Matrix, String), String> {
+    let queries = report.query_count().unwrap_or(0);
+    let started = Instant::now();
+
+    // El motor se abre aqui y se cae al final: `Engine` es `Send` pero no `Sync`, asi que
+    // compartirlo entre tareas exigiria un canal. Abrirlo cuesta unos milisegundos y hace el
+    // hilo de trabajo simple.
+    let engine = open_engine()?;
+    attach(&engine, &database)?;
+
+    let matrix = report.execute(&engine, None).map_err(|e| e.to_string())?;
+
+    let elapsed = started.elapsed();
+    let stats = format!(
+        "{queries} consulta(s), {} filas, {} columnas, {elapsed:?}",
+        matrix.row_count(),
+        matrix.width()
+    );
+    Ok((matrix, stats))
+}
+
+/// La seleccion por defecto: la primera dimension de texto y las primeras medidas.
+///
+/// Es una seleccion, no una opinion. El usuario la cambia desde la barra lateral.
+fn suggested(model: &Model) -> Selection {
+    let dimensions = model
+        .tables
+        .iter()
+        .filter(|t| matches!(t.kind, TableKind::Dimension))
+        .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
+        .filter(|(t, c)| matches!(c.data_type, DataType::Text) && !t.key_columns.contains(&c.id))
+        .map(|(_, c)| c.id)
+        .take(1)
+        .collect();
+
+    let measures = model
+        .measures
+        .iter()
+        .filter(|m| m.expression.starts_with("SUM"))
+        .map(|m| m.id)
+        .take(2)
+        .collect();
+
+    Selection {
+        dimensions,
+        measures,
+    }
+}
+
+fn build_grid(matrix: &Matrix) -> Grid {
+    let width = matrix.width();
+    let columns: Vec<Column> = (0..width)
+        .map(|column| {
+            let header = matrix
+                .header(column)
+                .map(|h| SharedString::from(h.label.clone()))
+                .unwrap_or_default();
+            let numeric = matrix
+                .header(column)
+                .map(|h: &Header| !h.is_dimension())
+                .unwrap_or(false);
+            let values: Vec<SharedString> = (0..matrix.row_count())
+                .map(|row| SharedString::from(matrix.cell(row, column).unwrap_or("")))
+                .collect();
+            Column {
+                header,
+                values: Arc::from(values.into_boxed_slice()),
+                numeric,
+            }
+        })
+        .collect();
+
+    Grid {
+        columns: Arc::from(columns.into_boxed_slice()),
+        row_count: matrix.row_count(),
+    }
+}
+
+
+
+/// Un boton con clic.
+///
+/// `Div::on_click` toma `&mut self`, asi que una cadena temporal de `div()...on_click()`
+/// no compila. Cada elemento pinchable es una funcion con su variable mutable, no una
+/// cadena: se lee mejor y no hay que recordar por que compila.
+fn clickable(
+    theme: &Theme,
+    label: String,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let mut element = div()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(12.0))
+        .cursor_pointer()
+        .child(label);
+    element.interactivity().on_click(on_click);
+    element.into_any_element()
+}
+
+fn retry_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+    clickable(
+        theme,
+        "Reintentar".to_string(),
+        cx.listener(|view, _event, _window, cx| view.connect(cx)),
+    )
+}
+
+fn clear_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+    clickable(theme, "Limpiar todo".to_string(), cx.listener(
+        |view, _event, _window, cx| {
+            view.filters.clear();
+            view.refresh(cx);
+        },
+    ))
+}
+
+/// Una pastilla de filtro activo. Pincharla quita el filtro.
+fn filter_pill(
+    theme: &Theme,
+    filter: &ActiveFilter,
+    index: usize,
+    cx: &mut Context<Datan>,
+) -> AnyElement {
+    let label = format!("{} = {}  x", filter.label, filter.value);
+    let mut element = div()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(12.0))
+        .cursor_pointer()
+        .hover(|style| style.opacity(0.7))
+        .child(label);
+    element
+        .interactivity()
+        .on_click(cx.listener(move |view, _event, _window, cx| {
+            view.clear_filter(index, cx);
+        }));
+    element.into_any_element()
+}
+
+/// Una fila de la barra lateral.
+fn sidebar_item(
+    theme: &Theme,
+    label: String,
+    is_on: bool,
+    column: ObjectId,
+    is_measure: bool,
+    cx: &mut Context<Datan>,
+) -> AnyElement {
+    let mut element = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_size(px(13.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.list_hover))
+        .child(div().w(px(12.0)).child(if is_on { "\u{2022}" } else { "" }))
+        .child(label);
+    if is_on {
+        element = element.bg(theme.accent);
+    }
+    element
+        .interactivity()
+        .on_click(cx.listener(move |view, _event, _window, cx| {
+            view.toggle(column, is_measure, cx);
+        }));
+    element.into_any_element()
+}
+
+impl Render for Datan {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let main = match &self.state {
+            State::Connecting => div()
                 .flex()
-                .size_full()
+                .flex_1()
                 .items_center()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("Generando 1M filas...")
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("Conectando..."),
+                )
                 .into_any_element(),
             State::Failed(error) => div()
                 .flex()
+                .flex_1()
                 .flex_col()
-                .size_full()
-                .gap_2()
-                .p_4()
                 .items_center()
                 .justify_center()
-                .child("El spike fallo")
-                .child(error.clone())
+                .gap_3()
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("No se pudo conectar"),
+                )
+                .child(div().child(error.clone()))
+                .child(retry_button(&theme, cx))
                 .into_any_element(),
-            State::Ready(table) => {
-                let row_count = table.row_count;
-                let scroll = self.scroll.clone();
-                render_grid(table, cx, row_count, scroll)
-            }
+            _ => self.render_report(cx),
         };
-
-        let build_us = started.elapsed().as_micros();
 
         div()
             .flex()
-            .flex_col()
             .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(main)
+    }
+}
+
+impl Datan {
+    /// La barra lateral y el grid.
+    fn render_report(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(report) = self.report.clone() else {
+            return div().into_any_element();
+        };
+        let model = report.model.clone();
+
+        // --- Barra lateral: dimensiones y medidas ---
+        let dimensions: Vec<ObjectId> = model
+            .tables
+            .iter()
+            .filter(|t| matches!(t.kind, TableKind::Dimension))
+            .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
+            .filter(|(t, c)| !t.key_columns.contains(&c.id) && !matches!(c.data_type, DataType::Date))
+            .map(|(_, c)| c.id)
+            .collect();
+        let measures: Vec<ObjectId> = model.measures.iter().map(|m| m.id).collect();
+
+        let sidebar = div()
+            .w(px(280.0))
+            .h_full()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(theme.border)
+            .flex_col()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Datan"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .px_2()
+                    .py_2()
+                    .child(self.render_sidebar_section("Dimensiones", &dimensions, false, &model, cx))
+                    .child(self.render_sidebar_section("Medidas", &measures, true, &model, cx)),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(self.stats.clone().unwrap_or_else(|| "sin datos".into())),
+            );
+
+        // --- Filtros activos ---
+        let mut filter_bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border);
+
+        if self.filters.is_empty() {
+            filter_bar = filter_bar.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child("Sin filtros. Pincha una celda de una dimension."),
+            );
+        } else {
+            for index in 0..self.filters.len() {
+                let filter = self.filters[index].clone();
+                filter_bar = filter_bar.child(filter_pill(&theme, &filter, index, cx));
+            }
+            filter_bar = filter_bar.child(clear_button(&theme, cx));
+        }
+
+        // --- El grid ---
+        let body: AnyElement = if self.grid.is_some() {
+            self.render_grid(cx).into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("Elige una medida para ver el informe."),
+                )
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_1()
+            .child(sidebar)
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(format!("Datan spike, auto-scroll {}", self.scroll_tick))
-                    .child(format!("build {build_us} us")),
+                    .flex_1()
+                    .flex_col()
+                    .child(filter_bar)
+                    .child(body),
             )
-            .child(body)
+            .into_any_element()
     }
-}
 
-/// Acumuladores de telemetria del grid. Los lee un hilo de reporte aparte para no
-/// perturbar el frame que se quiere medir.
-static FRAME_US: AtomicU64 = AtomicU64::new(0);
-static FRAMES: AtomicU64 = AtomicU64::new(0);
-
-/// `uniform_list` en gpui 0.3.9 recibe `(range, window, cx)` y devuelve `Vec<R>`.
-///
-/// Mide el primer elemento y lays out el resto en linea. Por eso todas las filas deben
-/// tener la misma altura. Es exactamente lo que quiere un grid de datos.
-fn render_grid(
-    table: &Table,
-    cx: &mut Context<Spike>,
-    row_count: usize,
-    scroll: UniformListScrollHandle,
-) -> AnyElement {
-    let theme = cx.theme().clone();
-    let columns = Arc::clone(&table.columns);
-
-
-    let header = div()
-        .flex()
-        .flex_row()
-        .flex_shrink_0()
-        .border_b_1()
-        .border_color(theme.border)
-        .children(table.columns.iter().map(|column| {
-            div()
-                .px_3()
-                .py_1()
-                .text_color(theme.muted_foreground)
-                .child(column.header.clone())
-        }));
-
-    let body = uniform_list(
-        ElementId::View(cx.entity().entity_id()),
-        row_count,
-        move |range, _window, _cx| {
-            let started = Instant::now();
-            let rows = range.map(|row| {
-                div().flex().flex_row().children(columns.iter().enumerate().map(
-                    |(_index, column)| {
-                        let cell = &column.values[row];
-                        if column.numeric {
-                            div().flex_1().px_3().flex().justify_end().child(cell.clone())
-                        } else {
-                            div().flex_1().px_3().child(cell.clone())
-                        }
-                    },
-                ))
-            });
-            let built = rows.collect::<Vec<_>>();
-
-            // Mide el coste de construir los elementos visibles. Es el termino dominante del
-            // frame en un grid y el que revela si la virtualizacion funciona. Si este numero
-            // crece con el numero de filas, la virtualizacion esta rota.
-            FRAME_US.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
-            FRAMES.fetch_add(1, Ordering::Relaxed);
-
-            built
-        },
-    );
-
-    div()
-        .flex()
-        .flex_col()
-        .size_full()
-        .child(header)
-        .child(body.track_scroll(&scroll).flex_1())
-        .into_any_element()
-}
-
-/// Genera 1M x 9 en DuckDB, extrae a `ColumnarTable`, y formatea a `SharedString`.
-///
-/// Todo corre en el hilo de trabajo. Devuelve algo `Send` que no contiene tipos de GPUI
-/// fuera de `SharedString`, que es precisamente la frontera que se quiere validar.
-fn build_table() -> Result<Table, String> {
-    let engine = datan_storage::Engine::open(":memory:").map_err(|e| e.to_string())?;
-
-    engine
-        .execute(
-            "CREATE TABLE fact AS
-             SELECT
-                 i AS id,
-                 'Cliente ' || (i % 5000)::VARCHAR AS customer,
-                 'Producto ' || (i % 500)::VARCHAR AS product,
-                 ['Norte','Sur','Este','Oeste'][(i % 4) + 1] AS region,
-                 ['2025-Q1','2025-Q2','2025-Q3','2025-Q4'][(i % 4) + 1] AS quarter,
-                 (i % 5000 + 1)::DOUBLE * 9.99 AS revenue,
-                 (i % 5000 + 1)::DOUBLE * 4.49 AS cogs,
-                 (i % 37)::DOUBLE AS qty
-             FROM range(1000000) t(i)",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let schema: Vec<(&str, ColumnKind)> = vec![
-        ("id", ColumnKind::Int),
-        ("customer", ColumnKind::Text),
-        ("product", ColumnKind::Text),
-        ("region", ColumnKind::Text),
-        ("quarter", ColumnKind::Text),
-        ("revenue", ColumnKind::Float),
-        ("cogs", ColumnKind::Float),
-        ("qty", ColumnKind::Float),
-    ];
-
-    let batches = engine
-        .query_arrow(
-            "SELECT id, customer, product, region, quarter, revenue, cogs, qty FROM fact",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let extracted = datan_storage::extract_columns(&batches, &schema).map_err(|e| e.to_string())?;
-
-    let mut columns = Vec::with_capacity(extracted.columns.len());
-    for column in extracted.columns {
-        let numeric = !matches!(column.data, ColumnData::Text(_));
-        let values: Vec<SharedString> = match column.data {
-            ColumnData::Text(text) => text.into_iter().map(SharedString::from).collect(),
-            ColumnData::Float(values) => values
-                .into_iter()
-                .map(|v| match v {
-                    Some(v) => format!("{v:.2}"),
-                    None => String::new(),
-                })
-                .map(SharedString::from)
-                .collect(),
-            ColumnData::Int(values) => values
-                .into_iter()
-                .map(|v| match v {
-                    Some(v) => v.to_string(),
-                    None => String::new(),
-                })
-                .map(SharedString::from)
-                .collect(),
+    fn render_sidebar_section(
+        &self,
+        title: &str,
+        columns: &[ObjectId],
+        is_measure: bool,
+        model: &Model,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let selected = if is_measure {
+            &self.selection.measures
+        } else {
+            &self.selection.dimensions
         };
-        columns.push(Column {
-            header: SharedString::from(column.name),
-            values: values.into(),
-            numeric,
-        });
+
+        div()
+            .flex_col()
+            .gap_1()
+            .mb_3()
+            .child(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .text_size(px(11.0))
+                    .text_color(theme.muted_foreground)
+                    .child(title.to_uppercase()),
+            )
+            .children(columns.iter().map(|column| {
+                let is_on = selected.contains(column);
+                let label = if is_measure {
+                    model
+                        .measures
+                        .iter()
+                        .find(|m| m.id == *column)
+                        .map(|m| m.name.clone())
+                        .unwrap_or_default()
+                } else {
+                    model
+                        .column(*column)
+                        .map(|(_, c)| c.name.clone())
+                        .unwrap_or_default()
+                };
+                let column = *column;
+                sidebar_item(&theme, label, is_on, column, is_measure, cx)
+            }))
     }
 
-    eprintln!(
-        "[spike] tabla construida: {} filas x {} columnas en el hilo de trabajo",
-        extracted.row_count,
-        columns.len()
-    );
+    /// El grid.
+    ///
+    /// `uniform_list` y no el componente `Table` de gpui-kit: el primero es el que la
+    /// Fase 0 midio a 23 microsegundos por frame con un millon de filas, y el segundo trae
+    /// su propia virtualizacion sin medir. gpui-kit se usa para el tema y los estilos.
+    fn render_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(grid) = self.grid.clone() else {
+            return div().into_any_element();
+        };
+        let columns = Arc::clone(&grid.columns);
+        let row_count = grid.row_count;
+        let dimension_count = self
+            .report
+            .as_ref()
+            .map(|report| report.dimensions.len())
+            .unwrap_or(0);
+        // `uniform_list` entrega un `&mut App`, no un `&mut Context`. Para tocar la vista
+        // desde el manejador del clic hay que pasar por la entidad.
+        let view = cx.entity();
 
-    Ok(Table {
-        columns: columns.into(),
-        row_count: extracted.row_count,
-    })
+        let header = div()
+            .flex()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(theme.border)
+            .children(columns.iter().enumerate().map(|(index, column)| {
+                div()
+                    .w(px(200.0))
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{}{}",
+                        column.header,
+                        // La flecha solo en las dimensiones: es lo que se puede filtrar.
+                        if index < dimension_count { "  \u{25be}" } else { "" }
+                    ))
+            }));
+
+        let body = uniform_list(
+            ElementId::View(cx.entity().entity_id()),
+            row_count,
+            move |range, _window, _cx| {
+                range
+                    .map(|row| {
+                        let cells = columns.iter().enumerate().map(|(index, column)| {
+                            let mut cell = div()
+                                .w(px(200.0))
+                                .flex_shrink_0()
+                                .px_3()
+                                .py_1()
+                                .text_size(px(13.0))
+                                .child(
+                                    column
+                                        .values
+                                        .get(row)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                );
+                            if column.numeric {
+                                cell = cell.text_align(TextAlign::Right);
+                            }
+
+                            if index >= dimension_count {
+                                return cell;
+                            }
+
+                            let clickable = cx_hover(theme.list_hover, cell);
+                            let row_index = row;
+                            let column_index = index;
+                            let view = view.clone();
+                            let mut interactive = clickable.cursor_pointer();
+                            interactive.interactivity().on_click(move |_event, _window, app| {
+                                view.update(app, |view, cx| {
+                                    view.drill(row_index, column_index, cx);
+                                });
+                            });
+                            interactive
+                        });
+
+                        div()
+                            .flex()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .children(cells)
+                    })
+                    .collect::<Vec<_>>()
+            },
+        );
+
+        div()
+            .flex_1()
+            .flex_col()
+            .overflow_hidden()
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+}
+
+/// Un `Div` con estilo de hover.
+///
+/// `Div` no tiene `when`, asi que el hover se aplica siempre y el color se decide aqui.
+fn cx_hover(color: Hsla, cell: Div) -> Div {
+    cell.hover(move |style| style.bg(color))
 }
 
 fn main() {
-    // Reporte de telemetria. Corre en un hilo aparte para no tocar el frame que se mide.
-    std::thread::spawn(|| {
-        let mut last_frames = 0u64;
-        let mut last_us = 0u64;
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let frames = FRAMES.load(Ordering::Relaxed);
-            let us = FRAME_US.load(Ordering::Relaxed);
-            let delta_frames = frames - last_frames;
-            let delta_us = us - last_us;
-            last_frames = frames;
-            last_us = us;
-            if delta_frames > 0 {
-                let mean = delta_us / delta_frames;
-                eprintln!(
-                    "[spike] {delta_frames} frames, media {mean} us por construccion de filas visibles"
-                );
-            }
-        }
-    });
-
     application()
         .with_assets(assets::Assets)
         .run(|cx| {
             init(cx);
-            open_window(WindowOptions::default(), cx, |_, cx| cx.new(Spike::new))
+            open_window(WindowOptions::default(), cx, |_, cx| cx.new(Datan::new))
                 .expect("no se pudo abrir la ventana");
         });
 }

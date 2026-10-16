@@ -397,6 +397,29 @@ Hay un test que mira el TOTAL de cada columna de la matriz, no celdas sueltas. S
 pegara en la columna de `Qty`, la suma de la columna de `Margin` seria la de `Qty` y no se
 notaria mirando una celda.
 
+#### La app
+
+`datan-app/src/main.rs` es la ventana: barra lateral con dimensiones y medidas, barra de
+filtros activos, y el grid. Todo el trabajo pesado ocurre en `background_spawn`: al hilo de UI
+solo llega la matriz ya calculada, como cadenas. `Engine` es `Send` pero no `Sync`, asi que
+cada ejecucion abre su propia conexion y se cae al terminar.
+
+`uniform_list` y no el componente `Table` de gpui-kit: el primero es el que la Fase 0 midio a
+23 microsegundos por frame con un millon de filas, y el segundo trae su propia virtualizacion sin
+medir. gpui-kit se usa para el tema, el hover y los estilos.
+
+Dos decisiones de UI que parecen detalles y no lo son:
+
+- **Solo las celdas de DIMENSION son pinchables.** Una celda de medida que parece pinchable y
+  no hace nada hace pensar que la app se congelo.
+- **El grid vuelve arriba tras filtrar.** Pinchar una fila del medio deja el resultado con tres
+  filas, y sin volver arriba el usuario se queda mirando la posicion 400 de una lista de tres: el
+  grid parece vacio.
+
+Sobre gpui-kit: es una FACHADA. Reexporta los tipos de gpui pero no sus traits de interactividad,
+y los metodos de cadena (`on_click`, `when`) no existen en `Div`. `on_click` va por
+`interactivity()`, `Div` no tiene `when`, y el crate se llama `gpui-pre` con la libreria `gpui`.
+
 **Test de semana 1, ejecutado: PASA.** Sobre 1.000.000 de lineas, `1 HASH_GROUP_BY`, `0
 DELIM_JOIN`, p50 1 ms, p95 4 ms. El conjunto fijo de medidas SI colapsa en una pasada, y el
 presupuesto de 300 ms no esta en riesgo.

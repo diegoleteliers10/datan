@@ -1601,6 +1601,7 @@ dependencies = [
  "datan-report",
  "datan-storage",
  "gpui-kit",
+ "gpui-pre",
 ]
 
 [[package]]
