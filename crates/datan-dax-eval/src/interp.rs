@@ -22,7 +22,8 @@
 use datan_model::{Model, ObjectId};
 use std::collections::{BTreeSet, HashMap};
 
-use crate::atom::Atom;
+use crate::atom::{Atom, AtomKind};
+use crate::{BinaryOp, CheckedExpr, UnaryOp};
 use crate::filter::{FilterContext, FilterSource};
 
 /// Un valor escalar de DAX.
@@ -96,6 +97,104 @@ pub trait DataSource {
     fn table_len(&self, table: ObjectId) -> usize;
 }
 
+/// El resultado de evaluar un conjunto de atomos en todas las celdas de grupo.
+///
+/// Cada fila son los valores de agrupamiento seguidos de los valores de los atomos, en el
+/// orden de `atoms`.
+#[derive(Debug, Clone, Default)]
+pub struct GroupedResult {
+    pub rows: Vec<Vec<Scalar>>,
+    /// Cuantas columnas de cada fila son agrupamiento. El resto son medidas.
+    pub width: usize,
+}
+
+impl GroupedResult {
+    pub fn measures(&self) -> Vec<Vec<Scalar>> {
+        self.rows
+            .iter()
+            .map(|row| row[self.width..].to_vec())
+            .collect()
+    }
+}
+
+/// Avanza un indice odometro. `false` cuando ya se agotaron las combinaciones.
+fn advance(index: &mut [usize], dimensions: &[Vec<Option<Scalar>>]) -> bool {
+    if dimensions.is_empty() {
+        return false;
+    }
+    let mut position = index.len();
+    while position > 0 {
+        position -= 1;
+        index[position] += 1;
+        if index[position] < dimensions[position].len() {
+            return true;
+        }
+        index[position] = 0;
+    }
+    false
+}
+
+/// Compara dos filas por las columnas de agrupamiento.
+fn compare_rows(left: &[Scalar], right: &[Scalar], width: usize) -> std::cmp::Ordering {
+    for column in 0..width {
+        let ordering = left[column].compare(&right[column]);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Los valores de las columnas de una expresion, ya materializados.
+///
+/// Un vector por columna, alineado con las filas seleccionadas del ancla. El arbol de la
+/// expresion se recorre contra esta tabla, sin volver a leer el origen.
+struct ColumnValues {
+    columns: std::collections::HashMap<ObjectId, Vec<Scalar>>,
+    row_count: usize,
+}
+
+impl ColumnValues {
+    fn get(&self, column: ObjectId, row: usize) -> Option<&Scalar> {
+        if row >= self.row_count {
+            return None;
+        }
+        self.columns.get(&column).and_then(|values| values.get(row))
+    }
+}
+
+/// Aritmetica de DAX sobre dos escalares.
+///
+/// La division es el caso que importa: `BLANK / algo` y `algo / 0` dan BLANK, nunca `inf` ni
+/// `NaN`. DuckDB devuelve `inf` para `10 / 0` y `NaN` para `0 / 0`, asi que el fast path
+/// necesita `NULLIF` y el interprete necesita esto. Si los dos no coinciden, la misma
+/// medida da un numero visiblemente falso en un camino y un blanco en el otro.
+fn binary_numbers(left: &Scalar, right: &Scalar, op: BinaryOp) -> Scalar {
+    if left.is_blank() || right.is_blank() {
+        return Scalar::Blank;
+    }
+    let a = left.as_number();
+    let b = right.as_number();
+    let value = match op {
+        BinaryOp::Add => a + b,
+        BinaryOp::Subtract => a - b,
+        BinaryOp::Multiply => a * b,
+        BinaryOp::Divide => {
+            if b == 0.0 {
+                return Scalar::Blank;
+            }
+            a / b
+        }
+        // Una comparacion dentro de una agregacion no es un caso de informe. Devolver BLANK
+        // es honesto: un operador que no se implementa no puede devolver un numero.
+        _ => return Scalar::Blank,
+    };
+    if value.is_nan() || value.is_infinite() {
+        return Scalar::Blank;
+    }
+    number_to_scalar(value)
+}
+
 /// El resultado de evaluar un conjunto de atomos en una celda de grupo.
 #[derive(Debug, Clone, Default)]
 pub struct CellResult {
@@ -127,6 +226,13 @@ pub enum InterpError {
     Unsupported(String),
     #[error("el origen no tiene la tabla {0}")]
     MissingTable(ObjectId),
+    #[error("la tabla {0} no tiene camino de join desde la tabla del hecho")]
+    NoJoinPath(ObjectId),
+    #[error(
+        "el agrupamiento produce {cells} celdas y el tope es {max}. Un producto cartesiano \
+         de columnas de alta cardinalidad no es un informe, es una explosion"
+    )]
+    TooManyCells { cells: usize, max: usize },
 }
 
 impl<'a> Interpreter<'a> {
@@ -152,11 +258,14 @@ impl<'a> Interpreter<'a> {
         let context = &atom.context;
 
         // `COUNTROWS` y las agregaciones sobre tabla no tienen columna: la tabla viene en el
-        // atomo. El resto la deduce de la columna.
+        // atomo. El resto deduce la tabla de la columna, o de la EXPRESION si no tiene.
         let table = match (atom.column, atom.table) {
             (Some(column), _) => self.owner(column),
             (None, Some(table)) => table,
-            (None, None) => return Err(InterpError::Unsupported(atom.label.clone())),
+            (None, None) => match self.expression_anchor(atom.expression.as_ref()) {
+                Some(table) => table,
+                None => return Err(InterpError::Unsupported(atom.label.clone())),
+            },
         };
 
         let rows = self.select_rows(table, context);
@@ -164,6 +273,16 @@ impl<'a> Interpreter<'a> {
         // `COUNTROWS` no necesita columna. Las demas si.
         if atom.kind == AtomKind::CountRows {
             return Ok(Scalar::Integer(rows.len() as i64));
+        }
+
+        // Una agregacion sobre EXPRESION: `SUM(Qty * Price)`, `SUM(Qty * Cost)`.
+        //
+        // Antes esto caia en `Unsupported` porque el atomo no tiene columna unica. El fallo
+        // era invisible: las tres medidas del plan (`Revenue`, `COGS`, `Margin`) bajan a SQL,
+        // asi que el arnes diferencial nunca lo ejecuto y 27 casos estaban verdes sin
+        // cubrir la medida mas comun de un informe real.
+        if let Some(expression) = &atom.expression {
+            return self.aggregate_expression(expression, atom.kind, table, &rows);
         }
 
         let Some(column) = atom.column.and_then(|c| self.source.column(c)) else {
@@ -270,6 +389,251 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    /// La tabla que ancla una expresion: la de la columna mas "de hechos" que encuentre.
+    ///
+    /// No hay forma de saberlo por los tipos, asi que se busca la columna mas cercana a un
+    /// hecho en el grafo de relationships. Una tabla sin camino a ningun hecho no puede
+    /// anclar nada y devuelve `None`.
+    fn expression_anchor(&self, expression: Option<&CheckedExpr>) -> Option<ObjectId> {
+        let expression = expression?;
+        let columns = crate::atom::columns_of(expression);
+        if columns.is_empty() {
+            return None;
+        }
+        columns
+            .iter()
+            .filter_map(|column| self.model.column(*column).map(|(table, _)| table.id))
+            .find(|table| {
+                self.model.tables.iter().any(|t| {
+                    matches!(t.kind, datan_model::TableKind::Facts) && t.id == *table
+                })
+            })
+            .or_else(|| self.model.column(columns[0]).map(|(t, _)| t.id))
+    }
+
+    /// Agrega una expresion sobre las filas seleccionadas.
+    ///
+    /// Las columnas se materializan TODAS antes de agregar, una vez por atomo. Sin ese paso,
+    /// resolver `Cost` para cada fila de `Qty` seria buscar en la dimension entera por cada
+    /// fila del hecho: O(n*m). Con 1M de lineas y 500 productos son 500 millones de
+    /// comparaciones, y el interprete seria mas lento que SQL por dos ordenes de magnitud.
+    fn aggregate_expression(
+        &self,
+        expression: &CheckedExpr,
+        kind: AtomKind,
+        table: ObjectId,
+        rows: &[usize],
+    ) -> Result<Scalar, InterpError> {
+        let values = self.materialize(expression, table, rows)?;
+
+        let mut total = 0.0;
+        let mut non_blank = 0usize;
+        // `MIN` y `MAX` comparan el valor, no su numero: sobre texto el orden de `Scalar` no
+        // es el de la cadena y sobre booleanos no hay orden numerico.
+        let mut best: Option<Scalar> = None;
+
+        for row in 0..rows.len() {
+            let value = self.eval_with(expression, &values, row)?;
+            if value.is_blank() {
+                continue;
+            }
+            total += value.as_number();
+            non_blank += 1;
+            match kind {
+                AtomKind::Min => {
+                    best = Some(match best {
+                        Some(current) if current.compare(&value) != std::cmp::Ordering::Greater => {
+                            current
+                        }
+                        _ => value,
+                    });
+                }
+                AtomKind::Max => {
+                    best = Some(match best {
+                        Some(current) if current.compare(&value) != std::cmp::Ordering::Less => {
+                            current
+                        }
+                        _ => value,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // `SUM` sobre cero filas o sobre ceros todos da BLANK en DAX, no 0. La celda vacia de
+        // un informe y una celda con total cero no son lo mismo, y el usuario lo nota.
+        Ok(match kind {
+            AtomKind::Count => Scalar::Integer(non_blank as i64),
+            AtomKind::Sum | AtomKind::Expression => {
+                if non_blank == 0 {
+                    Scalar::Blank
+                } else {
+                    number_to_scalar(total)
+                }
+            }
+            AtomKind::Average => {
+                if non_blank == 0 {
+                    Scalar::Blank
+                } else {
+                    number_to_scalar(total / non_blank as f64)
+                }
+            }
+            AtomKind::Min | AtomKind::Max => best.unwrap_or(Scalar::Blank),
+            // `COUNTROWS` se resuelve antes de llegar aqui: no tiene expresion.
+            AtomKind::CountRows | AtomKind::DistinctCount => {
+                return Err(InterpError::Unsupported("agregacion sobre expresion".to_string()));
+            }
+        })
+    }
+
+    /// Resuelve los valores de cada columna para cada fila seleccionada.
+    ///
+    /// El resultado tiene un vector por columna, alineado con `rows`. Una columna del ancla
+    /// se lee directo. Una columna de otra tabla se resuelve por el camino de join, con un
+    /// indice de clave a fila construido UNA vez para toda la columna.
+    fn materialize(
+        &self,
+        expression: &CheckedExpr,
+        anchor: ObjectId,
+        rows: &[usize],
+    ) -> Result<ColumnValues, InterpError> {
+        let mut out: std::collections::HashMap<ObjectId, Vec<Scalar>> =
+            std::collections::HashMap::new();
+
+        for column in crate::atom::columns_of(expression) {
+            let owner = self.owner(column);
+            let view = self
+                .source
+                .column(column)
+                .ok_or(InterpError::MissingColumn(column))?;
+
+            if owner == anchor {
+                out.insert(column, rows.iter().map(|row| view.value_at(*row)).collect());
+                continue;
+            }
+
+            // Una fila del ancla puede no tener equivalente en la otra tabla: una venta cuyo
+            // producto se borro. `assume_referential_integrity` es `false` por defecto, asi
+            // que Datan no inventa la fila. El valor es BLANK, que es lo que hace que la
+            // agregacion lo ignore en vez de sumar cero.
+            let path = self
+                .model
+                .join_path(anchor, owner)
+                .ok_or(InterpError::NoJoinPath(owner))?;
+            let index = self.build_index(&path, owner)?;
+            let source_view = self
+                .source
+                .column(column)
+                .ok_or(InterpError::MissingColumn(column))?;
+
+            let mut resolved = Vec::with_capacity(rows.len());
+            let mut current_rows: Vec<usize> = rows.to_vec();
+            for (position, edge) in path.iter().enumerate() {
+                let key_view = self
+                    .source
+                    .column(edge.from_column)
+                    .ok_or(InterpError::MissingColumn(edge.from_column))?;
+                let mut next = Vec::with_capacity(current_rows.len());
+                for row in &current_rows {
+                    let key = key_view.value_at(*row);
+                    match index.get(&scalar_key(&key)) {
+                        Some(matched) => next.push(*matched),
+                        // La fila no tiene equivalente: se propaga el hueco en vez de
+                        // inventar una fila. Ver la nota de arriba.
+                        None => {
+                            let _ = position;
+                            next.push(usize::MAX);
+                        }
+                    }
+                }
+                current_rows = next;
+            }
+
+            resolved.extend(
+                current_rows
+                    .iter()
+                    .map(|row| {
+                        if *row == usize::MAX {
+                            Scalar::Blank
+                        } else {
+                            source_view.value_at(*row)
+                        }
+                    }),
+            );
+            out.insert(column, resolved);
+        }
+
+        Ok(ColumnValues {
+            columns: out,
+            row_count: rows.len(),
+        })
+    }
+
+    /// Indice de clave a fila para la tabla destino de un camino.
+    ///
+    /// La columna final del camino es la que une. Se indexa esa, no la que se va a leer: el
+    /// camino puede tener varias aristas y la clave de union es la de la ultima.
+    fn build_index(
+        &self,
+        path: &[datan_model::JoinEdge],
+        destination: ObjectId,
+    ) -> Result<std::collections::HashMap<String, usize>, InterpError> {
+        let Some(last) = path.last() else {
+            return Ok(std::collections::HashMap::new());
+        };
+        let key_column = last.to_column;
+        if self.owner(key_column) != destination {
+            return Err(InterpError::MissingTable(destination));
+        }
+        let view = self
+            .source
+            .column(key_column)
+            .ok_or(InterpError::MissingColumn(key_column))?;
+        let length = self.source.table_len(destination);
+
+        let mut index = std::collections::HashMap::with_capacity(length);
+        for row in 0..length {
+            index.entry(scalar_key(&view.value_at(row))).or_insert(row);
+        }
+        Ok(index)
+    }
+
+    /// Evalua una expresion con las columnas ya materializadas.
+    fn eval_with(
+        &self,
+        expression: &CheckedExpr,
+        values: &ColumnValues,
+        row: usize,
+    ) -> Result<Scalar, InterpError> {
+        Ok(match expression {
+            CheckedExpr::Column { column, .. } => values
+                .get(*column, row)
+                .cloned()
+                .unwrap_or(Scalar::Blank),
+            CheckedExpr::Number { value, .. } => Scalar::Decimal(*value),
+            CheckedExpr::Text { value, .. } => Scalar::Text(value.clone()),
+            CheckedExpr::Boolean { value, .. } => Scalar::Boolean(*value),
+            CheckedExpr::Blank { .. } => Scalar::Blank,
+            CheckedExpr::Unary { op, operand, .. } => {
+                let inner = self.eval_with(operand, values, row)?;
+                match op {
+                    UnaryOp::Negate => match inner {
+                        Scalar::Integer(n) => Scalar::Integer(-n),
+                        Scalar::Decimal(n) => Scalar::Decimal(-n),
+                        other => other,
+                    },
+                    UnaryOp::Not => Scalar::Boolean(inner.as_number() == 0.0),
+                }
+            }
+            CheckedExpr::Binary { op, left, right, .. } => {
+                let left = self.eval_with(left, values, row)?;
+                let right = self.eval_with(right, values, row)?;
+                binary_numbers(&left, &right, *op)
+            }
+            other => return Err(InterpError::Unsupported(format!("{other:?}"))),
+        })
+    }
+
     /// Evalua todos los atomos de una celda.
     pub fn evaluate_cell(
         &self,
@@ -290,6 +654,181 @@ impl<'a> Interpreter<'a> {
             result.values.insert(atom.label.clone(), value);
         }
         Ok(result)
+    }
+
+    /// Evalua el conjunto para cada celda de grupo y devuelve las filas.
+    ///
+    /// El informe es una matriz: filas por dimension, columnas por medida. El fast path lo
+    /// resuelve con un `GROUP BY`; el interprete tiene que recorrer las combinaciones.
+    ///
+    /// Se recorre el PRODUCTO CARTESIANO de los valores distintos de cada columna de
+    /// agrupamiento, no solo las combinaciones que existen. Una combinacion vacia se
+    /// descarta al final, pero descartarla antes evita un `SUM` sobre cero filas por cada
+    /// celda que nunca se va a pintar. El caso patologico es real: agrupar por dos columnas
+    /// de texto de 50 valores cada una son 2500 celdas para 1M de filas, y la mayoria vacias.
+    /// Con tres columnas de alta cardinalidad el producto se dispara, asi que hay un tope y
+    /// el corte se dice en voz alta en vez de truncar en silencio.
+    pub fn evaluate_grouped(
+        &self,
+        atoms: &[Atom],
+        context: &FilterContext,
+        grouping: &[ObjectId],
+        max_cells: usize,
+    ) -> Result<GroupedResult, InterpError> {
+        let mut values_per_column = Vec::with_capacity(grouping.len());
+        for column in grouping {
+            values_per_column.push(self.distinct_values(*column)?);
+        }
+
+        let combinations = values_per_column.iter().map(|v| v.len()).product::<usize>();
+        if combinations > max_cells {
+            return Err(InterpError::TooManyCells { cells: combinations, max: max_cells });
+        }
+
+        let mut rows = Vec::new();
+        let mut index = vec![0usize; grouping.len()];
+        loop {
+            let keys: Vec<Option<Scalar>> = grouping
+                .iter()
+                .zip(&index)
+                .zip(&values_per_column)
+                .map(|((_, position), distinct)| distinct[*position].clone())
+                .collect();
+
+            // El contexto de la celda lleva los valores de agrupamiento encima del contexto
+            // de la consulta. La columna se filtra por igualdad, que es lo que hace el
+            // `GROUP BY`.
+            let mut cell_context = context.clone();
+            for (column, key) in grouping.iter().zip(&keys) {
+                if let Some(key) = key {
+                    cell_context = cell_context.with_equal(
+                        *column,
+                        crate::filter::FilterValue::from_scalar(key),
+                    );
+                }
+            }
+
+            let mut cells = Vec::with_capacity(grouping.len());
+            let mut any_value = false;
+            for key in &keys {
+                cells.push(key.clone().unwrap_or(Scalar::Blank));
+                if !key.as_ref().is_some_and(Scalar::is_blank) {
+                    any_value = true;
+                }
+            }
+
+            // Una celda sin filas NO es una celda. Un `GROUP BY` de SQL no devuelve los
+            // grupos vacios, y devolverlos hace que el arnes diverge en cada caso con
+            // filtro.
+            //
+            // La comprobacion es el numero de filas del ancla, no si el resultado es BLANK:
+            // `COUNT` sobre cero filas devuelve 0, no BLANK, asi que un 0 no distingue "grupo
+            // vacio" de "grupo con cero". Mirar el valor de la medida es la via que falla en
+            // silencio, y falla en todos los conteos.
+            let cell: CellResult = self.evaluate_cell_in(atoms, &cell_context)?;
+            let has_rows = self.any_rows(atoms, &cell_context);
+            if any_value && has_rows {
+                for atom in atoms {
+                    cells.push(cell.get(&atom.label).cloned().unwrap_or(Scalar::Blank));
+                }
+                rows.push(cells);
+            }
+
+            if !advance(&mut index, &values_per_column) {
+                break;
+            }
+        }
+
+        rows.sort_by(|left, right| compare_rows(left, right, grouping.len()));
+        Ok(GroupedResult { rows, width: grouping.len() })
+    }
+
+    /// Si alguna fila entra en la celda.
+    ///
+    /// Mira el contexto de las tablas de los atomos, propagado. Con varios atomos basta con
+    /// que uno tenga filas: el `GROUP BY` de SQL decide por el conjunto de hechos, no por
+    /// cada medida.
+    fn any_rows(&self, atoms: &[Atom], context: &FilterContext) -> bool {
+        let propagated = context.propagate(self.model);
+        for atom in atoms {
+            let Some(table) = self.atom_table(atom) else {
+                continue;
+            };
+            if !self.select_rows(table, &propagated).is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn atom_table(&self, atom: &Atom) -> Option<ObjectId> {
+        match (atom.column, atom.table) {
+            (Some(column), _) => Some(self.owner(column)),
+            (None, Some(table)) => Some(table),
+            (None, None) => self.expression_anchor(atom.expression.as_ref()),
+        }
+    }
+
+    /// Como [`Self::evaluate_cell`], sin repropagar el contexto.
+    ///
+    /// `evaluate_cell` propaga porque su entrada es un contexto crudo de usuario. Aqui la
+    /// celda ya trae los filtros de grupo propagados desde [`Self::select_rows`], y volver a
+    /// propagar es idempotente pero caro: una matriz de 2500 celdas paga la propagacion 2500
+    /// veces sobre el mismo modelo.
+    fn evaluate_cell_in(
+        &self,
+        atoms: &[Atom],
+        context: &FilterContext,
+    ) -> Result<CellResult, InterpError> {
+        // El contexto de celda se propaga UNA vez por celda y se une con el del atomo.
+        //
+        // `evaluate_atom` usa el contexto del ATOMO y descarta el de la celda, y esa regla
+        // es correcta para un `CALCULATE` con modificadores: el `ALL` quiere vaciar el
+        // contexto y usar el de la celda lo reintroduce. Para la agrupacion es al reves: el
+        // filtro de grupo es una restriccion que el atomo no puede conocer, asi que se le
+        // SUMA al suyo.
+        //
+        // Sin esta union, `SUM(Qty)` agrupado por region devuelve el total en cada fila.
+        let cell = &context.propagate(self.model);
+        let mut result = CellResult::default();
+        for atom in atoms {
+            let merged = Atom {
+                context: atom.context.union(cell),
+                ..atom.clone()
+            };
+            let value = self.evaluate_atom(&merged, cell)?;
+            result.values.insert(atom.label.clone(), value);
+        }
+        Ok(result)
+    }
+
+    /// Los valores distintos de una columna, en un orden estable.
+    ///
+    /// El orden es por representacion textual, no por hash: el fast path devuelve las filas
+    /// ordenadas por el `GROUP BY` de SQL y las dos listas tienen que poder compararse. Un
+    /// orden distinto aqui haria divergir el arnes sin que el motor este mal.
+    fn distinct_values(&self, column: ObjectId) -> Result<Vec<Option<Scalar>>, InterpError> {
+        let view = self
+            .source
+            .column(column)
+            .ok_or(InterpError::MissingColumn(column))?;
+        let mut distinct: BTreeSet<String> = BTreeSet::new();
+        let mut order: std::collections::HashMap<String, Option<Scalar>> =
+            std::collections::HashMap::new();
+        let length = self.source.table_len(self.owner(column));
+        for row in 0..length {
+            let value = view.value_at(row);
+            if value.is_blank() {
+                continue;
+            }
+            let key = scalar_key(&value);
+            if distinct.insert(key.clone()) {
+                order.insert(key, Some(value));
+            }
+        }
+        let mut out: Vec<Option<Scalar>> = distinct.iter().filter_map(|k| order.get(k).cloned()).collect();
+        out.sort_by(|a, b| scalar_key(a.as_ref().unwrap()).cmp(&scalar_key(b.as_ref().unwrap())));
+        Ok(out)
     }
 
     /// Los indices de fila de una tabla que sobreviven al contexto de filtro.

@@ -216,6 +216,33 @@ impl Engine {
         Ok(batches)
     }
 
+    /// Corre una consulta y devuelve todas sus filas, celda a celda, como texto.
+    ///
+    /// Para comparar dos motores. Devolver `Vec<Vec<String>>` y no un tipo de columna es
+    /// deliberado: la comparacion tiene que ser exacta y un cast a texto no pierde
+    /// informacion, mientras que un `Int64` a `Float64` si.
+    ///
+    /// Cada celda pasa por `cast_to_varchar` en SQL cuando hace falta, porque `SUM` de
+    /// enteros devuelve `HUGEINT` y Arrow lo representa como `Decimal128`.
+    pub fn render_rows(&self, sql: &str) -> Result<Vec<Vec<String>>> {
+        let batches = match self.query_arrow(sql) {
+            Ok(batches) => batches,
+            Err(StorageError::EmptyResult) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut rows = Vec::new();
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                let mut cells = Vec::with_capacity(batch.num_columns());
+                for column in 0..batch.num_columns() {
+                    cells.push(render_cell(batch, column, row));
+                }
+                rows.push(cells);
+            }
+        }
+        Ok(rows)
+    }
+
     /// Corre una consulta y devuelve cuantos milisegundos tardo.
     ///
     /// El retorno importa tanto como el tiempo: una consulta que falla tiene un tiempo, y
@@ -477,4 +504,56 @@ mod explain_tests {
     }
 }
 
+/// Una celda como texto, sea cual sea el tipo de Arrow que la represente.
+///
+/// El objetivo es que la comparacion entre dos motores sea exacta. Un `Decimal128` de
+/// `HUGEINT` y un `Int64` del mismo numero tienen que salir como la misma cadena, y por eso
+/// `Decimal128` se pasa por su representacion decimal y no por su escala.
+fn render_cell(
+    batch: &arrow::record_batch::RecordBatch,
+    column: usize,
+    row: usize,
+) -> String {
+    use arrow::array::{
+        Array, Date32Array, Date64Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
+        LargeStringArray, StringArray,
+    };
 
+    let array = batch.column(column);
+    if array.null_count() > 0 && array.is_null(row) {
+        return "NULL".to_string();
+    }
+    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+        return values.value(row).to_string();
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return values.value(row).to_string();
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        return values.value(row).to_string();
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        return values.value(row).to_string();
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Decimal128Array>() {
+        return values.value(row).to_string();
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
+        // Un decimal de SQL como `27009.0909...` y un `f64` del interprete tienen que dar
+        // la MISMA cadena para que la comparacion sea util. Sin redondear, `0.1 + 0.2` sale
+        // distinto en cada motor y todos los promedios divergen.
+        let value = values.value(row);
+        return if value.fract() == 0.0 && value.abs() < 1e15 {
+            format!("{}", value as i64)
+        } else {
+            format!("{value:.6}")
+        };
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Date32Array>() {
+        return values.value(row).to_string();
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Date64Array>() {
+        return (values.value(row) / 86_400_000).to_string();
+    }
+    format!("{:?}", array.data_type())
+}

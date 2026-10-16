@@ -48,6 +48,14 @@ fn main() {
             Some(value) => format!("{value:?}"),
             None => "ninguno".to_string(),
         };
+        if !result.agrees && !result.interpreter_only {
+            // La diferencia se imprime. Un "DIFIERE" sin el detalle obliga a reproducir el
+            // caso a mano, y reproducir a mano es como se pierden horas.
+            println!();
+            println!("        SQL        : {:?}", result.sql_rows.as_deref().unwrap_or(&[]));
+            println!("        interprete : {:?}", result.interp_rows);
+        }
+
         let mark = if !result.agrees {
             divergen += 1;
             "DIFIERE"

@@ -421,10 +421,56 @@ Ademas el contador de profundidad confunde dos cosas: una agregacion anidada de 
 aritmetica de medidas. La segunda marca `Granularity::Finer` y cae al interprete sin motivo.
 
 La linea base a mano SI lo resuelve repitiendo la expresion en la lista de seleccion, sin
-subconsulta y sin `DELIM_JOIN`, como demostro el test de semana 1. El objetivo esta medido. Falta
-que el IR lleve la forma de la expresion, no solo una lista plana de atomos.
+subconsulta y sin `DELIM_JOIN`, como demostro el test de semana 1.
 
-Fijado con un test que FALLA cuando se arregle, para que el cambio se vea.
+**Medido:** repetir la sub-expresion de agregado NO cuesta nada. Con las cuatro medidas hay 6
+`SUM(` en la lista de seleccion y 3 en el `HASH_GROUP_BY`: DuckDB hace CSE. El riesgo de
+"computar el agregado dos veces" no existe, y la forma de repetir es la correcta.
+
+**Division por cero:** DuckDB devuelve `inf` para `10 / 0` y `NaN` para `0 / 0`, no `NULL`. Sin
+`NULLIF` el grid muestra un numero visiblemente falso. DAX devuelve BLANK, asi que el fast path
+necesita `NULLIF` y el interprete necesita una division que devuelva BLANK. Los dos caminos tienen
+que coincidir o la misma medida da `inf` en uno y un blanco en el otro.
+
+#### El hole que el arnes diferencial no cubria
+
+El interprete NO podia evaluar una agregacion sobre expresion:
+
+```
+SUM('fact_sales'[qty])                                 Integer(165)
+SUM('fact_sales'[qty] * 'fact_sales'[amount])          ERROR: no se puede interpretar
+```
+
+`evaluate_atom` devolvia `Unsupported` porque el atomo no tiene columna unica. Y el arnes estaba
+verde con 27 casos porque todos usaban una sola columna, y el fast path si bajaba: la comparacion
+solo miraba SQL.
+
+Ademas el interprete no AGRUPABA. Devolvia un total unico y el arnes comparaba ese total contra
+`SUM(atom_0)` sobre las filas del `GROUP BY`. Eso solo valida `SUM`: para `MIN`, `MAX` y
+`AVERAGE` es comparar cosas distintas. Los tres divergian, y la culpa era del arnes.
+
+Arreglado: `evaluate_grouped` recorre el producto cartesiano de los valores distintos de las
+columnas de agrupamiento, con un tope de celdas que se dice en voz alta en vez de truncar en
+silencio. Y el arnes compara las dos MATRICES fila por fila, ordenadas.
+
+#### Cuatro fallos de esta tanda, todos silenciosos
+
+1. **La propagacion borraba filtros concretos.** `propagate_one` hacia `without_column` sobre la
+   columna destino y luego metia el semijoin. Un filtro como `product_id = 3` desaparecia en
+   cuanto un filtro de la dimension llegaba por la relationship. El informe devolvia el
+   subtotal de la region entera. No es un error ni un vacio: es un total que parece un detalle.
+   Ahora `without_propagated_column` quita solo los semijoins.
+2. **El contexto de celda se descartaba al agrupar.** `evaluate_atom` usa el contexto del ATOMO y
+   descarta el de la celda. Correcto para un `CALCULATE` con modificadores, al reves para la
+   agrupacion. Todas las celdas devolvian el total: un informe entero con la misma cifra.
+   Ahora el filtro de grupo se SUMA al contexto del atomo.
+3. **Los grupos vacios no existen.** Un `GROUP BY` de SQL no los devuelve. El chequeo por valor
+   no los veía porque `COUNT` sobre cero filas da 0, no BLANK, y un 0 no distingue "vacio" de
+   "cero". Ahora se comprueba si hay filas.
+4. **El orden de filas era el del hash de DuckDB.** El `GROUP BY` no garantiza orden. El usuario
+   veia las filas reordenarse al tocar un filtro, y el arnés divergia en todas las medidas no
+   aditivas. El lowering emite `ORDER BY` por las columnas de agrupamiento, y el arnés ordena
+   antes de comparar para que un fallo de orden no se confunda con uno de numero.
 
 #### Sobre el esquema real
 

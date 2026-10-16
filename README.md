@@ -16,7 +16,7 @@ App de escritorio multiplataforma para analisis de datos. Local first, sin servi
 | Measure IR, algebra de filtro | Completa. Propagacion conmutativa, incluso en ciclos. |
 | 2, CALCULATE y modifiers | Completa. `ALL`, `ALLEXCEPT`, `KEEPFILTERS`, `CROSSFILTER`, `USERELATIONSHIP`. |
 | 3, ciclos y time intelligence | Completa. `DATEADD`, `DATESYTD`, `PARALLELPERIOD`, `PREVIOUSYEAR`. |
-| 1, Postgres -> modelo -> medidas -> grid de 1M | Pendiente |
+| 1, Postgres -> modelo -> medidas -> grid de 1M | En curso. El motor esta; el scanner de Postgres no entrega claves foraneas. |
 | 4, import de PBIP / TMDL | Pendiente. Reservar Windows + humano en la semana 1. |
 
 El plan completo esta en [PLAN.md](PLAN.md). Las decisiones de arquitectura, los riesgos y las
@@ -55,10 +55,11 @@ cargo run --release -p datan-app
 | `datan-dax-check` | Resolucion de nombres y lint contra el modelo. |
 | `datan-dax-eval` | Algebra de filtros, modificadores, atomos, interprete por celda. |
 | `datan-dax-sql` | Bajo de un `AtomSet` a una unica query de DuckDB. |
+| `datan-connect` | De una base conectada a un modelo. Sin gpui. |
 | `datan-testkit` | Suite de conformidad diferencial entre los dos caminos. |
 | `datan-app` | Binario thin. Todo gpui vive aqui por ahora. |
 
-Los crates que faltan (`datan-plan`, `datan-connect`, `datan-ui`) llegan con las fases 4 a 6.
+Los crates que faltan (`datan-plan`, `datan-ui`) llegan con las fases 4 a 6.
 Ver seccion 4 de PLAN.md.
 
 Los crates del grupo motor son headless: `cargo test --workspace` corre sin GPU ni base de datos

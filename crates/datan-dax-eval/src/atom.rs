@@ -431,6 +431,12 @@ fn is_iterator(name: &str) -> bool {
 }
 
 /// Todas las columnas de un `CheckedExpr`, en orden de aparicion y sin repetir.
+pub fn columns_of(expr: &CheckedExpr) -> Vec<ObjectId> {
+    let mut out = Vec::new();
+    collect_columns(expr, &mut out);
+    out
+}
+
 fn collect_columns(expr: &CheckedExpr, out: &mut Vec<ObjectId>) {
     match expr {
         CheckedExpr::Column { column, .. } => {

@@ -42,6 +42,32 @@ pub enum FilterValue {
 }
 
 impl FilterValue {
+    /// Convierte un valor de fila en un valor de filtro.
+    ///
+    /// El filtro y el dato son tipos distintos a proposito: un `FilterValue::Blank` significa
+    /// "comparar contra BLANK", que en DAX es verdadero para 0 y para la cadena vacia, y no
+    /// "la fila es nula". Confundirlos es como un `IS NULL` de SQL donde DAX quiere decir
+    /// otra cosa.
+    pub fn from_scalar(value: &crate::interp::Scalar) -> Self {
+        use crate::interp::Scalar;
+        match value {
+            Scalar::Blank => FilterValue::Blank,
+            Scalar::Boolean(b) => FilterValue::Boolean(*b),
+            Scalar::Integer(n) => FilterValue::Integer(*n),
+            Scalar::Decimal(n) => {
+                // Un entero que cabe en `i64` sigue siendo entero. Si no, pasarlo por
+                // decimal evita un `as` que trunca en silencio.
+                if n.fract() == 0.0 && n.abs() <= i64::MAX as f64 {
+                    FilterValue::Integer(*n as i64)
+                } else {
+                    FilterValue::Decimal(*n)
+                }
+            }
+            Scalar::Text(t) => FilterValue::Text(t.clone()),
+            Scalar::Date(day) => FilterValue::Date(*day),
+        }
+    }
+
     /// `BLANK` es especial en DAX: `BLANK() = 0` es verdadero y `BLANK() = ""` tambien.
     /// Un filtro `= BLANK` no es un `IS NULL` de SQL.
     pub fn equals(&self, other: &FilterValue) -> bool {
@@ -184,10 +210,47 @@ impl FilterContext {
         self.with(Filter::new(column, FilterOperator::Greater, value))
     }
 
+    /// Une dos contextos: una columna con filtros en los dos se queda con la union.
+    ///
+    /// Hace falta para agrupar. El contexto de un atomo ya viene propagado desde la
+    /// extraccion, y el filtro de celda de grupo es una restriccion NUEVA. Si el atomo
+    /// ignora el contexto de celda, la agrupacion no restringe nada y todas las celdas
+    /// devuelven el total: numeros, no errores, y un informe entero con la misma cifra
+    /// repetida en cada fila.
+    pub fn union(&self, other: &FilterContext) -> Self {
+        let mut next = self.clone();
+        for (column, filters) in &other.filters {
+            let entry = next.filters.entry(*column).or_default();
+            for filter in filters {
+                if !entry.contains(filter) {
+                    entry.push(filter.clone());
+                }
+            }
+        }
+        next
+    }
+
     /// Quita todos los filtros de una columna.
     pub fn without_column(&self, column: ObjectId) -> Self {
         let mut next = self.clone();
         next.filters.remove(&column);
+        next
+    }
+
+    /// Quita los filtros PROPAGADOS de una columna, y deja los concretos.
+    ///
+    /// Un semijoin reemplaza a otro semijoin de la misma columna, nunca a un filtro concreto.
+    ///
+    /// `without_column` hacia las dos cosas, y un filtro como `product_id = 3` desaparecia
+    /// en cuanto un filtro de la dimension llegaba por la relationship. El informe seguia
+    /// devolviendo numeros: el semijoin de la dimension restringia, el `= 3` no, y el
+    /// resultado era el subtotal de la region entera. Es el peor tipo de fallo: no es un
+    /// error ni un vacio, es un total que parece un detalle.
+    pub fn without_propagated_column(&self, column: ObjectId) -> Self {
+        let mut next = self.clone();
+        if let Some(filters) = next.filters.get_mut(&column) {
+            filters.retain(|filter| !filter.is_propagated());
+        }
         next
     }
 
@@ -332,7 +395,10 @@ fn propagate_one(&self, model: &Model, relationship: &Relationship) -> FilterCon
         // `region = 'Norte'`. Los dos se aplican a la vez y el filtro que `ALLEXCEPT`
         // pretendia quitar sigue restringiendo el resultado. Es silencioso: el contexto
         // tiene mas filtros de los que deberia y el numero sale mal sin que nada avise.
-        let mut next = result.without_column(relationship.to_column);
+        // Solo se quitan los semijoins anteriores. Un filtro CONCRETO sobre la misma columna
+        // sigue mandando: `product_id = 3` Y `product_id IN (los de la region Norte)` es una
+        // conjuncion, y quitar el primero devuelve el subtotal de la region entera.
+        let mut next = result.without_propagated_column(relationship.to_column);
         next = next.with(propagated);
         result = next;
     }

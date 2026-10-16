@@ -242,6 +242,93 @@ impl Model {
             .iter()
             .filter(|r| r.role == RelationshipRole::Active && r.direction != FilterDirection::None)
     }
+
+    /// El camino mas corto entre dos tablas por el grafo de relaciones.
+    ///
+    /// BFS sobre las relaciones activas. Las aristas vienen en orden, desde `from` hacia
+    /// `to`. Un camino vacio significa que `from` ES `to`.
+    ///
+    /// Vive aqui y no en el lowering a proposito: el interprete hace la misma pregunta para
+    /// resolver una agregacion que cruza tablas, y dos BFS divergen en cuanto uno filtra una
+    /// relationship y el otro no. Es el tipo de divergencia que no se ve hasta que un informe
+    /// da un numero distinto en cada camino.
+    ///
+    /// `None` significa que el modelo esta desconectado. No es un error de sintaxis: es un
+    /// modelo mal formado, y quien llama tiene que decirselo al usuario.
+    pub fn join_path(&self, from: ObjectId, to: ObjectId) -> Option<Vec<JoinEdge>> {
+        if from == to {
+            return Some(Vec::new());
+        }
+
+        let mut queue: std::collections::VecDeque<(ObjectId, Vec<JoinEdge>)> =
+            std::collections::VecDeque::new();
+        let mut visited = vec![from];
+        queue.push_back((from, Vec::new()));
+
+        while let Some((table, path)) = queue.pop_front() {
+            for relationship in &self.relationships {
+                if relationship.role != RelationshipRole::Active {
+                    continue;
+                }
+                let from_table = self.column(relationship.from_column).map(|(t, _)| t.id);
+                let to_table = self.column(relationship.to_column).map(|(t, _)| t.id);
+
+                // La relationship se recorre en los dos sentidos: un JOIN no distingue
+                // dimension de hecho. El Sentido lo codifica el ORDEN de las columnas, no
+                // la relationship, asi que cada direccion es una arista distinta.
+                let directions = [
+                    (
+                        from_table,
+                        JoinEdge {
+                            from_column: relationship.from_column,
+                            to_column: relationship.to_column,
+                        },
+                    ),
+                    (
+                        to_table,
+                        JoinEdge {
+                            from_column: relationship.to_column,
+                            to_column: relationship.from_column,
+                        },
+                    ),
+                ];
+
+                for (source, edge) in directions {
+                    let Some(source) = source else { continue };
+                    if source != table {
+                        continue;
+                    }
+                    let Some(destination) = self.column(edge.to_column).map(|(t, _)| t.id) else {
+                        continue;
+                    };
+                    if destination == to {
+                        let mut full = path.clone();
+                        full.push(edge);
+                        return Some(full);
+                    }
+                    if visited.contains(&destination) {
+                        continue;
+                    }
+                    visited.push(destination);
+                    let mut next = path.clone();
+                    next.push(edge);
+                    queue.push_back((destination, next));
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Un arista del camino de join: la relationship que conecta dos columnas.
+///
+/// `from_column` es la del lado desde el que se parte y `to_column` la del lado al que se
+/// llega. El orden ES la direccion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinEdge {
+    pub from_column: ObjectId,
+    pub to_column: ObjectId,
 }
 
 #[cfg(test)]

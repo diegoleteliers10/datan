@@ -114,7 +114,7 @@ fn baja_una_agregacion_simple_a_un_solo_select() {
 
     assert_eq!(
         plan.sql,
-        "SELECT\n  t0.\"Qty\",\n  SUM(t0.\"Qty\") AS \"atom_0\"\nFROM \"Fact Sales\" t0\n\nGROUP BY t0.\"Qty\""
+        "SELECT\n  t0.\"Qty\",\n  SUM(t0.\"Qty\") AS \"atom_0\"\nFROM \"Fact Sales\" t0\n\nGROUP BY t0.\"Qty\"\nORDER BY t0.\"Qty\""
     );
 }
 
@@ -489,5 +489,59 @@ fn una_medida_que_referencia_otras_no_baja_a_sql_todavia() {
         lower(&model, &sources(&model), &atoms, &filters).is_err(),
         "una medida que combina medidas CAE al interprete; cuando baje, hay que quitar \
          este test y revisar el plan de ejecucion"
+    );
+}
+
+#[test]
+fn el_sql_ordena_por_las_columnas_de_agrupamiento() {
+    // Sin `ORDER BY`, DuckDB devuelve los grupos en el orden de su hash, que es estable
+    // dentro de una consulta y distinto entre consultas segun el plan. El usuario ve las
+    // filas reordenarse al tocar un filtro de otra dimension, y el arnes diferencial
+    // diverge en todas las medidas no aditivas solo por el orden.
+    let model = model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[PRODUCT_REGION])
+        .expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert!(
+        plan.sql.contains("ORDER BY t1.\"Region\""),
+        "el ORDER BY tiene que ir por las columnas de agrupamiento:\n{}",
+        plan.sql
+    );
+    assert!(
+        !plan.sql.contains("ORDER BY \"atom_0\""),
+        "ordenar por una medida haria que las filas cambiaran de lugar al recalcular:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn un_filtro_concreto_no_lo_tira_la_propagacion() {
+    // `FACT_PRODUCT_ID = 3` y un filtro de `Region` llegan los dos a la MISMA columna del
+    // hecho. La propagacion reemplazaba el filtro concreto por el semijoin, y el informe
+    // devolvia el subtotal de la region entera en vez del detalle de la fila.
+    //
+    // El sintoma no es un error ni un vacio: es un total que parece un detalle. Por eso el
+    // test mira que los DOS filtros sigan en el SQL.
+    let model = model();
+    let filters = FilterContext::empty()
+        .with_equal(FACT_PRODUCT_ID, FilterValue::Integer(3))
+        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[PRODUCT_REGION])
+        .expect("extrae");
+
+    let on_fact = atoms.atoms[0].context.filters_on(FACT_PRODUCT_ID);
+    assert!(
+        on_fact
+            .iter()
+            .any(|filter| !filter.is_propagated() && filter.values() == [FilterValue::Integer(3)]),
+        "el filtro concreto se perdio en la propagacion: {:?}",
+        on_fact
+    );
+    assert!(
+        on_fact.iter().any(|filter| filter.is_propagated()),
+        "y el semijoin de la region tambien tiene que estar: {:?}",
+        on_fact
     );
 }

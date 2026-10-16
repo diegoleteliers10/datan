@@ -37,7 +37,7 @@ pub use quote::{escape_string, quote_identifier};
 pub use source::{SourceMap, SourceMapError};
 
 use datan_dax_eval::{Atom, AtomKind, AtomSet, FilterContext, FilterSource, Granularity};
-use datan_model::{Model, ObjectId};
+use datan_model::{JoinEdge, Model, ObjectId};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -224,8 +224,34 @@ pub fn lower(
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
 
+    // El `ORDER BY` es lo que hace que el grid tenga filas estables.
+    //
+    // Sin el, DuckDB devuelve los grupos en el orden del hash de la tabla hash, que es
+    // estable DENTRO de una consulta y distinto entre consultas segun el plan. El usuario ve
+    // las filas reordenarse al cambiar un filtro de otra dimension, y el arnes diferencial
+    // diverge en todas las medidas no aditivas solo por el orden.
+    //
+    // Ordena por las columnas de agrupamiento, que son la clave de la fila del informe. Las
+    // medidas NO se ordenan: su orden cambiaria entre celdas sin motivo.
+    let order_by = grouping
+        .iter()
+        .map(|column| {
+            let (physical, _) = sources.column(*column)?;
+            Ok(format!(
+                "{}.{}",
+                aliases.of(owner_of(model, *column)),
+                quote_identifier(physical)
+            ))
+        })
+        .collect::<Result<Vec<String>, LowerError>>()?;
+    let order_clause = if order_by.is_empty() {
+        String::new()
+    } else {
+        format!("\nORDER BY {}", order_by.join(", "))
+    };
+
     let sql = format!(
-        "SELECT\n  {}\nFROM {}\n{}\nGROUP BY {}",
+        "SELECT\n  {}\nFROM {}\n{}\nGROUP BY {}{order_clause}",
         select.join(",\n  "),
         from_clause,
         where_clause,
@@ -564,81 +590,13 @@ pub fn empty_filter_marker() -> &'static str {
     ""
 }
 
-/// Un arista del camino de join: la relationship que conecta dos columnas.
-#[derive(Debug, Clone, PartialEq)]
-pub struct JoinEdge {
-    pub from_column: ObjectId,
-    pub to_column: ObjectId,
-}
-
 /// El camino mas corto entre dos tablas por el grafo de relaciones.
 ///
-/// Se busca con BFS sobre las relaciones activas. Devuelve los aristas en orden, desde la
-/// tabla de hechos hacia la tabla destino. Si no hay camino, el modelo esta desconectado y
-/// la consulta no se puede escribir.
+/// Vive en el modelo, no aqui. El interprete necesita la misma pregunta para resolver una
+/// agregacion que cruza tablas, y dos implementaciones de BFS divergen en cuanto una
+/// relationship se filtra y la otra no.
 fn shortest_join_path(model: &Model, from: ObjectId, to: ObjectId) -> Option<Vec<JoinEdge>> {
-    if from == to {
-        return Some(Vec::new());
-    }
-    let mut queue: std::collections::VecDeque<(ObjectId, Vec<JoinEdge>)> =
-        std::collections::VecDeque::new();
-    let mut visited = vec![from];
-
-    queue.push_back((from, Vec::new()));
-    while let Some((table, path)) = queue.pop_front() {
-        for relationship in &model.relationships {
-            if relationship.role != datan_model::RelationshipRole::Active {
-                continue;
-            }
-            let from_table = model.column(relationship.from_column).map(|(t, _)| t.id);
-            let to_table = model.column(relationship.to_column).map(|(t, _)| t.id);
-
-            // La relationship se puede recorrer en los dos sentidos: el `FROM` de un JOIN no
-            // distingue dimension de hecho.
-            let edges: [(Option<ObjectId>, JoinEdge); 2] = [
-                (
-                    from_table,
-                    JoinEdge {
-                        from_column: relationship.from_column,
-                        to_column: relationship.to_column,
-                    },
-                ),
-                (
-                    to_table,
-                    JoinEdge {
-                        from_column: relationship.to_column,
-                        to_column: relationship.from_column,
-                    },
-                ),
-            ];
-
-            for (source, edge) in edges {
-                // `edge.from_column` es la columna del lado de `source`, y
-                // `edge.to_column` la del lado del destino. Eso ya codifica la direccion:
-                // no hace falta volver a mirar la relationship.
-                let Some(source) = source else { continue };
-                if source != table {
-                    continue;
-                }
-                let destination = model
-                    .column(edge.to_column)
-                    .map(|(t, _)| t.id)?;
-
-                if destination == to {
-                    let mut full = path.clone();
-                    full.push(edge);
-                    return Some(full);
-                }
-                if !visited.contains(&destination) {
-                    visited.push(destination);
-                    let mut extended = path.clone();
-                    extended.push(edge);
-                    queue.push_back((destination, extended));
-                }
-            }
-        }
-    }
-    None
+    model.join_path(from, to)
 }
 
 const _: Option<Granularity> = None;

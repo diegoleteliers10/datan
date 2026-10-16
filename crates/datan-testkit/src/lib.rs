@@ -17,7 +17,7 @@
 //! construye el dia 1, la divergencia aparece el dia 2.
 
 use datan_dax_eval::{
-    AtomKind, AtomSet, CalendarUnit, CellResult, DateColumn, DateRange, FilterContext,
+    AtomKind, AtomSet, CalendarUnit, DateColumn, DateRange, FilterContext,
     FilterValue, IntColumn, Interpreter, MemorySource, Scalar, TextColumn, TimeFunction,
     extract_atoms, filters as time_filters,
 };
@@ -35,6 +35,11 @@ pub struct PathResult {
     pub sql: Option<String>,
     pub sql_value: Option<String>,
     pub interp_value: Option<Scalar>,
+    /// La matriz completa por cada camino: agrupamiento primero, medidas despues.
+    ///
+    /// Es la comparacion que vale. La de una sola linea solo dice algo para `SUM`.
+    pub sql_rows: Option<Vec<Vec<String>>>,
+    pub interp_rows: Vec<Vec<String>>,
     /// Los dos caminos existen y dicen lo mismo.
     pub agrees: bool,
     /// El atomo cae al interprete y no tiene fast path. NO es un fallo.
@@ -327,56 +332,76 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
     let sources = SourceMap::from_model(&model);
 
     // Camino 1: SQL. El atomo tiene que ser bajable; si no, este caso no prueba nada.
+    //
+    // El SQL se envuelve en un `SELECT` que castea TODAS las filas a texto, no en un
+    // `SUM(atom_0)`.
+    //
+    // La version anterior sumaba la columna del atomo sobre las filas de grupo. Para `SUM`
+    // eso es inocuo, porque la suma de sumas es el total. Para `MIN`, `MAX` y `AVERAGE` no
+    // lo es: `SUM(MIN(qty * pid))` sobre tres regiones es la SUMA de los minimos, y
+    // `AVG(AVG(x))` no es el promedio. Los tres casos divergian y la culpa era del arnes,
+    // no del motor. Comparar el conjunto de filas no tiene ese problema.
     let sql = match lower(&model, &sources, &atoms, &context) {
-        // El `SELECT` externo trae solo la columna del atomo: si trae tambien las de
-        // agrupamiento, `scalar(0)` lee la primera y devuelve `region`.
-        //
-        // El cast a VARCHAR es necesario porque `SUM` de enteros devuelve `HUGEINT`, que
-        // Arrow representa como `Decimal128`, y `scalar` solo lee columnas de texto.
-        Ok(plan) => {
-            // `SUM(atom_0)` y no `atom_0`: sin filtro la consulta agrupa por region y
-            // devuelve una fila POR CELDA. Leer solo la primera compara una celda con un
-            // total. La suite compara totales.
-            Some(format!(
-                "SELECT CAST(SUM(atom_0) AS VARCHAR) AS v FROM ({})",
-                plan.sql
-            ))
-        }
+        Ok(plan) => Some(plan.sql),
         Err(error) => {
             eprintln!("[debug] {} no baja a SQL: {error}", case.name);
             None
         }
     };
-    let sql_value = match &sql {
-        Some(sql) => engine.scalar(sql, 0).map_err(|e| e.to_string())?,
-        None => None,
+    let (sql_rows, sql_value) = match &sql {
+        Some(sql) => {
+            // Se castea a VARCHAR porque `SUM` de enteros devuelve `HUGEINT`, que Arrow
+            // representa como `Decimal128`, y la lectura de celdas no lo mira.
+            let rendered = engine.render_rows(sql).map_err(|e| e.to_string())?;
+            let value = rendered.first().map(|row| row.first().cloned().unwrap_or_default());
+            (Some(rendered), value)
+        }
+        None => (None, None),
     };
 
-    // Camino 2: interprete.
+    // Camino 2: interprete, celda de grupo a celda de grupo.
+    //
+    // El agrupamiento se evalua entero, no celda a celda con `evaluate_cell`: comparar un
+    // total del fast path contra un total del interprete solo valida `SUM`. Con `MIN` o
+    // `AVERAGE` hace falta la matriz, porque una suma de minimos no es el minimo.
     let source = memory_source();
     let interpreter = Interpreter::new(&model, &source);
-    let result: CellResult = interpreter
-        .evaluate_cell(&atoms.atoms, &context)
+    let grouped = interpreter
+        .evaluate_grouped(&atoms.atoms, &context, &grouping, MAX_CELLS)
         .map_err(|e| e.to_string())?;
-    // El primer atomo es el que se compara. Los casos de la suite tienen una sola medida.
-    let interp_value = atoms
-        .atoms
-        .first()
-        .and_then(|atom| result.get(&atom.label).cloned());
+    let interp_rows: Vec<Vec<String>> = grouped
+        .rows
+        .iter()
+        .map(|row| row.iter().map(scalar_text).collect())
+        .collect();
+
+    // El primer atomo es el que se compara en la vista de una linea. Los casos de la suite
+    // tienen una sola medida.
+    let interp_value = interpreter
+        .evaluate_cell(&atoms.atoms, &context)
+        .ok()
+        .and_then(|result| {
+            atoms
+                .atoms
+                .first()
+                .and_then(|atom| result.get(&atom.label).cloned())
+        });
 
     // El camino SQL devuelve texto, el interprete devuelve `Scalar`. La comparacion
     // numerica sobre el texto parseado evita los falsos negativos de tipo: `SUM` de un
     // entero devuelve `HUGEINT` en DuckDB y `Integer` en Rust.
     // `None` del lado SQL significa que el filtro no dejo filas, y `Blank` del lado
     // interprete significa lo mismo. Eso es coincidencia, no una prueba que no prueba.
-    let agrees = match (&sql_value, &interp_value) {
-        (Some(a), Some(b)) => a
-            .parse::<f64>()
-            .map(|left| scalars_agree(&Scalar::Decimal(left), b))
-            .unwrap_or(false),
-        (None, None) => true,
-        (None, Some(b)) => b.is_blank(),
-        _ => false,
+    // La comparacion de UNA linea queda para cuando no hay fast path. Con fast path manda
+    // la matriz: comparar el primer renglon de dos cosas distintas es comparar celdas que
+    // no se corresponden.
+    let agrees = if sql.is_some() {
+        match (&sql_rows, &interp_rows) {
+            (Some(sql), interpreter) => matrices_agree(sql, interpreter),
+            _ => false,
+        }
+    } else {
+        true
     };
 
     // Un caso sin fast path no es un fallo: es el motivo de existir del interprete. Lo que
@@ -389,22 +414,62 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
         sql,
         sql_value,
         interp_value,
+        sql_rows,
+        interp_rows,
         agrees: agrees || interpreter_only,
         interpreter_only,
         error: None,
     })
 }
 
-/// Dos escalares coinciden si sus numeros coinciden.
+/// Tope de celdas de una matriz.
 ///
-/// La comparacion es numerica a proposito: `SUM` de un entero devuelve `HUGEINT` en
-/// DuckDB y `Integer` en Rust. Comparar tipos strictos daria falsos negativos en cada
-/// agregacion.
-fn scalars_agree(sql: &Scalar, interp: &Scalar) -> bool {
-    if sql.is_blank() && interp.is_blank() {
-        return true;
+/// Un producto cartesiano de columnas de alta cardinalidad no es un informe. El corte se
+/// produce con un error que dice el numero, no truncando la matriz en silencio: un informe
+/// que sale con menos celdas de las que tiene parece uno que funciona.
+const MAX_CELLS: usize = 100_000;
+
+/// Un escalar como texto, con la misma convencion que `Engine::render_rows`.
+///
+/// La comparacion es de cadenas, asi que las dos tienen que usar el mismo redondeo. Sin el,
+/// `27009.090909` en DuckDB y `27009.09090909091` en Rust divergen siempre.
+fn scalar_text(value: &Scalar) -> String {
+    match value {
+        Scalar::Blank => "NULL".to_string(),
+        Scalar::Boolean(b) => b.to_string(),
+        Scalar::Integer(n) => n.to_string(),
+        Scalar::Decimal(n) => {
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{n:.6}")
+            }
+        }
+        Scalar::Text(t) => t.clone(),
+        Scalar::Date(day) => day.to_string(),
     }
-    (sql.as_number() - interp.as_number()).abs() < 1e-9
+}
+
+/// Dos matrices coinciden si tienen las mismas filas, en el mismo orden.
+///
+/// El orden importa y por eso `evaluate_grouped` ordena por las columnas de agrupamiento con
+/// el mismo criterio que el `GROUP BY` de DuckDB. Comparar sin ordenar daria divergencias que
+/// son de orden, no de valor, y taparian las que si son de valor.
+fn matrices_agree(sql: &[Vec<String>], interpreter: &[Vec<String>]) -> bool {
+    // Se ordena ANTES de comparar. El orden de filas no es parte de la semantica que el
+    // arnes verifica, y comparar en el orden de salida convierte cada diferencia de hash en
+    // una divergencia, que tapa las de valor.
+    //
+    // El `ORDER BY` del lowering da orden estable al grid; esto es lo mismo aplicado a la
+    // comparacion, y hace que un fallo de orden no se confunda con un fallo de numero.
+    let mut left: Vec<&Vec<String>> = sql.iter().collect();
+    let mut right: Vec<&Vec<String>> = interpreter.iter().collect();
+    left.sort();
+    right.sort();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter().zip(&right).all(|(a, b)| a == b)
 }
 
 /// Ejecuta la suite entera.
@@ -423,6 +488,8 @@ pub fn run_suite(engine: &Engine, cases: &[Case]) -> Vec<PathResult> {
                 sql: None,
                 sql_value: None,
                 interp_value: None,
+                sql_rows: None,
+                interp_rows: Vec::new(),
                 agrees: false,
                 interpreter_only: false,
                 error: Some(error),
@@ -463,6 +530,25 @@ pub fn suite() -> Vec<Case> {
             .filter("category", "A"),
         Case::new("filtro por clave", "SUM('fact_sales'[qty])")
             .filter("product_id", "3"),
+
+        // Agregaciones sobre EXPRESION. Son las medidas de negocio mas comunes y el
+        // fixture no tenia ninguna: los 27 casos anteriores usaban todas una sola columna, y
+        // el interprete devolvia "no se puede interpretar" sin que el arnés lo notara,
+        // porque el fast path si bajaba y la comparacion solo miraba SQL.
+        Case::new("suma de un producto de columnas", "SUM('fact_sales'[qty] * 'fact_sales'[amount])"),
+        Case::new("suma de una expresion que cruza tablas", "SUM('fact_sales'[qty] * 'dim_product'[product_id])"),
+        Case::new("suma de una expresion por region", "SUM('fact_sales'[qty] * 'fact_sales'[amount])")
+            .filter("region", "Norte"),
+        Case::new("min de una expresion", "MIN('fact_sales'[qty] * 'dim_product'[product_id])"),
+        Case::new("max de una expresion", "MAX('fact_sales'[qty] * 'dim_product'[product_id])"),
+        Case::new("average de una expresion", "AVERAGE('fact_sales'[qty] * 'fact_sales'[amount])"),
+        // Una suma de ceros da 0, y un BLANK solo cuando no hay filas o todas son blank. La
+        // distincion importa: `0` es un dato y BLANK es "no hay".
+        Case::new("suma de una expresion que vale cero", "SUM('fact_sales'[qty] * 0)")
+            .expecting(Scalar::Integer(0)),
+        Case::new("suma de una expresion sobre filtro vacio", "SUM('fact_sales'[qty] * 'fact_sales'[amount])")
+            .filter("region", "Oeste")
+            .expecting(Scalar::Blank),
 
         // Casos de `CALCULATE`. No tienen fast path: el atomo se marca para el interprete
         // porque el conjunto de filtros cambia de forma no uniforme. El harness tiene que
