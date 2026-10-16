@@ -123,33 +123,41 @@ impl Datan {
 
         for connection in &connections.list {
             let database = connection.database.clone();
-            let mut row = div()
-                .w(px(360.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_4()
-                .py_3()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .hover(|style| style.bg(theme.list_hover))
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(connection.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.muted_foreground)
-                        .child(connection.database.clone()),
-                );
-            row.interactivity().on_click(cx.listener({
-                move |view, _event, _window, cx| view.connect(&database, cx)
-            }));
-            list = list.child(row);
+            list = list.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "conn-{}",
+                        connection.database
+                    ))))
+                    .w(px(360.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.list_hover))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(connection.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted_foreground)
+                            .child(connection.database.clone()),
+                    )
+                    .on_click(cx.listener({
+                        move |view, _event, _window, cx| {
+                            eprintln!("[datan] click en conexion: {database}");
+                            view.connect(&database, cx)
+                        }
+                    })),
+            );
         }
 
         list.into_any_element()
@@ -503,15 +511,22 @@ fn build_grid(matrix: &Matrix) -> Grid {
 
 /// Un boton con clic.
 ///
-/// `Div::on_click` toma `&mut self`, asi que una cadena temporal de `div()...on_click()`
-/// no compila. Cada elemento pinchable es una funcion con su variable mutable, no una
-/// cadena: se lee mejor y no hay que recordar por que compila.
+/// El id no es opcional. La via imperativa, `element.interactivity().on_click(...)`,
+/// registra el listener pero gpui no despacha el clic: el elemento se pinta, el cursor
+/// cambia, y el clic no hace nada. Es exactamente lo que paso en pantalla: las conexiones se
+/// veian bien y no se podian elegir.
+///
+/// Los clics se despachan por la via STATEFUL: `div().id(...)` convierte el `Div` en
+/// `Stateful<Div>`, y el `on_click` de `StatefulInteractiveElement` si dispara. Cada id
+/// tiene que ser unico y estable dentro de la ventana.
 fn clickable(
     theme: &Theme,
+    id: SharedString,
     label: String,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let mut element = div()
+    div()
+        .id(ElementId::Name(id))
         .px_3()
         .py_1()
         .rounded_md()
@@ -519,22 +534,23 @@ fn clickable(
         .border_color(theme.border)
         .text_size(px(12.0))
         .cursor_pointer()
-        .child(label);
-    element.interactivity().on_click(on_click);
-    element.into_any_element()
+        .child(label)
+        .on_click(on_click)
+        .into_any_element()
 }
 
 fn retry_button(theme: &Theme, database: &str, cx: &mut Context<Datan>) -> AnyElement {
     let database = database.to_string();
     clickable(
         theme,
+        "retry".into(),
         "Reintentar".to_string(),
         cx.listener(move |view, _event, _window, cx| view.connect(&database, cx)),
     )
 }
 
 fn clear_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
-    clickable(theme, "Limpiar todo".to_string(), cx.listener(
+    clickable(theme, "clear".into(), "Limpiar todo".to_string(), cx.listener(
         |view, _event, _window, cx| {
             view.filters.clear();
             view.refresh(cx);
@@ -550,7 +566,8 @@ fn filter_pill(
     cx: &mut Context<Datan>,
 ) -> AnyElement {
     let label = format!("{} = {}  x", filter.label, filter.value);
-    let mut element = div()
+    div()
+        .id(ElementId::Name(SharedString::from(format!("pill-{index}"))))
         .px_2()
         .py_1()
         .rounded_md()
@@ -559,13 +576,11 @@ fn filter_pill(
         .text_size(px(12.0))
         .cursor_pointer()
         .hover(|style| style.opacity(0.7))
-        .child(label);
-    element
-        .interactivity()
+        .child(label)
         .on_click(cx.listener(move |view, _event, _window, cx| {
             view.clear_filter(index, cx);
-        }));
-    element.into_any_element()
+        }))
+        .into_any_element()
 }
 
 /// Una fila de la barra lateral.
@@ -578,6 +593,11 @@ fn sidebar_item(
     cx: &mut Context<Datan>,
 ) -> AnyElement {
     let mut element = div()
+        .id(ElementId::Name(SharedString::from(format!(
+            "side-{}-{}",
+            if is_measure { "m" } else { "d" },
+            column.0
+        ))))
         .flex()
         .items_center()
         .gap_2()
@@ -593,11 +613,10 @@ fn sidebar_item(
         element = element.bg(theme.accent);
     }
     element
-        .interactivity()
         .on_click(cx.listener(move |view, _event, _window, cx| {
             view.toggle(column, is_measure, cx);
-        }));
-    element.into_any_element()
+        }))
+        .into_any_element()
 }
 
 impl Render for Datan {
@@ -894,6 +913,10 @@ impl Datan {
                 range
                     .map(|row| {
                         let cells = columns.iter().enumerate().map(|(index, column)| {
+                            // Las celdas de medida y las de dimension son tipos distintos
+                            // (Div y Stateful<Div>), asi que la fila se arma de elementos ya
+                            // convertidos.
+                            
                             let mut cell = div()
                                 .w(px(200.0))
                                 .flex_shrink_0()
@@ -912,20 +935,27 @@ impl Datan {
                             }
 
                             if index >= dimension_count {
-                                return cell;
+                                return cell.into_any_element();
                             }
 
-                            let clickable = cx_hover(theme.list_hover, cell);
                             let row_index = row;
                             let column_index = index;
                             let view = view.clone();
-                            let mut interactive = clickable.cursor_pointer();
-                            interactive.interactivity().on_click(move |_event, _window, app| {
-                                view.update(app, |view, cx| {
-                                    view.drill(row_index, column_index, cx);
-                                });
-                            });
-                            interactive
+                            let id = ElementId::Name(SharedString::from(format!(
+                                "cell-{row_index}-{column_index}"
+                            )));
+                            cx_hover(theme.list_hover, cell)
+                                .cursor_pointer()
+                                .id(id)
+                                .on_click(move |_event, _window, app| {
+                                    eprintln!(
+                                        "[datan] click en celda ({row_index}, {column_index})"
+                                    );
+                                    view.update(app, |view, cx| {
+                                        view.drill(row_index, column_index, cx);
+                                    });
+                                })
+                                .into_any_element()
                         });
 
                         div()
@@ -949,13 +979,13 @@ impl Datan {
 }
 
 fn save_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
-    clickable(theme, "Guardar".to_string(), cx.listener(
+    clickable(theme, "save".into(), "Guardar".to_string(), cx.listener(
         |view, _event, _window, cx| view.save_report(cx),
     ))
 }
 
 fn export_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
-    clickable(theme, "CSV".to_string(), cx.listener(
+    clickable(theme, "export".into(), "CSV".to_string(), cx.listener(
         |view, _event, _window, cx| view.export_csv(cx),
     ))
 }
