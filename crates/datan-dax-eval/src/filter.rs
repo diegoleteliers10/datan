@@ -286,14 +286,24 @@ fn propagate_one(&self, model: &Model, relationship: &Relationship) -> FilterCon
     if !origin_filters.is_empty() {
         // El conjunto que sale de aplicar esos filtros en la tabla de origen.
         let origin_context = FilterContext::from_filters(origin_filters);
-        result = result.with(Filter {
+        let propagated = Filter {
             column: relationship.to_column,
             operator: FilterOperator::In,
             source: FilterSource::Propagated {
                 origin_column: relationship.from_column,
                 origin_filters: origin_context.filters.into_values().flatten().collect(),
             },
-        });
+        };
+        // Un semijoin REEMPLAZA a los anteriores de la misma columna, no se suma.
+        //
+        // Sin esto, `ALLEXCEPT(Dim Product, [Region])` conserva el semijoin viejo que
+        // todavia lleva `category = 'A'` y ademas anade el nuevo que solo lleva
+        // `region = 'Norte'`. Los dos se aplican a la vez y el filtro que `ALLEXCEPT`
+        // pretendia quitar sigue restringiendo el resultado. Es silencioso: el contexto
+        // tiene mas filtros de los que deberia y el numero sale mal sin que nada avise.
+        let mut next = result.without_column(relationship.to_column);
+        next = next.with(propagated);
+        result = next;
     }
 
     // Bidireccional: tambien al reves. Un ciclo aca es lo que hace que el backend SQL no

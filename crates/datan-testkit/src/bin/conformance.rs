@@ -33,18 +33,28 @@ fn main() {
             Some(value) => format!("{value:?}"),
             None => "ninguno".to_string(),
         };
-        let mark = if result.agrees { "ok" } else { "DIFIERE" };
+        let mark = if !result.agrees {
+            "DIFIERE"
+        } else if result.interpreter_only {
+            "solo int."
+        } else {
+            "ok"
+        };
         if !result.agrees {
             divergen += 1;
         }
         println!("{:<32} {:>14} {:>14}  {mark}", result.label, sql, interp);
     }
 
-    println!("\n{} casos, {divergen} divergen, {sin_sql} sin fast path", results.len());
+    let verificados = results.len() - sin_sql - divergen;
+    println!(
+        "\n{} casos: {verificados} por los dos caminos, {sin_sql} solo interprete, {divergen} divergen",
+        results.len()
+    );
 
     if divergen == 0 {
-        println!("\n  PASA. El interprete y el fast path SQL dan los mismos numeros.");
-        println!("  La suite queda como la red de seguridad de la Fase 2.");
+        println!("\n  PASA. Donde hay fast path, los dos caminos dicen lo mismo.");
+        println!("  Los casos de CALCULATE van solo por interprete, que es lo que deben hacer.");
     } else {
         println!("\n  FALLA. Los dos caminos NO coinciden.");
         println!("  Cada divergencia es una medida que daria un numero distinto segun");

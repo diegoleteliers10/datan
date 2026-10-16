@@ -28,6 +28,37 @@ fn el_fast_path_y_el_interprete_coinciden() {
     );
 }
 
+/// Un caso sin fast path NO es un fallo: es el motivo de existir del interprete. Un caso con
+/// fast path que diverge SI lo es.
+#[test]
+fn los_casos_de_calculate_van_solo_por_interprete() {
+    let engine = engine().expect("carga fixtures");
+    let results = run_suite(&engine, &suite());
+
+    let con_calculate: Vec<_> = results
+        .iter()
+        .filter(|result| result.label.contains("calculate"))
+        .collect();
+
+    assert!(
+        !con_calculate.is_empty(),
+        "la suite no cubre CALCULATE, y es donde vive la transicion de contexto"
+    );
+    for result in con_calculate {
+        assert!(
+            result.interpreter_only,
+            "{} tiene un fast path. Un CALCULATE con modificadores no puede bajar a SQL, \
+             y si baja significa que el filtro se pierde en el camino.",
+            result.label
+        );
+        assert!(
+            result.interp_value.is_some(),
+            "{} no tiene valor del interprete",
+            result.label
+        );
+    }
+}
+
 #[test]
 fn la_suite_cubre_las_agregaciones_de_dax() {
     // Si la suite se reduce sin querer, esta prueba no lo detecta. El conteo es una
@@ -35,7 +66,7 @@ fn la_suite_cubre_las_agregaciones_de_dax() {
     let engine = engine().expect("carga fixtures");
     let results = run_suite(&engine, &suite());
     assert!(
-        results.len() >= 15,
+        results.len() >= 18,
         "la suite se redujo a {} casos. La cobertura baja en silencio.",
         results.len()
     );

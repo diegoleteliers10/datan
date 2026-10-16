@@ -80,10 +80,21 @@ pub fn extract_atoms(
         grouping: grouping.to_vec(),
         atoms: Vec::new(),
         depth: 0,
+        unsupported: Vec::new(),
     };
     extractor.extract(&checked.expr, &context)?;
+    // Cada atomo lleva el contexto bajo el que fue extraido. La propagacion ocurre UNA
+    // vez, al extraer, para que un `ALL` de un `CALCULATE` no se deshaga al evaluar.
+    let atoms = extractor
+        .atoms
+        .into_iter()
+        .map(|atom| Atom {
+            context: atom.context.propagate(model),
+            ..atom
+        })
+        .collect();
     Ok(AtomSet {
-        atoms: extractor.atoms,
+        atoms,
         grouping: grouping.to_vec(),
     })
 }

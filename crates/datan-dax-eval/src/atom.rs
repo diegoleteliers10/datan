@@ -112,6 +112,9 @@ pub(crate) struct Extractor<'a> {
     pub(crate) grouping: Vec<ObjectId>,
     pub(crate) atoms: Vec<Atom>,
     pub(crate) depth: usize,
+    /// Modificadores de `CALCULATE` que no se pudieron interpretar. Sefilled para que el
+    /// linter avise en vez de perder el filtro en silencio.
+    pub(crate) unsupported: Vec<String>,
 }
 
 impl Extractor<'_> {
@@ -258,35 +261,48 @@ impl Extractor<'_> {
         if args.is_empty() {
             return Ok(());
         }
-        // Los modificadores todavia no estan interpreted. Un atomo con modificadores de
-        // `ALL` cambia el conjunto de filtros de forma no uniforme, asi que se marca para
-        // el interprete.
-        let has_modifiers = args.len() > 1;
-        self.extract_with_flags(&args[0], context, has_modifiers)?;
+
+        // Los modificadores se resuelven y SE APLICAN antes de extraer el cuerpo. Eso es lo
+        // que hace que `CALCULATE([Revenue], ALL('Dim Product'))` se evalue sin el filtro de
+        // la dimension: el atomo que sale lleva un contexto ya modificado.
+        //
+        // Antes el atomo solo se marcaba "para el interprete" y conservaba el contexto
+        // original. Eso hacia que los dos caminos dieran numeros distintos siempre que
+        // hubiera modificadores, y la suite no lo cubria porque ningun caso los usaba.
+        let mut effective = context.clone();
+        let mut resolved = Vec::new();
+        for modifier in &args[1..] {
+            match crate::modifiers::resolve_modifier(modifier) {
+                Ok(modifier) => {
+                    effective = crate::modifiers::apply_modifiers(
+                        self.model,
+                        &effective,
+                        std::slice::from_ref(&modifier),
+                    )?;
+                    resolved.push(modifier);
+                }
+                Err(error) => {
+                    // Un modificador que no se sabe interpretar no se ignora en silencio:
+                    // el atomo cae al interprete con un diagnostico, no se pierde el filtro.
+                    self.unsupported.push(error.to_string());
+                    return Err(crate::EvalError::Unsupported(error.to_string()));
+                }
+            }
+        }
+
+        let before = self.atoms.len();
+        self.extract(&args[0], &effective)?;
+        if !resolved.is_empty() {
+            for atom in &mut self.atoms[before..] {
+                atom.requires_interpreter = true;
+            }
+        }
         for modifier in &args[1..] {
             self.extract(modifier, context)?;
         }
         Ok(())
     }
 
-    fn extract_with_flags(
-        &mut self,
-        expr: &CheckedExpr,
-        context: &FilterContext,
-        force_interpreter: bool,
-    ) -> Result<(), crate::EvalError> {
-        let before = self.atoms.len();
-        self.extract(expr, context)?;
-        if force_interpreter {
-            // Los atomos generados bajo un CALCULATE con modificadores necesitan el
-            // interprete: el conjunto de filtros cambia de forma no uniforme, asi que no
-            // se puede expresar como un agregado de SQL con un WHERE fijo.
-            for atom in &mut self.atoms[before..] {
-                atom.requires_interpreter = true;
-            }
-        }
-        Ok(())
-    }
 
     fn emit(
         &mut self,
@@ -326,7 +342,11 @@ impl Extractor<'_> {
             column,
             table,
             expression,
-            context: context.propagate(self.model),
+            // El contexto se propaga UNA vez, aqui. Propagarlo en el interprete lo
+            // repropagaria y los filtros modificados por `ALL` volverian a aparecer: la
+            // propagacion es idempotente solo si el contexto no cambio entre medias, y
+            // con modificadores si cambio.
+            context: context.clone(),
             granularity,
             label,
             requires_interpreter: false,

@@ -141,8 +141,16 @@ impl<'a> Interpreter<'a> {
     pub fn evaluate_atom(
         &self,
         atom: &Atom,
-        context: &FilterContext,
+        _cell_context: &FilterContext,
     ) -> Result<Scalar, InterpError> {
+        // El contexto del ATOMO manda sobre el de la celda, SIEMPRE.
+        //
+        // No hay caso de respaldo: un contexto vacio es un contexto vacio, no "el de la
+        // celda". `CALCULATE([Qty], ALL('Dim Product'))` deja el contexto del atomo VACIO a
+        // proposito, y usar el de la celda reintroducia el filtro que el `ALL` acaba de
+        // quitar. Es un fallo en silencio: devuelve numeros y no avisa.
+        let context = &atom.context;
+
         // `COUNTROWS` y las agregaciones sobre tabla no tienen columna: la tabla viene en el
         // atomo. El resto la deduce de la columna.
         let table = match (atom.column, atom.table) {

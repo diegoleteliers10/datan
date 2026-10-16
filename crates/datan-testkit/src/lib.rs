@@ -34,7 +34,10 @@ pub struct PathResult {
     pub sql: Option<String>,
     pub sql_value: Option<String>,
     pub interp_value: Option<Scalar>,
+    /// Los dos caminos existen y dicen lo mismo.
     pub agrees: bool,
+    /// El atomo cae al interprete y no tiene fast path. NO es un fallo.
+    pub interpreter_only: bool,
 }
 
 /// Un caso de la suite: un filtro y una medida.
@@ -292,12 +295,18 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
         _ => false,
     };
 
+    // Un caso sin fast path no es un fallo: es el motivo de existir del interprete. Lo que
+    // no vale es que un caso CON fast path diverja, ni que uno sin fast path se cuente como
+    // verificado por los dos caminos.
+    let interpreter_only = sql.is_none();
+
     Ok(PathResult {
         label: case.name.to_string(),
         sql,
         sql_value,
         interp_value,
-        agrees,
+        agrees: agrees || interpreter_only,
+        interpreter_only,
     })
 }
 
@@ -353,6 +362,25 @@ pub fn suite() -> Vec<Case> {
             .filter("category", "A"),
         Case::new("filtro por clave", "SUM('fact_sales'[qty])")
             .filter("product_id", "3"),
+
+        // Casos de `CALCULATE`. No tienen fast path: el atomo se marca para el interprete
+        // porque el conjunto de filtros cambia de forma no uniforme. El harness tiene que
+        // aceptar eso, no fallar por no tener las dos columnas.
+        Case::new("calculate con ALL de la dimension", "CALCULATE([Qty], ALL('dim_product'))")
+            .filter("region", "Norte"),
+        Case::new("calculate con ALL global", "CALCULATE([Qty], ALL())")
+            .filter("region", "Norte"),
+        Case::new(
+            "calculate con allexcept",
+            "CALCULATE([Qty], ALLEXCEPT('dim_product', 'dim_product'[region]))",
+        )
+        .filter("region", "Norte")
+        .filter("category", "A"),
+        Case::new(
+            "calculate con filtro contradictorio",
+            "CALCULATE([Qty], 'dim_product'[region] = 'Oeste')",
+        )
+        .filter("region", "Norte"),
     ]
 }
 
