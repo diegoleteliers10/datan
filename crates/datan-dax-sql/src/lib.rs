@@ -36,7 +36,9 @@ mod source;
 pub use quote::{escape_string, quote_identifier, quote_qualified};
 pub use source::{SourceMap, SourceMapError};
 
-use datan_dax_eval::{Atom, AtomKind, AtomSet, FilterContext, FilterSource, Granularity};
+use datan_dax_eval::{
+    Atom, AtomKind, AtomSet, BinaryOp, FilterContext, FilterSource, Granularity, Shape,
+};
 use datan_model::{JoinEdge, Model, ObjectId};
 use thiserror::Error;
 
@@ -64,6 +66,12 @@ pub struct OutputColumn {
     pub source: Option<ObjectId>,
     /// La etiqueta del atomo, si es un atomo.
     pub atom: Option<String>,
+    /// La medida que produce esta salida, si viene de una forma.
+    ///
+    /// El `name` es un slot (`atom_0`) porque el orden tiene que ser estable entre consultas.
+    /// La medida es lo que el grid pinta en la cabecera. Sin este campo, una columna de
+    /// salida no sabe que medida representa y la cabecera tendria que adivinarla.
+    pub measure: Option<String>,
 }
 
 /// El plan generado, mas el SQL.
@@ -154,6 +162,7 @@ pub fn lower(
             name: physical.to_string(),
             source: Some(*column),
             atom: None,
+            measure: None,
         });
         select.push(format!(
             "{}.{}",
@@ -193,15 +202,38 @@ pub fn lower(
         }
     }
 
-    for (index, atom) in atoms.atoms.iter().enumerate() {
-        let name = SqlPlan::atom_column(index);
-        let expression = lower_atom(model, sources, &aliases, atom)?;
-        select.push(format!("{expression} AS {}", quote_identifier(&name)));
-        columns.push(OutputColumn {
-            name,
-            source: atom.column,
-            atom: Some(atom.label.clone()),
-        });
+    // Dos caminos de salida, y la distincion importa.
+    //
+    // Con `outputs`, cada salida es una FORMA: una medida que es aritmetica entre
+    // agregaciones emite una columna construida con la division, y las hojas que repite no
+    // son copias sino la misma expresion escrita dos veces.
+    //
+    // Sin `outputs`, cada atomo es su propia columna. Es el caso de siempre: una medida de
+    // una sola hoja, o una que el interprete tiene que resolver.
+    if !atoms.outputs.is_empty() {
+        for (index, output) in atoms.outputs.iter().enumerate() {
+            let name = SqlPlan::atom_column(index);
+            let expression = render_shape(&output.shape, atoms, model, sources, &aliases)?;
+            select.push(format!("{expression} AS {}", quote_identifier(&name)));
+            columns.push(OutputColumn {
+                name,
+                source: atoms.outputs_atom_column(&output.shape),
+                atom: Some(output.label.clone()),
+                measure: Some(output.label.clone()),
+            });
+        }
+    } else {
+        for (index, atom) in atoms.atoms.iter().enumerate() {
+            let name = SqlPlan::atom_column(index);
+            let expression = lower_atom(model, sources, &aliases, atom)?;
+            select.push(format!("{expression} AS {}", quote_identifier(&name)));
+            columns.push(OutputColumn {
+                name,
+                source: atom.column,
+                atom: Some(atom.label.clone()),
+                measure: None,
+            });
+        }
     }
 
     let where_clause = lower_filters(model, sources, &aliases, &atoms.grouping, filters)?;
@@ -395,6 +427,50 @@ fn render_expression(
             return Err(LowerError::Unsupported(format!(
                 "`{other:?}` no se baja a SQL dentro de una agregacion"
             )));
+        }
+    })
+}
+
+/// Renderiza una forma sobre atomos.
+///
+/// Los parentesis van en cada nivel, no solo alrededor de los operandos binarios. Es lo que
+/// hace que `SUM(a + b * c)` no se lea como `SUM(a) + SUM(b) * SUM(c)`: la precedencia la
+/// decide el arbol, no el texto.
+///
+/// La division lleva `NULLIF` por el denominador. DuckDB devuelve `inf` para `x / 0` y
+/// `NaN` para `0 / 0`; DAX devuelve BLANK, y el interprete tambien. Sin el `NULLIF` la misma
+/// medida da un numero visiblemente falso en el fast path y un blanco en el interprete.
+fn render_shape(
+    shape: &Shape,
+    atoms: &AtomSet,
+    model: &Model,
+    sources: &SourceMap,
+    aliases: &Aliases,
+) -> Result<String, LowerError> {
+    Ok(match shape {
+        Shape::Number(value) => value.to_string(),
+        Shape::Atom(index) => {
+            let atom = atoms.atoms.get(*index).ok_or_else(|| {
+                LowerError::Unsupported(format!("la forma apunta al atomo {index}, que no existe"))
+            })?;
+            lower_atom(model, sources, aliases, atom)?
+        }
+        Shape::Binary { op, left, right } => {
+            let left = render_shape(left, atoms, model, sources, aliases)?;
+            let right = render_shape(right, atoms, model, sources, aliases)?;
+            let rendered = match op {
+                BinaryOp::Add => format!("({left} + {right})"),
+                BinaryOp::Subtract => format!("({left} - {right})"),
+                BinaryOp::Multiply => format!("({left} * {right})"),
+                BinaryOp::Divide => format!("({left} / NULLIF({right}, 0))"),
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "el operador `{}` no se baja a SQL dentro de una forma de medida",
+                        other.as_str()
+                    )));
+                }
+            };
+            rendered
         }
     })
 }

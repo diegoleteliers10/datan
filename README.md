@@ -16,6 +16,7 @@ App de escritorio multiplataforma para analisis de datos. Local first, sin servi
 | Measure IR, algebra de filtro | Completa. Propagacion conmutativa, incluso en ciclos. |
 | 2, CALCULATE y modifiers | Completa. `ALL`, `ALLEXCEPT`, `KEEPFILTERS`, `CROSSFILTER`, `USERELATIONSHIP`. |
 | 3, ciclos y time intelligence | Completa. `DATEADD`, `DATESYTD`, `PARALLELPERIOD`, `PREVIOUSYEAR`. |
+| 1, aritmetica entre medidas | Completa. `Margin` baja a SQL con `NULLIF`. |
 | 1, Postgres -> modelo -> medidas -> grid de 1M | El motor y la conexion funcionan. Falta pintar el grid. |
 | 4, import de PBIP / TMDL | Pendiente. Reservar Windows + humano en la semana 1. |
 

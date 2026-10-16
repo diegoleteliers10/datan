@@ -264,6 +264,46 @@ fn main() {
                         text.matches("HASH_GROUP_BY").count(),
                         text.matches("DELIM_JOIN").count()
                     );
+
+                    // Y contra la linea base a mano, que es la unica prueba que dice si el
+                    // numero es el correcto y no solo si el SQL tiene la forma correcta.
+                    let manual = format!(
+                        "SELECT cp.categoria,
+                            (SUM(pb.quantity * pb.precio_unitario) - SUM(pb.quantity * cp.costo))
+                                / NULLIF(SUM(pb.quantity * pb.precio_unitario), 0) AS atom_0
+                         FROM fact_line pb
+                         JOIN dim_product cp ON cp.product_key = pb.product_key
+                         GROUP BY cp.categoria"
+                    );
+                    let mut agreed = true;
+                    for (label, sql) in [
+                        (
+                            "solo en la generada",
+                            format!("SELECT * FROM ({}) EXCEPT SELECT * FROM ({manual})", plan.sql),
+                        ),
+                        (
+                            "solo en la linea base",
+                            format!("SELECT * FROM ({manual}) EXCEPT SELECT * FROM ({})", plan.sql),
+                        ),
+                    ] {
+                        match engine.query_arrow(&sql) {
+                            Err(datan_storage::StorageError::EmptyResult) => {}
+                            Err(error) => {
+                                println!("  ERROR al comparar: {error}");
+                                agreed = false;
+                            }
+                            Ok(batches) => {
+                                let count = batches.first().map(|b| b.num_rows()).unwrap_or(0);
+                                if count > 0 {
+                                    agreed = false;
+                                    println!("  {count} fila(s) {label}");
+                                }
+                            }
+                        }
+                    }
+                    if agreed {
+                        println!("  COINCIDE con la linea base a mano, en las dos direcciones");
+                    }
                 }
             }
         }

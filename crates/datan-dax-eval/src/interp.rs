@@ -22,7 +22,7 @@
 use datan_model::{Model, ObjectId};
 use std::collections::{BTreeSet, HashMap};
 
-use crate::atom::{Atom, AtomKind};
+use crate::atom::{Atom, AtomKind, MeasureOutput, Shape};
 use crate::{BinaryOp, CheckedExpr, UnaryOp};
 use crate::filter::{FilterContext, FilterSource};
 
@@ -671,6 +671,7 @@ impl<'a> Interpreter<'a> {
     pub fn evaluate_grouped(
         &self,
         atoms: &[Atom],
+        outputs: &[MeasureOutput],
         context: &FilterContext,
         grouping: &[ObjectId],
         max_cells: usize,
@@ -728,8 +729,21 @@ impl<'a> Interpreter<'a> {
             let cell: CellResult = self.evaluate_cell_in(atoms, &cell_context)?;
             let has_rows = self.any_rows(atoms, &cell_context);
             if any_value && has_rows {
-                for atom in atoms {
-                    cells.push(cell.get(&atom.label).cloned().unwrap_or(Scalar::Blank));
+                match outputs.first() {
+                    // Con forma: una columna por medida, y su valor se construye a partir de
+                    // las hojas. `Margin` no es el valor de ningun atomo: es una division de
+                    // ellos.
+                    Some(_) => {
+                        for output in outputs {
+                            cells.push(self.eval_shape(&output.shape, atoms, &cell.values));
+                        }
+                    }
+                    // Sin forma: una columna por atomo, que es lo de siempre.
+                    None => {
+                        for atom in atoms {
+                            cells.push(cell.get(&atom.label).cloned().unwrap_or(Scalar::Blank));
+                        }
+                    }
                 }
                 rows.push(cells);
             }
@@ -741,6 +755,38 @@ impl<'a> Interpreter<'a> {
 
         rows.sort_by(|left, right| compare_rows(left, right, grouping.len()));
         Ok(GroupedResult { rows, width: grouping.len() })
+    }
+
+    /// Calcula el valor de una forma a partir de los valores de sus hojas.
+    ///
+    /// La division devuelve BLANK cuando el denominador es cero o BLANK, igual que
+    /// `binary_numbers`. El fast path necesita `NULLIF` por lo mismo: DuckDB devuelve `inf`
+    /// y `NaN`, y la misma medida tiene que dar un blanco en los dos caminos.
+    ///
+    /// Una hoja que no esta en la celda es BLANK, y `BLANK + algo` es BLANK. Es la
+    /// propagacion de DAX: una medida que necesita una hoja vacia no vale cero, vale nada.
+    fn eval_shape(
+        &self,
+        shape: &Shape,
+        atoms: &[Atom],
+        values: &std::collections::HashMap<String, Scalar>,
+    ) -> Scalar {
+        match shape {
+            Shape::Number(value) => number_to_scalar(*value),
+            // La forma guarda el INDICE de la hoja, y el mapa de la celda guarda la
+            // ETIQUETA. Sin el indice no habria forma de WHICH hoja es, y con dos hojas de la
+            // misma etiqueta y distinto contexto se devolveria la equivocada.
+            Shape::Atom(index) => atoms
+                .get(*index)
+                .and_then(|atom| values.get(&atom.label))
+                .cloned()
+                .unwrap_or(Scalar::Blank),
+            Shape::Binary { op, left, right } => {
+                let left = self.eval_shape(left, atoms, values);
+                let right = self.eval_shape(right, atoms, values);
+                binary_numbers(&left, &right, *op)
+            }
+        }
     }
 
     /// Si alguna fila entra en la celda.

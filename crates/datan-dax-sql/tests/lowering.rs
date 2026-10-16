@@ -199,7 +199,8 @@ fn varios_atomos_salen_en_la_misma_pasada() {
     )
     .expect("extrae");
 
-    assert_eq!(atoms.atoms.len(), 2);
+    assert_eq!(atoms.atoms.len(), 2, "dos hojas");
+    assert_eq!(atoms.outputs.len(), 1, "pero UNA columna: la suma es una medida");
     let plan = lower(
         &model,
         &sources(&model),
@@ -214,8 +215,18 @@ fn varios_atomos_salen_en_la_misma_pasada() {
         "todo en un solo SELECT:\n{}",
         plan.sql
     );
-    assert!(plan.sql.contains("SUM(t0.\"Qty\") AS \"atom_0\""));
-    assert!(plan.sql.contains("COUNT(t0.\"SaleId\") AS \"atom_1\""));
+    // Una columna, no dos. `SUM(a) + COUNT(b)` es una medida, y una medida es una celda.
+    // Antes eran `atom_0` y `atom_1` y el informe tenia una columna invisible en medio.
+    assert!(
+        plan.sql.contains("(SUM(t0.\"Qty\") + COUNT(t0.\"SaleId\")) AS \"atom_0\""),
+        "las dos hojas van en una sola columna:\n{}",
+        plan.sql
+    );
+    assert!(
+        !plan.sql.contains("atom_1"),
+        "no debe haber una segunda columna de salida:\n{}",
+        plan.sql
+    );
 }
 
 #[test]
@@ -239,10 +250,43 @@ fn las_columnas_de_salida_tienen_nombre_estable() {
     )
     .expect("baja");
 
+    assert_eq!(plan.columns.len(), 2, "la agrupacion y la medida");
     assert_eq!(plan.columns[0].name, "Qty");
     assert_eq!(plan.columns[1].name, "atom_0");
-    assert_eq!(plan.columns[2].name, "atom_1");
-    assert_eq!(plan.columns[1].atom.as_deref(), Some("SUM(Qty)"));
+    assert_eq!(
+        plan.columns[1].measure.as_deref(),
+        Some("(SUM(Qty) + COUNT(SaleId))"),
+        "la salida guarda que MEDIDA es, no solo el slot"
+    );
+    // El slot se llama `atom_N` por indice porque el orden tiene que ser estable entre
+    // consultas. La medida es lo que el grid pinta en la cabecera.
+    assert_eq!(
+        plan.columns[1].atom.as_deref(),
+        Some("(SUM(Qty) + COUNT(SaleId))"),
+        "la etiqueta de la salida es la medida, no la hoja"
+    );
+}
+
+#[test]
+fn una_medida_sin_forma_sigue_emitiendo_una_columna_por_atomo() {
+    // La ruta plana no se tira. Una medida con `CALCULATE` no se puede expresar como
+    // combinacion aritmetica de hojas, y el lowering tiene que negarse en vez de emitir
+    // algo equivocado; este test fija que el camino de una columna por atomo sigue vivo
+    // para las medidas que si bajan sin forma.
+    let model = model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty])",
+        &model,
+        &filters,
+        &[FACT_QTY],
+    )
+    .expect("extrae");
+
+    assert_eq!(atoms.outputs.len(), 1);
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert_eq!(plan.columns.len(), 2);
+    assert_eq!(plan.columns[1].measure.as_deref(), Some("SUM(Qty)"));
 }
 
 #[test]
@@ -468,27 +512,73 @@ fn los_parentesis_de_la_expresion_no_se_pueden_sacar() {
 }
 
 #[test]
-fn una_medida_que_referencia_otras_no_baja_a_sql_todavia() {
-    // Fijado a proposito, no por descuido. `Margin = ([Revenue] - [COGS]) / [Revenue]` es
-    // aritmetica ENTRE agregaciones: un atomo es una hoja y `Margin` es una expresion
-    // sobre tres. El SQL a mano lo resuelve repitiendo la expresion sin subconsulta, asi
-    // que el objetivo esta medido y la limitacion es conocida, no un olvido.
+fn margin_baja_a_sql_repitiendo_la_expresion_del_agregado() {
+    // `Margin = ([Revenue] - [COGS]) / [Revenue]` es aritmetica ENTRE agregaciones. Un atomo
+    // es una hoja y `Margin` es una expresion sobre dos hojas distintas.
     //
-    // Cuando esto cambie, el test tiene que fallar para que se note.
+    // La forma correcta es repetir la expresion del agregado en la lista de seleccion, sin
+    // subconsulta y sin `DELIM_JOIN`: es exactamente lo que hace el SQL a mano que se midio
+    // en `probe_measures`, con un solo `HASH_GROUP_BY`.
     let model = business_model();
     let filters = FilterContext::empty();
     let atoms = extract_atoms("([Revenue] - [COGS]) / [Revenue]", &model, &filters, &[PRODUCT_REGION])
         .expect("extrae");
 
-    assert_eq!(
-        atoms.atoms.len(),
-        3,
-        "extrae las tres hojas, dos de ellas repetidas"
+    assert_eq!(atoms.atoms.len(), 2, "dos hojas, no tres: Revenue sale dos veces");
+    assert_eq!(atoms.outputs.len(), 1, "una columna de salida");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert!(
+        plan.sql.contains("NULLIF"),
+        "la division por cero tiene que dar NULL, no inf ni NaN:\n{}",
+        plan.sql
     );
     assert!(
-        lower(&model, &sources(&model), &atoms, &filters).is_err(),
-        "una medida que combina medidas CAE al interprete; cuando baje, hay que quitar \
-         este test y revisar el plan de ejecucion"
+        !plan.sql.contains("FROM ( SELECT") && !plan.sql.contains("LATERAL"),
+        "no puede haber subconsulta por celda:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn la_division_por_cero_produce_null_y_no_un_numero() {
+    // DuckDB devuelve `inf` para `10 / 0` y `NaN` para `0 / 0`. Sin `NULLIF`, el grid
+    // muestra un numero visiblemente falso donde DAX muestra BLANK. Es el mismo bug en dos
+    // caminos, y por eso los dos tienen que convertir.
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms("([Revenue] - [COGS]) / [Revenue]", &model, &filters, &[PRODUCT_REGION])
+        .expect("extrae");
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+
+    // `NULLIF(denominador, 0)`: el denominador va entre parentesis y luego el `, 0`.
+    let rendered = plan.sql.replace(' ', "");
+    assert!(
+        rendered.contains("NULLIF("),
+        "el denominador de la division va envuelto en NULLIF:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn una_forma_binaria_por_nivel_mantiene_la_precedencia() {
+    // `SUM(a + b * c)` no es `SUM(a) + SUM(b) * SUM(c)`. Los parentesis vienen del arbol.
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms(
+        "[Qty] + [Qty] * [Qty]",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+    let rendered = plan.sql.replace(' ', "");
+    assert!(
+        rendered.contains("(SUM(t0.\"Qty\")+(SUM(t0.\"Qty\")*SUM(t0.\"Qty\")))"),
+        "la precedencia tiene que venir del arbol, no del texto:\n{}",
+        plan.sql
     );
 }
 

@@ -158,6 +158,14 @@ pub fn model() -> Model {
         measures: vec![
             Measure::new(ObjectId(100), "Qty", "SUM('fact_sales'[qty])"),
             Measure::new(ObjectId(101), "Amount", "SUM('fact_sales'[amount])"),
+            // Arimetrica ENTRE medidas. Referencia `[Qty]` dos veces a proposito: una hoja
+            // repetida tiene que ser un solo atomo, y la division tiene que salir en el
+            // mismo SELECT.
+            Measure::new(
+                ObjectId(103),
+                "Margin",
+                "([Qty] - [Amount]) / [Qty]",
+            ),
         ],
         relationships: vec![
             Relationship {
@@ -367,7 +375,7 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
     let source = memory_source();
     let interpreter = Interpreter::new(&model, &source);
     let grouped = interpreter
-        .evaluate_grouped(&atoms.atoms, &context, &grouping, MAX_CELLS)
+        .evaluate_grouped(&atoms.atoms, &atoms.outputs, &context, &grouping, MAX_CELLS)
         .map_err(|e| e.to_string())?;
     let interp_rows: Vec<Vec<String>> = grouped
         .rows
@@ -549,6 +557,13 @@ pub fn suite() -> Vec<Case> {
         Case::new("suma de una expresion sobre filtro vacio", "SUM('fact_sales'[qty] * 'fact_sales'[amount])")
             .filter("region", "Oeste")
             .expecting(Scalar::Blank),
+
+        // Una medida que es ARITMETICA ENTRE medidas. Referencia `[Qty]` dos veces, asi que
+        // una hoja repetida tiene que ser un solo atomo y la division tiene que salir en el
+        // mismo SELECT, sin subconsulta por celda.
+        Case::new("margin: division entre medidas", "[Margin]"),
+        Case::new("margin con filtro de region", "[Margin]").filter("region", "Norte"),
+        Case::new("margin de una hoja repetida", "([Qty] - [Qty]) / [Qty]"),
 
         // Casos de `CALCULATE`. No tienen fast path: el atomo se marca para el interprete
         // porque el conjunto de filtros cambia de forma no uniforme. El harness tiene que

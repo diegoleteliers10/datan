@@ -316,9 +316,42 @@ fn dos_medidas_sobre_la_misma_columna_comparten_atomo() {
     )
     .expect("extrae");
 
-    assert_eq!(atoms.atoms.len(), 2);
-    assert_eq!(atoms.atoms[0].label, atoms.atoms[1].label);
-    assert_eq!(atoms.atoms[0].context, atoms.atoms[1].context);
+    // Una hoja repetida es UNA hoja. `[Qty] + [Qty]` usa el mismo atomo dos veces por
+    // indice, no dos atomos identicos: el lowering repite la expresion del agregado en la
+    // lista de seleccion y DuckDB hace CSE, asi que la segunda copia no costaba nada pero
+    // ocupaba un slot de salida.
+    //
+    // Antes eran dos atomos y el SQL emitia `SUM(...) AS atom_0` y `SUM(...) AS atom_1` con
+    // el mismo contenido. El numero era correcto; el informe tenia una columna invisible.
+    assert_eq!(atoms.atoms.len(), 1);
+    assert_eq!(atoms.outputs.len(), 1);
+    match &atoms.outputs[0].shape {
+        datan_dax_eval::Shape::Binary { left, right, .. } => {
+            assert_eq!(left, right, "las dos ramas apuntan al mismo atomo");
+        }
+        other => panic!("se esperaba una forma binaria, se obtuvo {other:?}"),
+    }
+}
+
+#[test]
+fn una_hoja_con_dos_contextos_distintos_no_se_comparte() {
+    // El caso contrario, y el que hace que la deduplicacion por etiqueta sola sea incorrecta:
+    // dos `SUM(Qty)` con filtros distintos son dos hojas. Compartirlas haria que una medida
+    // con `CALCULATE` mostrara el total sin filtrar.
+    let model = model();
+    let atoms = extract_atoms(
+        "CALCULATE([Qty], 'Dim Product'[Region] = \'Norte\') + CALCULATE([Qty], 'Dim Product'[Category] = \'A\')",
+        &model,
+        &FilterContext::empty(),
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+
+    assert_eq!(
+        atoms.atoms.len(),
+        2,
+        "mismo agregado, contextos distintos: dos hojas"
+    );
 }
 
 #[test]

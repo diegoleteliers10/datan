@@ -410,18 +410,55 @@ El segundo fallo era menos visible: la tabla de una COLUMNA de la agregacion no 
 Despues de los dos arreglos, las tres medidas hoja coinciden con la linea base a mano por `EXCEPT`
 en las dos direcciones, sobre 1M de lineas.
 
-#### Lo que queda: `Margin` NO baja a SQL todavia
+#### `Margin` resuelto
 
-`Margin = ([Revenue] - [COGS]) / [Revenue]` es aritmetica ENTRE agregaciones. El extractor saca
-las tres hojas, pero un atomo es una hoja y `Margin` es una expresion sobre tres. El lowering no
-tiene donde poner la division.
+`AtomSet` ahora tiene una capa de SALIDAS encima de la lista plana de hojas:
 
-Ademas el contador de profundidad confunde dos cosas: una agregacion anidada de verdad
-(`SUMX(VALUES(A), CALCULATE(...))`, que recalcula por fila) con una agregacion dentro de una
-aritmetica de medidas. La segunda marca `Granularity::Finer` y cae al interprete sin motivo.
+```rust
+pub enum Shape {
+    Atom(usize),           // indice en AtomSet.atoms
+    Number(f64),
+    Binary { op: BinaryOp, left: Box<Shape>, right: Box<Shape> },
+}
+```
 
-La linea base a mano SI lo resuelve repitiendo la expresion en la lista de seleccion, sin
-subconsulta y sin `DELIM_JOIN`, como demostro el test de semana 1.
+Una hoja repetida es UN atomo: `Margin` referencia `Revenue` dos veces y son dos indices al
+mismo atomo. Sin deduplicar eran tres atomos con dos identicos, y el informe tenia una columna
+invisible en medio.
+
+El SQL repite la sub-expresion del agregado, no la envuelve:
+
+```sql
+((SUM((t0.quantity * t0.precio_unitario)) - SUM((t0.quantity * t1.costo)))
+ / NULLIF(SUM((t0.quantity * t0.precio_unitario)), 0)) AS "atom_0"
+```
+
+`1 HASH_GROUP_BY`, `0 DELIM_JOIN`, y coincide con la linea base a mano por `EXCEPT` en las dos
+direcciones. Medido sobre 1M de lineas.
+
+Los parentesis van en cada nivel, no solo alrededor de los operandos. Lo que decide la
+precedencia es el ARBOL: `SUM(a + b * c)` no es `SUM(a) + SUM(b) * SUM(c)`.
+
+`NULLIF` en el denominador porque DuckDB devuelve `inf` para `x / 0` y `NaN` para `0 / 0`, y DAX
+devuelve BLANK.
+
+#### El contador de profundidad confundia dos cosas
+
+`depth > 0` significa "hay una agregacion dentro de otra", que rompe el fast path porque
+recalcula por fila: `SUMX(VALUES(A), CALCULATE(...))`. `Margin = ([Revenue] - [COGS]) /
+[Revenue]` no es eso: es aritmetica entre agregaciones al MISMO nivel. Con la profundidad
+incrementada al inlinear una medida, las tres hojas salian con `Granularity::Finer` y caian al
+interprete sin motivo.
+
+Inlinear una medida reinicia la profundidad de agregacion. Los iteradores se rechazan antes, en
+`shape_of`, porque un iterador SI cambia el grano de verdad.
+
+El mapa de valores de la celda se indexa por ETIQUETA de atomo, y la forma guarda el INDICE. Sin
+las dos cosas no hay forma de saber que hoja es: con dos hojas de la misma etiqueta y distinto
+contexto se devolveria la equivocada.
+
+La linea base a mano lo resuelve repitiendo la expresion en la lista de seleccion, sin
+subconsulta y sin `DELIM_JOIN`, como demostro el test de semana 1. Y asi lo hace el generador.
 
 **Medido:** repetir la sub-expresion de agregado NO cuesta nada. Con las cuatro medidas hay 6
 `SUM(` en la lista de seleccion y 3 en el `HASH_GROUP_BY`: DuckDB hace CSE. El riesgo de

@@ -33,7 +33,7 @@ mod filter;
 mod interp;
 mod modifiers;
 
-pub use atom::{Atom, AtomKind, AtomSet, Granularity};
+pub use atom::{Atom, AtomKind, AtomSet, Granularity, MeasureOutput, Shape};
 pub use filter::{
     distinct_propagation_results, propagate_ordered,
     ColumnInfo, Filter, FilterContext, FilterOperator, FilterSource, FilterValue,
@@ -90,8 +90,34 @@ pub fn extract_atoms(
         atoms: Vec::new(),
         depth: 0,
         unsupported: Vec::new(),
+        measure_hops: 0,
     };
-    extractor.extract(&checked.expr, &context)?;
+    // Primero se intenta la forma: una medida que es aritmetica entre agregaciones produce
+    // una columna de salida, no una lista plana.
+    //
+    // Se intenta ANTES de `extract` a proposito. `extract` recorre en anchura y pierde la
+    // estructura: de `([Revenue] - [COGS]) / [Revenue]` saca tres hojas y descarta que estan
+    // unidas por una division. Si se corriera primero, `shape_of` veria un `Extractor` con
+    // las hojas ya a馃ran.
+    let shape = extractor.shape_of(&checked.expr, &context);
+
+    let outputs = match shape {
+        Some(shape) => vec![MeasureOutput {
+            // La etiqueta de la forma es la de la hoja para una medida simple, y hay que
+            // distinguirla de la medida que la envuelve. Se usa la DE LA EXPRESION: asi el
+            // cache de planes distingue `Margin` de `Revenue` aunque compartan hojas.
+            label: shape_label(&checked.expr),
+            shape,
+        }],
+        None => {
+            // No hay forma: la medida tiene un `CALCULATE`, un iterador o un `IF`. Se vuelve
+            // a la lista plana, que es lo de siempre, y las salidas vacias le dicen al
+            // lowering que emita una columna por atomo.
+            extractor.atoms.clear();
+            extractor.extract(&checked.expr, &context)?;
+            Vec::new()
+        }
+    };
     // Cada atomo lleva el contexto bajo el que fue extraido. La propagacion ocurre UNA
     // vez, al extraer, para que un `ALL` de un `CALCULATE` no se deshaga al evaluar.
     let atoms = extractor
@@ -105,7 +131,30 @@ pub fn extract_atoms(
     Ok(AtomSet {
         atoms,
         grouping: grouping.to_vec(),
+        outputs,
     })
+}
+
+/// Una etiqueta estable para una expresion de medida.
+///
+/// Para `SUM(Qty)` devuelve `SUM(Qty)`. Para `([Revenue] - [COGS]) / [Revenue]` devuelve el
+/// texto de la expresion completa, no el de la primera hoja: dos medidas con las mismas
+/// hojas y distinta aritmetica dan numeros distintos y no pueden compartir la etiqueta del
+/// cache.
+fn shape_label(expr: &CheckedExpr) -> String {
+    match expr {
+        CheckedExpr::Binary { op, left, right, .. } => {
+            format!("({} {} {})", shape_label(left), op.as_str(), shape_label(right))
+        }
+        CheckedExpr::Call { name, args, .. } => {
+            let inner: Vec<String> = args.iter().take(1).map(shape_label).collect();
+            format!("{name}({})", inner.join(", "))
+        }
+        CheckedExpr::Measure { name, .. } => name.clone(),
+        CheckedExpr::Column { name, .. } => name.clone(),
+        CheckedExpr::Number { value, .. } => value.to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// La forma completa: parsea, chequea y extrae. Para tests y para el playground.

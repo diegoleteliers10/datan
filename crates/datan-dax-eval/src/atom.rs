@@ -11,6 +11,7 @@
 //! 6 atomos son 30.000 busquedas hash, que son milisegundos.
 
 use datan_dax_check::CheckedExpr;
+use datan_dax_syntax::BinaryOp;
 use datan_model::{Model, ObjectId};
 
 use crate::filter::FilterContext;
@@ -109,21 +110,69 @@ impl Atom {
     }
 }
 
+/// Una expresion sobre atomos.
+///
+/// Un atomo es una HOJA: `SUM(Qty * Price)`. `Margin = ([Revenue] - [COGS]) / [Revenue]` es
+/// una EXPRESION sobre tres hojas, y sin esto el lowering no tiene donde poner la division.
+///
+/// El indice es a `AtomSet::atoms`, no una referencia: las hojas se deduplican y la misma
+/// hoja aparece varias veces en la misma forma. `Revenue` sale dos veces en `Margin` y es UN
+/// solo atomo.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shape {
+    Atom(usize),
+    Number(f64),
+    Binary {
+        op: BinaryOp,
+        left: Box<Shape>,
+        right: Box<Shape>,
+    },
+}
+
+/// Una columna de salida del informe.
+///
+/// `label` es la etiqueta estable para el cache de planes. `shape` es como se construye el
+/// valor a partir de las hojas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasureOutput {
+    pub label: String,
+    pub shape: Shape,
+}
+
 /// El conjunto de atomos de una medida bajo un contexto y un agrupamiento.
 ///
 /// Si dos medidas del mismo informe producen el mismo conjunto de atomos, comparten la
 /// lectura. Es lo que hace que una matriz con 6 columnas y 4 celdas de grupo lea una sola
 /// vez la tabla de hechos.
+///
+/// `outputs` va VACIO cuando la medida no es una simple combinacion de agregaciones: en ese
+/// caso el lowering emite una columna por atomo, que es el comportamiento de siempre. La
+/// lista plana no se tira: sigue siendo la que el resto del codigo consume para el cache y
+/// para el interprete.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtomSet {
     pub atoms: Vec<Atom>,
     pub grouping: Vec<ObjectId>,
+    pub outputs: Vec<MeasureOutput>,
 }
 
 impl AtomSet {
     /// Si alguno de los atomos obliga al interprete.
     pub fn needs_interpreter(&self) -> bool {
         self.atoms.iter().any(Atom::needs_interpreter)
+    }
+
+    /// La columna del modelo que alimenta la primera hoja de una forma.
+    ///
+    /// La columna de SALIDA es `None` cuando la forma combina varios atomos: no hay una sola
+    /// columna que la produzca, y adivinar una haria que el grid ofrece un filtro por la
+    /// columna equivocada.
+    pub fn outputs_atom_column(&self, shape: &Shape) -> Option<ObjectId> {
+        match shape {
+            Shape::Atom(index) => self.atoms.get(*index).and_then(|atom| atom.column),
+            Shape::Number(_) => None,
+            Shape::Binary { left, .. } => self.outputs_atom_column(left),
+        }
     }
 
     /// Atomos identicos, para deduplicar entre medidas.
@@ -149,9 +198,119 @@ pub(crate) struct Extractor<'a> {
     /// Modificadores de `CALCULATE` que no se pudieron interpretar. Sefilled para que el
     /// linter avise en vez de perder el filtro en silencio.
     pub(crate) unsupported: Vec<String>,
+    /// Saltos de inlineacion de medidas. Un tope distinto del de agregaciones: inlinear una
+    /// medida no cambia el grano, y un `Margin` que referencia `[Revenue]` dos veces ya
+    /// gasta dos saltos sin que haya nada anidado.
+    pub(crate) measure_hops: usize,
 }
 
+
+
 impl Extractor<'_> {
+    /// Convierte la expresion de una medida en una forma sobre atomos.
+    ///
+    /// Devuelve `None` cuando la medida no es una combinacion aritmetica de agregaciones: un
+    /// `CALCULATE`, un iterador, un `IF`. En ese caso no hay forma y el modelo se queda con
+    /// la lista plana de atomos, que es lo que hace hoy y lo que resuelve el interprete.
+    ///
+    /// Una referencia a medida se INLINA: `Revenue` dentro de `Margin` es la forma de la
+    /// definicion de `Revenue`, no un nodo opaco. Sin el inlining, `Margin` seria un arbol de
+    /// referencias y el lowering tendria que resolverlas en SQL, que es lo que no se quiere.
+    pub fn shape_of(
+        &mut self,
+        expr: &CheckedExpr,
+        context: &FilterContext,
+    ) -> Option<Shape> {
+        match expr {
+            CheckedExpr::Number { value, .. } => Some(Shape::Number(*value)),
+
+            CheckedExpr::Binary { op, left, right, .. } => Some(Shape::Binary {
+                op: *op,
+                left: Box::new(self.shape_of(left, context)?),
+                right: Box::new(self.shape_of(right, context)?),
+            }),
+
+            CheckedExpr::Call { name, args, .. } => {
+                let kind = aggregation_of(name)?;
+                // Los iteradores cambian de verdad el grano: `SUMX(VALUES(A), ...)`
+                // recalcula por fila. No tienen forma sobre atomos y van al interprete.
+                if matches!(kind, AtomKind::Expression) {
+                    return None;
+                }
+                let argument = args.first()?;
+                let before = self.atoms.len();
+                let label = format!("{name}({})", self.label_of(argument));
+                if self.emit_dedup(kind, argument, context, name, &label).is_err() {
+                    return None;
+                }
+                if self.atoms.len() > before {
+                    return Some(Shape::Atom(before));
+                }
+                // No se anadio nada: la hoja ya existia. Se busca por etiqueta y contexto,
+                // porque `SUM(Qty)` con dos filtros distintos son dos hojas.
+                Some(Shape::Atom(self.atoms.iter().position(|atom| {
+                    atom.label == label && atom.context == *context && atom.kind == kind
+                })?))
+            }
+
+            CheckedExpr::Measure { measure, .. } => {
+                let definition = self.model.measures.iter().find(|m| m.id == *measure)?;
+                if self.measure_hops > 32 {
+                    return None;
+                }
+                let parsed = datan_dax_syntax::parse(&definition.expression).ok()?;
+                let checked = datan_dax_check::check_expr(&parsed, self.model).ok()?;
+
+                // La profundidad de AGREGACION se reinicia al inlinear una medida.
+                //
+                // `depth` marca "hay una agregacion dentro de otra", que es lo que rompe el
+                // fast path porque recalcula por fila. `Margin = ([Revenue] - [COGS]) /
+                // [Revenue]` no es eso: es aritmetica entre tres agregaciones al MISMO nivel.
+                // Con la profundidad incrementada, las tres hojas salian con
+                // `Granularity::Finer` y caian al interprete sin motivo.
+                //
+                // Un iterador dentro del cuerpo de la medida SI cambia el grano, y por eso
+                // `shape_of` rechaza los iteradores mas arriba: no llegan hasta aqui.
+                let saved = std::mem::replace(&mut self.depth, 0);
+                self.measure_hops += 1;
+                let shape = self.shape_of(&checked.expr, context);
+                self.measure_hops -= 1;
+                self.depth = saved;
+                shape
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Emite una hoja, o no hace nada si ya existe una identica.
+    ///
+    /// La deduplicacion compara etiqueta, contexto y tipo de agregado. Contexto es lo que
+    /// importa: dos `SUM(Qty)` con filtros distintos NO son la misma hoja, y compartirlas
+    /// haria que una medida con `CALCULATE` mostrara el total sin filtrar.
+    fn emit_dedup(
+        &mut self,
+        kind: AtomKind,
+        argument: &CheckedExpr,
+        context: &FilterContext,
+        function: &str,
+        label: &str,
+    ) -> Result<(), crate::EvalError> {
+        let exists = self.atoms.iter().any(|atom| {
+            atom.label == *label && atom.context == *context && atom.kind == kind
+        });
+        if exists {
+            return Ok(());
+        }
+        self.emit(kind, argument, context, function)?;
+        // `emit` calcula la etiqueta con su propia regla; se fuerza la compartida para que la
+        // deduplicacion de la forma y la de `emit` no se contradigan.
+        if let Some(atom) = self.atoms.last_mut() {
+            atom.label = label.to_string();
+        }
+        Ok(())
+    }
+
     /// Extrae los atomos de una expresion bajo un contexto.
     pub(crate) fn extract(
         &mut self,
