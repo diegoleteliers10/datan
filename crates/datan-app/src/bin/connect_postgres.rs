@@ -73,7 +73,12 @@ fn main() {
     println!("  3. Catalogo de Postgres leido por conexion directa");
 
     let introspection =
-        match introspect(&engine, &datan_connect::Source::new("pg"), Some(&mut catalog)) {
+        match introspect(
+        &engine,
+        &datan_connect::Source::new("pg"),
+        Some(&mut catalog),
+        std::env::args().nth(2).as_deref(),
+    ) {
         Ok(result) => result,
         Err(error) => {
             println!("  FALLO introspeccionar: {error}");
@@ -83,6 +88,7 @@ fn main() {
     let model = &introspection.model;
 
     println!("\n  4. El modelo\n");
+    println!("  candidatas a hechos: {:?}", introspection.fact_candidates);
     for line in &introspection.report {
         println!("{line}");
     }
@@ -112,11 +118,15 @@ fn main() {
     let grouping: Vec<ObjectId> = model
         .tables
         .iter()
-        .filter(|t| matches!(t.kind, TableKind::Dimension))
-        .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
-        .filter(|(t, c)| {
-            matches!(c.data_type, DataType::Text) && !t.key_columns.contains(&c.id)
+        .filter(|t| {
+            matches!(t.kind, TableKind::Dimension)
+                && model
+                    .fact_table()
+                    .map(|fact| model.join_path(fact, t.id).is_some())
+                    .unwrap_or(false)
         })
+        .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
+        .filter(|(t, c)| matches!(c.data_type, DataType::Text) && !t.key_columns.contains(&c.id))
         .map(|(_, c)| c.id)
         .take(1)
         .collect();

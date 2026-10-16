@@ -31,7 +31,9 @@ fn main() {
 
     let mut catalog = PostgresCatalog::connect(&format!("host=localhost dbname={database}"))
         .expect("catalogo");
-    let introspection = introspect(&engine, &Source::new("pg"), Some(&mut catalog)).expect("modelo");
+    let introspection =
+        introspect(&engine, &Source::new("pg"), Some(&mut catalog), Some("product_boleta"))
+            .expect("modelo");
     let model = introspection.model;
 
     // Las dimensiones son las columnas de texto de las dimensiones que no son clave. Las

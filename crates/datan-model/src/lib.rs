@@ -243,6 +243,14 @@ impl Model {
             .filter(|r| r.role == RelationshipRole::Active && r.direction != FilterDirection::None)
     }
 
+    /// La tabla marcada como hechos, si hay una.
+    pub fn fact_table(&self) -> Option<ObjectId> {
+        self.tables
+            .iter()
+            .find(|t| matches!(t.kind, TableKind::Facts))
+            .map(|t| t.id)
+    }
+
     /// El camino mas corto entre dos tablas por el grafo de relaciones.
     ///
     /// BFS sobre las relaciones activas. Las aristas vienen en orden, desde `from` hacia

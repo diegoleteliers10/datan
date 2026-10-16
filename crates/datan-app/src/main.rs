@@ -405,9 +405,14 @@ fn build_model(database: &str) -> Result<(Model, Report), String> {
 
     let mut catalog = PostgresCatalog::connect(&format!("host=localhost dbname={database}"))
         .map_err(|e| format!("no se pudo leer el catalogo de Postgres: {e}"))?;
-    let model = introspect(&engine, &Source::new("pg"), Some(&mut catalog))
-        .map_err(|e| e.to_string())?
-        .model;
+    let introspection = introspect(
+        &engine,
+        &Source::new("pg"),
+        Some(&mut catalog),
+        Some(database),
+    )
+    .map_err(|e| e.to_string())?;
+    let model = introspection.model;
 
     let report = Report::new(model.clone()).attached_to("pg");
     Ok((model, report))
@@ -667,10 +672,22 @@ impl Datan {
         let model = report.model.clone();
 
         // --- Barra lateral: dimensiones y medidas ---
+        //
+        // Solo tablas CONECTADAS a los hechos. Una base puede tener varios esquemas que no
+        // se tocan, y ofrecer una columna de un esquema ajeno produce un informe que no
+        // baja a SQL: el usuario ve un error de motor que es en realidad un informe
+        // malformado.
+        let fact = report.fact_table().ok();
+        let connected = |table: &datan_model::Table| -> bool {
+            match fact {
+                Some(fact_id) => fact_id == table.id || model.join_path(fact_id, table.id).is_some(),
+                None => false,
+            }
+        };
         let dimensions: Vec<ObjectId> = model
             .tables
             .iter()
-            .filter(|t| matches!(t.kind, TableKind::Dimension))
+            .filter(|t| matches!(t.kind, TableKind::Dimension) && connected(t))
             .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
             .filter(|(t, c)| !t.key_columns.contains(&c.id) && !matches!(c.data_type, DataType::Date))
             .map(|(_, c)| c.id)

@@ -62,7 +62,7 @@ cargo run --release -p datan-app
 | `datan-dax-check` | Resolucion de nombres y lint contra el modelo. |
 | `datan-dax-eval` | Algebra de filtros, modificadores, atomos, interprete por celda. |
 | `datan-dax-sql` | Bajo de un `AtomSet` a una unica query de DuckDB. |
-| `datan-connect` | De una base conectada a un modelo. DuckDB lee datos, Postgres lee el catalogo. |
+| `datan-connect` | De una base conectada a un modelo. DuckDB lee datos, Postgres lee el catalogo. Genera las medidas de negocio si el esquema tiene la forma. |
 | `datan-report` | Un informe: dimensiones, medidas, filtros y la consulta que lo llena. Sin gpui. |
 | `datan-testkit` | Suite de conformidad diferencial entre los dos caminos. |
 | `datan-app` | Binario thin. Todo gpui vive aqui por ahora. |

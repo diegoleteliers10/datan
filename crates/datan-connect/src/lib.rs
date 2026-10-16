@@ -53,14 +53,15 @@ pub enum ConnectError {
     NoRelationships { tables: usize },
     #[error("fallo la consulta de introspeccion:\n{sql}\n{error}")]
     Query { sql: String, error: String },
-    #[error("la tabla {0} tiene tipo {1}, que no tiene equivalente en el modelo")]
-    UnsupportedType(String, String),
     #[error("la expresion de la medida `{name}` no es DAX valido: {detail}")]
     BadMeasure { name: String, detail: String },
     #[error("la definicion de la medida `{name}` no resuelve contra el modelo: {detail}")]
     UnresolvedMeasure { name: String, detail: String },
     #[error("deduplicacion fallida de la expresion: {0}")]
     Dedupe(String),
+    #[error("la tabla `{name}` no existe en la base. Las candidatas a hechos son las que \
+             declaran claves foraneas")]
+    FactNotFound { name: String },
 }
 
 /// El resultado de mirar una base de datos.
@@ -68,6 +69,12 @@ pub struct Introspection {
     pub model: Model,
     /// Un texto por tabla, para mostrarlo en la UI antes de que el usuario elija.
     pub report: Vec<String>,
+    /// Las tablas que DECLARAN claves foraneas: las candidatas a hechos.
+    ///
+    /// Es lo que la UI ofrece cuando la eleccion automatica no sirve. Con dos clusteres en
+    /// la misma base, el generador elige uno y el otro desaparece: mostrar las candidatas es
+    /// lo que permite cambiar.
+    pub fact_candidates: Vec<String>,
 }
 
 /// Los ids empiezan en 1 y `ObjectId(0)` se reserva para "nada". Un id que empieza en 0 se
@@ -106,6 +113,7 @@ pub fn introspect(
     engine: &Engine,
     source: &Source,
     catalog: Option<&mut PostgresCatalog>,
+    fact: Option<&str>,
 ) -> Result<Introspection, ConnectError> {
     // 1. Las columnas, con su tipo y su tabla.
     //
@@ -203,13 +211,29 @@ pub fn introspect(
     }
 
     // 5. Quien es el hecho.
-    let fact = choose_fact_table(&tables, foreign_keys.as_deref().unwrap_or(&[]), &counts).ok_or_else(|| {
+    // La tabla de hechos es una DECISION, no un dato. El generador propone la que mas
+    // claves foraneas declara, y con varias candidatas la eleccion es del usuario: una base
+    // puede tener dos clusteres (el retail y un esquema de pruebas), y elegir el equivocado
+    // convierte las tablas reales en dimensiones de un esquema ajeno.
+    let fact = match fact {
+        Some(name) => {
+            let found = tables
+                .keys()
+                .find(|(_, table)| table == name)
+                .cloned()
+                .ok_or_else(|| ConnectError::FactNotFound {
+                    name: name.to_string(),
+                })?;
+            found
+        }
+        None => choose_fact_table(&tables, foreign_keys.as_deref().unwrap_or(&[]), &counts).ok_or_else(|| {
         ConnectError::Catalog(
             "no se pudo decidir cual es la tabla de hechos. Datan elige la que tiene la \\
              clave foranea mas referenciada; con menos de dos tablas no hay forma de saberlo"
                 .to_string(),
         )
-    })?;
+        })?
+    };
 
     // 6. Las tablas.
     let mut model_tables = Vec::new();
@@ -222,11 +246,16 @@ pub fn introspect(
             TableKind::Dimension
         };
         let mut model_columns = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
         for column in columns {
+            let Some(data_type) = map_type(&column.sql_type) else {
+                skipped.push(format!("{schema}.{table}.{}", column.name));
+                continue;
+            };
             model_columns.push(Column::new(
                 column_ids[&(schema.clone(), table.clone(), column.name.clone())],
                 column.name.clone(),
-                map_type(&column.sql_type)?,
+                data_type,
             ));
         }
         // La clave primaria viene del catalogo. Sin ella se cae a la convencion de nombre
@@ -293,7 +322,8 @@ pub fn introspect(
         }
     };
 
-    model.measures = generate_measures(&model)?;
+    let generated = generate_measures(&mut model)?;
+    model.measures = generated;
 
     report.push(String::new());
     report.push(format!(
@@ -303,7 +333,20 @@ pub fn introspect(
         model.measures.len()
     ));
 
-    Ok(Introspection { model, report })
+    let fact_candidates = foreign_keys
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|key| key.table.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    Ok(Introspection {
+        model,
+        report,
+        fact_candidates,
+    })
 }
 
 struct RawColumn {
@@ -381,84 +424,264 @@ fn table_counts(
 
 /// Los tipos de Postgres que el modelo entiende.
 ///
-/// El resto da error con el nombre del tipo, no un `Moneda` silencioso. Un tipo sin
-/// equivalencia es una decision que alguien tiene que tomar.
-fn map_type(sql_type: &str) -> Result<DataType, ConnectError> {
-    let lower = sql_type.to_lowercase();
-    Ok(match lower.as_str() {
+/// El tipo puede traer precision: `DECIMAL(10,2)`. La precision no cambia de que tipo se
+/// trata, asi que se compara la parte de antes del parentesis.
+///
+/// Los tipos sin equivalencia devuelven `None` y la columna se OMITE, con aviso. Fallar el
+/// modelo entero por un `jsonb` que nadie puede agregar haria que una base con una sola
+/// columna rara no se abra.
+fn map_type(sql_type: &str) -> Option<DataType> {
+    let base = sql_type
+        .split('(')
+        .next()
+        .unwrap_or(sql_type)
+        .trim()
+        .to_lowercase();
+    Some(match base.as_str() {
         "integer" | "int4" | "int" | "smallint" | "int2" | "bigint" | "int8" => {
             DataType::Moneda
         }
         "double precision" | "float8" | "real" | "float4" | "numeric" | "decimal" => {
             DataType::Decimal
         }
-        "text" | "character varying" | "varchar" | "char" | "character" | "name" | "uuid" => {
-            DataType::Text
-        }
+        "text" | "character varying" | "varchar" | "character varying[]" | "varchar[]"
+        | "char" | "character" | "name" | "uuid" => DataType::Text,
         "boolean" | "bool" => DataType::Boolean,
         "date" => DataType::Date,
         "timestamp with time zone" | "timestamp without time zone" | "timestamptz" => {
             DataType::DateTime
         }
-        other => {
-            return Err(ConnectError::UnsupportedType(
-                other.to_string(),
-                sql_type.to_string(),
-            ));
-        }
+        _ => return None,
     })
 }
 
 /// Genera medidas por regla mecanica.
 ///
-/// Un `SUM` por columna entera de los hechos, un `DISTINCTCOUNT` por columna de cada
-/// dimension. Sin adivinar.
+/// Un `SUM` por columna entera de los hechos, un `DISTINCTCOUNT` por columna de texto de cada
+/// dimension, y las medidas de negocio si el esquema tiene la forma de una venta.
 ///
-/// Se omiten las columnas de clave y las que solo contienen el id de la fila: `SUM(id)` es
-/// un numero que no significa nada y ocupa una columna del informe.
-fn generate_measures(model: &Model) -> Result<Vec<Measure>, ConnectError> {
+/// "Sin adivinar" sigue siendo la regla: lo que se genera sale de columnas que EXISTEN, con
+/// nombres que coinciden con un patron. Una medida inventada de la nada seria un numero sin
+/// origen.
+fn generate_measures(model: &mut Model) -> Result<Vec<Measure>, ConnectError> {
     let mut measures = Vec::new();
     let mut next_id = 10_000u64;
 
+    let fact = model
+        .tables
+        .iter()
+        .find(|t| matches!(t.kind, TableKind::Facts))
+        .cloned();
+
+    // Medidas solo para tablas CONECTADAS a los hechos.
+    //
+    // Una base puede tener varios esquemas que no se tocan, y una medida sobre un esquema
+    // ajeno no baja a SQL: el usuario ve un error de motor y es un informe malformado. El
+    // filtro va aqui y no en la UI, porque un informe no deberia poder elegir una medida que
+    // no funciona: rechazarlo despues de mostrarlo es tarde.
+    let fact_id = fact.as_ref().map(|f| f.id);
+    let connected_to_fact = |table_id: ObjectId| -> bool {
+        match fact_id {
+            Some(fact_id) => {
+                fact_id == table_id || model.join_path(fact_id, table_id).is_some()
+            }
+            // Sin tabla de hechos no hay informe: `Report::execute` lo dice. Generar
+            // medidas aqui seria llenar la barra lateral de cosas que no corren.
+            None => false,
+        }
+    };
+
     for table in &model.tables {
+        if !connected_to_fact(table.id) {
+            continue;
+        }
         let is_fact = matches!(table.kind, TableKind::Facts);
         for column in &table.columns {
             let sumable = matches!(
                 column.data_type,
                 DataType::Integer | DataType::Moneda | DataType::Decimal
             );
-            let meaningful = !table.key_columns.contains(&column.id)
-                && !is_identifier(&column.name);
+            let meaningful = !table.key_columns.contains(&column.id) && !is_identifier(&column.name);
 
-            if is_fact && sumable && meaningful {
+            if is_fact
+                && sumable
+                && meaningful
+                // Un precio unitario no se suma: es una tasa, no un acumulado. `SUM(precio)`
+                // devuelve un numero que parece un dato y no vale nada. Solo se suma lo que
+                // se acumula: cantidades y montos por linea.
+                && !is_rate(&column.name)
+            {
                 let name = format!("{} {}", table.name, column.name);
-                let expression =
-                    format!("SUM('{}'[{}])", table.name, column.name);
-                measures.push(build_measure(
-                    ObjectId(next_id),
-                    name,
-                    expression,
-                    model,
-                )?);
+                let expression = format!("SUM('{}'[{}])", table.name, column.name);
+                measures.push(build_measure(ObjectId(next_id), name, expression, model)?);
                 next_id += 1;
             }
 
-            if !is_fact && matches!(column.data_type, DataType::Text) && meaningful {
+            if !is_fact
+                && matches!(column.data_type, DataType::Text)
+                && meaningful
+            {
                 let name = format!("{} {}", table.name, column.name);
-                let expression =
-                    format!("DISTINCTCOUNT('{}'[{}])", table.name, column.name);
-                measures.push(build_measure(
-                    ObjectId(next_id),
-                    name,
-                    expression,
-                    model,
-                )?);
+                let expression = format!("DISTINCTCOUNT('{}'[{}])", table.name, column.name);
+                measures.push(build_measure(ObjectId(next_id), name, expression, model)?);
                 next_id += 1;
             }
         }
     }
 
+    // Las medidas de negocio van al final, porque referencian a las otras.
+    if let Some(fact) = fact.as_ref() {
+        // Las medidas de negocio se registran en el modelo A MEDIDA que se crean, porque
+        // `Margen` referencia a `Ventas` y a `Costo`, y una medida no se puede validar contra
+        // un modelo que todavia no la contiene: el chequeo la rechazaria como nombre
+        // desconocido y `Margen` desapareceria de la lista sin error.
+        for measure in business_measures(model, fact, &mut next_id)? {
+            measures.push(measure);
+        }
+    }
+
     Ok(measures)
+}
+
+/// Las medidas de negocio, si el esquema tiene la forma de una venta.
+///
+/// La forma: un hecho con una columna de CANTIDAD, y en el hecho o en una dimension una
+/// columna de PRECIO o de COSTO. Con cantidad y precio sale `Ventas`; con cantidad y costo
+/// sale `Costo`; con las dos sale `Margen`, que referencia a las otras dos.
+///
+/// Los nombres salen del idioma de las columnas. Un esquema en espanol (`precio`, `costo`)
+/// produce medidas en espanol, porque las medidas de un informe se leen en voz alta y
+/// mezclar idiomas en la misma matriz se lee peor que un nombre largo.
+fn business_measures(
+    model: &mut Model,
+    fact: &datan_model::Table,
+    next_id: &mut u64,
+) -> Result<Vec<Measure>, ConnectError> {
+    let quantity = fact
+        .columns
+        .iter()
+        .find(|c| matches_name(&c.name, QUANTITY))
+        .map(|c| c.name.clone());
+    let price = fact
+        .columns
+        .iter()
+        .find(|c| matches_name(&c.name, PRICE))
+        .map(|c| c.name.clone());
+    // El costo tiene que venir de una tabla CONECTADA al hecho.
+    //
+    // Una base puede tener varios esquemas que no se tocan: el retail de un lado y un
+    // esquema de pruebas del otro. Tomar una columna llamada `costo` de CUALQUIER tabla
+    // produce una medida que une tablas sin relationship, y esa medida no baja a SQL: se ve
+    // como un bug del motor y es un bug del generador.
+    let cost_table = model
+        .tables
+        .iter()
+        .filter(|t| !matches!(t.kind, TableKind::Facts))
+        .find(|t| {
+            t.columns.iter().any(|c| matches_name(&c.name, COST))
+                && model.join_path(fact.id, t.id).is_some()
+        });
+    let cost = cost_table
+        .and_then(|t| t.columns.iter().find(|c| matches_name(&c.name, COST)))
+        .map(|c| c.name.clone());
+    let cost_table = cost_table.map(|t| t.name.clone());
+
+    let Some(quantity) = quantity else {
+        return Ok(Vec::new());
+    };
+    let fact_name = fact.name.clone();
+    let units = format!("SUM('{fact_name}'[{quantity}])");
+    // El idioma de los nombres sale de la columna de PRECIO, no de la de cantidad. El
+    // esquema de este proyecto mezcla: `quantity` en ingles con `precio_unitario` y `costo`
+    // en espanol. Anclar el idioma en el precio evita que un solo nombre en ingles
+    // traduzca todo el informe.
+    let names = Names::of(price.as_deref());
+    let mut out = Vec::new();
+
+    // Unidades primero: `Ventas` y `Costo` la necesitan como referencia.
+    push_measure(model, next_id, &mut out, names.units, units);
+
+    if let Some(price) = price.as_ref() {
+        let revenue = format!("SUM('{fact_name}'[{quantity}] * '{fact_name}'[{price}])");
+        push_measure(model, next_id, &mut out, names.revenue, revenue);
+    }
+    if let (Some(cost), Some(cost_table)) = (cost.as_ref(), cost_table.as_ref()) {
+        let cogs = format!("SUM('{fact_name}'[{quantity}] * '{cost_table}'[{cost}])");
+        push_measure(model, next_id, &mut out, names.cogs, cogs);
+    }
+
+    // El margen necesita las dos de arriba. Si falta una, no hay margen: mostrar un margen
+    // que solo resta costos es inventar un numero.
+    let revenue = names.revenue.to_string();
+    let cogs = names.cogs.to_string();
+    let has_revenue = out.iter().any(|m: &Measure| m.name == revenue);
+    let has_cogs = out.iter().any(|m: &Measure| m.name == cogs);
+    if has_revenue && has_cogs {
+        let margin = format!("([{revenue}] - [{cogs}]) / [{revenue}]");
+        push_measure(model, next_id, &mut out, names.margin, margin);
+    }
+
+    Ok(out)
+}
+
+fn push_measure(
+    model: &mut Model,
+    next_id: &mut u64,
+    out: &mut Vec<Measure>,
+    name: &str,
+    expression: String,
+) {
+    if let Ok(measure) = build_measure(ObjectId(*next_id), name.to_string(), expression, model) {
+        model.measures.push(measure.clone());
+        out.push(measure);
+        *next_id += 1;
+    }
+}
+
+/// Los nombres de las medidas, segun el idioma de la columna de cantidad.
+struct Names {
+    units: &'static str,
+    revenue: &'static str,
+    cogs: &'static str,
+    margin: &'static str,
+}
+
+impl Names {
+    fn of(price: Option<&str>) -> Self {
+        match price {
+            Some(price) if price.starts_with("precio") => Self {
+                units: "Unidades",
+                revenue: "Ventas",
+                cogs: "Costo",
+                margin: "Margen",
+            },
+            _ => Self {
+                units: "Units",
+                revenue: "Revenue",
+                cogs: "COGS",
+                margin: "Margin",
+            },
+        }
+    }
+}
+
+const QUANTITY: &[&str] = &["quantity", "qty", "cantidad", "unidades"];
+const PRICE: &[&str] = &["precio_unitario", "precio", "unit_price", "price"];
+const COST: &[&str] = &["costo", "cost", "costo_unitario"];
+
+/// Si un nombre coincide con alguno de los patrones, sin distinguir mayusculas.
+fn matches_name(name: &str, patterns: &[&str]) -> bool {
+    let lower = name.to_lowercase();
+    patterns.iter().any(|pattern| lower == *pattern)
+}
+
+/// Una columna que es una TASA y no un acumulado.
+///
+/// `SUM(precio_unitario)` no significa nada: suma precios de lineas distintas como si fueran
+/// cantidades. El resultado parece un numero y no vale nada, y es el tipo de medida que nadie
+/// pregunta por que existe.
+fn is_rate(name: &str) -> bool {
+    matches_name(name, PRICE)
 }
 
 /// Un nombre de columna que solo lleva el identificador de la fila.
