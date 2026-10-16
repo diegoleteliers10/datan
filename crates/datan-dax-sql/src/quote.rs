@@ -55,3 +55,18 @@ mod tests {
         assert_eq!(rendered.matches('\'').count(), 2);
     }
 }
+
+/// Un nombre que puede traer un calificador de base o de esquema.
+///
+/// `pg.product_boleta` se escapa como `"pg"."product_boleta"`, no como
+/// `"pg.product_boleta"`. La segunda forma es un identificador UNICO con un punto dentro,
+/// que DuckDB acepta y despues no encuentra: el SQL se genera bien y la consulta falla con
+/// "table does not exist" y una sugerencia que es justo el nombre con el prefijo que faltaba.
+pub fn quote_qualified(name: &str) -> String {
+    match name.split_once('.') {
+        Some((qualifier, table)) => {
+            format!("{}.{}", quote_identifier(qualifier), quote_identifier(table))
+        }
+        None => quote_identifier(name),
+    }
+}

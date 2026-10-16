@@ -60,7 +60,20 @@ fn main() {
 
     // 3. El catalogo. `information_schema` de Postgres, no el de DuckDB: el de DuckDB
     //    describiría la vista que el scanner projecting, que no es el esquema real.
-    let introspection = match introspect(&engine, &datan_connect::Source::new("pg")) {
+    // El catalogo se lee por conexion directa. El scanner de DuckDB pierde las claves
+    // foraneas en silencio: `probe_scanner` lo mide.
+    let dsn = format!("host=localhost dbname={database}");
+    let mut catalog = match datan_connect::PostgresCatalog::connect(&dsn) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            println!("  FALLO abrir el catalogo de Postgres: {error}");
+            std::process::exit(1);
+        }
+    };
+    println!("  3. Catalogo de Postgres leido por conexion directa");
+
+    let introspection =
+        match introspect(&engine, &datan_connect::Source::new("pg"), Some(&mut catalog)) {
         Ok(result) => result,
         Err(error) => {
             println!("  FALLO introspeccionar: {error}");
@@ -69,13 +82,13 @@ fn main() {
     };
     let model = &introspection.model;
 
-    println!("\n  3. El modelo\n");
+    println!("\n  4. El modelo\n");
     for line in &introspection.report {
         println!("{line}");
     }
 
     // 4. Las relaciones, que es donde se decide si el modelo es utilizable.
-    println!("\n  4. Relationships");
+    println!("\n  5. Relationships");
     if model.relationships.is_empty() {
         println!("     ninguna. Sin claves foraneas no hay modelo: solo una tabla grande.");
     }
@@ -90,19 +103,27 @@ fn main() {
 
     // 5. Las medidas generadas. Todas tienen que bajar a SQL. Una medida generada que cae al
     //    interprete es un bug de Datan, no del usuario.
-    println!("\n  5. Medidas");
-    let facts: Vec<ObjectId> = model
+    println!("\n  6. Medidas");
+    // La columna de agrupamiento es de una DIMENSION y no es clave.
+    //
+    // Agrupar por una clave del hecho no es un error: agrupa por 1M de valores distintos y
+    // devuelve 1M de filas de una columna. Se ve como un grid lentisimo, no como un fallo,
+    // que es la peor forma.
+    let grouping: Vec<ObjectId> = model
         .tables
         .iter()
-        .filter(|t| matches!(t.kind, TableKind::Facts))
-        .flat_map(|t| t.columns.iter().map(|c| c.id))
-        .filter(|id| {
-            matches!(model.column(*id).map(|(_, c)| c.data_type), Some(DataType::Text))
+        .filter(|t| matches!(t.kind, TableKind::Dimension))
+        .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
+        .filter(|(t, c)| {
+            matches!(c.data_type, DataType::Text) && !t.key_columns.contains(&c.id)
         })
+        .map(|(_, c)| c.id)
+        .take(1)
         .collect();
-    let grouping: Vec<ObjectId> = facts.iter().take(1).copied().collect();
 
-    let sources = SourceMap::from_model(model);
+    // El calificador es el alias del `ATTACH`. Sin el, DuckDB responde "table does not
+    // exist" con una pista que es justo el nombre con el prefijo que falta.
+    let sources = SourceMap::from_model(model).with_qualifier("pg");
     let filters = datan_dax_eval::FilterContext::empty();
     let mut bajan = 0usize;
     let mut no_bajan = 0usize;
@@ -127,38 +148,79 @@ fn main() {
         println!("     {no_bajan} no bajan. Una medida autogenerada que no baja es un bug.");
     }
 
-    // 6. Una consulta de verdad, de punta a punta. Un modelo que se imprime bien y una
-    //    consulta que no corre son dos mitades, y aqui solo se prueba una.
-    println!("\n  6. Consulta de punta a punta");
-    match measure_by(model, "product_boleta quantity") {
-        Some(measure) => {
-            let atoms =
-                extract_atoms(&measure.expression, model, &filters, &grouping).expect("extrae");
-            match lower(model, &sources, &atoms, &filters) {
-                Ok(plan) => {
-                    println!("{}\n", indent(&plan.sql));
-                    let sql = format!(
-                        "SELECT CAST({} AS VARCHAR) FROM ({})",
-                        plan.columns.last().map(|c| c.name.as_str()).unwrap_or("atom_0"),
-                        plan.sql
+    // 7. Una consulta de verdad, de punta a punta, contra Postgres. Un modelo que se
+    //    imprime bien y una consulta que no corre son dos mitades, y aqui solo se prueba
+    //    una.
+    println!("\n  7. Consulta de punta a punta, agrupada por la dimension de texto");
+    println!("     medidas generadas:");
+    for measure in &model.measures {
+        println!("       {} = {}", measure.name, measure.expression);
+    }
+
+    let dimension = grouping
+        .first()
+        .copied()
+        .unwrap_or(model.tables[0].columns[0].id);
+    let (dimension_table, dimension_column) = match model.column(dimension) {
+        Some((table, column)) => (table.name.clone(), column.name.clone()),
+        None => (String::from("?"), String::from("?")),
+    };
+    let fact = model
+        .tables
+        .iter()
+        .find(|t| matches!(t.kind, TableKind::Facts))
+        .expect("el modelo tiene una tabla de hechos");
+
+    let measure = model
+        .measures
+        .iter()
+        .find(|m| m.name.contains(&fact.name) && m.name.ends_with("quantity"))
+        .cloned();
+    let Some(measure) = measure else {
+        println!("     ninguna medida de suma sobre `quantity`");
+        return;
+    };
+
+    let atoms = extract_atoms(&measure.expression, model, &filters, &[dimension])
+        .expect("extrae atomos");
+    match lower(model, &sources, &atoms, &filters) {
+        Ok(plan) => {
+            println!("\n{}", indent(&plan.sql));
+            // Se mide y se leen las filas directamente. Envolver la consulta en otro `SUM`
+            // daria `SUM(SUM(quantity))`, que es un error de tipo, y quitar el envoltorio
+            // compararia solo la primera celda.
+            match engine.timed(&plan.sql) {
+                Ok(ms) => {
+                    println!(
+                        "\n     {} en {ms} ms, agrupado por {dimension_table}[{dimension_column}]:",
+                        measure.name
                     );
-                    match engine.timed(&sql) {
-                        Ok(ms) => {
-                            let total = engine.scalar(&sql, 0).expect("consulta");
-                            println!("     total = {:?} en {ms} ms", total);
+                    match engine.render_rows(&plan.sql) {
+                        Ok(rows) => {
+                            let mut total = 0.0;
+                            for row in rows.iter().take(8) {
+                                println!("       {}", row.join("  |  "));
+                            }
+                            if rows.len() > 8 {
+                                println!("       ... y {} mas", rows.len() - 8);
+                            }
+                            for row in &rows {
+                                if let Some(value) = row.get(1)
+                                    && let Ok(parsed) = value.parse::<f64>()
+                                {
+                                    total += parsed;
+                                }
+                            }
+                            println!("     {} grupos, total {:.0}", rows.len(), total);
                         }
                         Err(error) => println!("     ERROR al ejecutar: {error}"),
                     }
                 }
-                Err(error) => println!("     NO baja: {error}"),
+                Err(error) => println!("     ERROR al ejecutar: {error}"),
             }
         }
-        None => println!("     no se encontro la medida de ejemplo"),
+        Err(error) => println!("     NO baja: {error}"),
     }
-}
-
-fn measure_by(model: &datan_model::Model, name: &str) -> Option<datan_model::Measure> {
-    model.measures.iter().find(|m| m.name == name).cloned()
 }
 
 fn column_name(model: &datan_model::Model, column: ObjectId) -> String {

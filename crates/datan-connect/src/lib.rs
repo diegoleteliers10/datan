@@ -27,7 +27,12 @@
 
 use datan_dax_check::{CheckError, check_expr};
 use datan_dax_syntax::parse;
+mod catalog;
+
+pub use catalog::{ForeignKey, PostgresCatalog};
+
 use datan_model::{Column, DataType, Measure, Model, ObjectId, Table, TableKind};
+use std::collections::BTreeMap;
 use datan_storage::{Engine, StorageError};
 
 /// Un error de introspeccion, con la sentencia que lo produjo.
@@ -90,8 +95,18 @@ impl Source {
 
 /// Mira una base ya conectada y construye el modelo.
 ///
-/// Asume que `engine` ya tiene la extension de Postgres cargada y la base adjunta.
-pub fn introspect(engine: &Engine, source: &Source) -> Result<Introspection, ConnectError> {
+/// Las COLUMNAS y los TIPOS salen de `duckdb_columns()`: es materializado y no pierde
+/// filas. Las RELACIONES salen del catalogo de Postgres por conexion directa, porque el
+/// scanner de DuckDB las pierde en silencio. Ver `catalog.rs` para la medicion.
+///
+/// Sin `catalog` el modelo sale sin relaciones, y eso se dice con un error en vez de
+/// devolver un modelo que parece funcionar: un informe que cruza productos por categoria
+/// devolveria el total del informe, no el de la categoria.
+pub fn introspect(
+    engine: &Engine,
+    source: &Source,
+    catalog: Option<&mut PostgresCatalog>,
+) -> Result<Introspection, ConnectError> {
     // 1. Las columnas, con su tipo y su tabla.
     //
     //    `duckdb_columns()` y NO `information_schema.columns`. La diferencia no es de
@@ -151,9 +166,19 @@ pub fn introspect(engine: &Engine, source: &Source) -> Result<Introspection, Con
     //    `NoRelationships` en vez de un modelo con cero relaciones. Un modelo sin
     //    relaciones parece funcionar y da numeros sin sentido: un informe que cruza
     //    productos por categoria devuelve el total del informe, no el total de la categoria.
-    let relationships = Vec::new();
-
     // 3. Las filas de cada tabla, para decidir cual es el hecho.
+    // El catalogo se lee ANTES de decidir que es el hecho: la decision depende de cuantas
+    // claves foraneas apuntan a cada tabla.
+    let mut catalog = catalog;
+    let (foreign_keys, primary_keys) = match catalog.as_deref_mut() {
+        Some(catalog) => {
+            let keys = catalog.foreign_keys()?;
+            let primaries = catalog.primary_keys()?;
+            (Some(keys), primaries)
+        }
+        None => (None, BTreeMap::new()),
+    };
+
     let counts = table_counts(engine, &source.alias, &tables);
 
     // 4. Los ids. Se asignan en orden de tabla, para que sean estables.
@@ -178,7 +203,7 @@ pub fn introspect(engine: &Engine, source: &Source) -> Result<Introspection, Con
     }
 
     // 5. Quien es el hecho.
-    let fact = choose_fact_table(&tables, &counts).ok_or_else(|| {
+    let fact = choose_fact_table(&tables, foreign_keys.as_deref().unwrap_or(&[]), &counts).ok_or_else(|| {
         ConnectError::Catalog(
             "no se pudo decidir cual es la tabla de hechos. Datan elige la que tiene la \\
              clave foranea mas referenciada; con menos de dos tablas no hay forma de saberlo"
@@ -204,16 +229,24 @@ pub fn introspect(engine: &Engine, source: &Source) -> Result<Introspection, Con
                 map_type(&column.sql_type)?,
             ));
         }
-        // Sin clave primaria conocida, el nombre de la clave es la convencion de Postgres:
-        // `id`, o el nombre de la tabla con el sufijo `_id`. No es una conjetura: sin
-        // clave, el modelo no puede declarar unicidad y los `DISTINCTCOUNT` seran
-        // aproximaciones que nadie puede auditar.
-        let keys: Vec<ObjectId> = ["id".to_string(), format!("{table}_id")]
-            .iter()
-            .filter_map(|name| {
-                column_ids.get(&(schema.clone(), table.clone(), name.clone())).copied()
+        // La clave primaria viene del catalogo. Sin ella se cae a la convencion de nombre
+        // (`id`, o el nombre de la tabla con sufijo `_id`), que acierta casi siempre y no
+        // esta probada. Se dice en el informe para que se note cuando la convencion va a ser
+        // la que decidio.
+        let keys: Vec<ObjectId> = primary_keys
+            .get(&(schema.clone(), table.clone()))
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| {
+                        column_ids
+                            .get(&(schema.clone(), table.clone(), name.clone()))
+                            .copied()
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
+        let key_by_convention = keys.is_empty();
 
         report.push(format!(
             "  {}  {} columnas  {} filas  {}",
@@ -223,11 +256,11 @@ pub fn introspect(engine: &Engine, source: &Source) -> Result<Introspection, Con
                 .get(&(schema.clone(), table.clone()))
                 .copied()
                 .unwrap_or(0),
-            if matches!(kind, TableKind::Facts) {
-                "HECHOS"
-            } else {
-                "dimension"
-            }
+            format!(
+                "{}{}",
+                if matches!(kind, TableKind::Facts) { "HECHOS" } else { "dimension" },
+                if key_by_convention { "  (clave por convencion)" } else { "" }
+            )
         ));
 
         model_tables.push(Table {
@@ -240,16 +273,24 @@ pub fn introspect(engine: &Engine, source: &Source) -> Result<Introspection, Con
         });
     }
 
-    if relationships.is_empty() && model_tables.len() > 1 {
-        return Err(ConnectError::NoRelationships {
-            tables: model_tables.len(),
-        });
-    }
-
+    // El modelo se construye SIN relaciones primero, porque `relationships` necesita
+    // consultar si la tabla que referencia es la de hechos, y eso solo se sabe despues de
+    // elegir la tabla de hechos.
     let mut model = Model {
         tables: model_tables,
         measures: Vec::new(),
-        relationships,
+        relationships: Vec::new(),
+    };
+    model.relationships = match catalog {
+        Some(catalog) => catalog.relationships(&model, &column_ids, foreign_keys.as_deref().unwrap_or(&[]))?,
+        None => {
+            if model.tables.len() > 1 {
+                return Err(ConnectError::NoRelationships {
+                    tables: model.tables.len(),
+                });
+            }
+            Vec::new()
+        }
     };
 
     model.measures = generate_measures(&model)?;
@@ -280,15 +321,27 @@ struct RawColumn {
 /// siempre el mismo modelo.
 fn choose_fact_table(
     tables: &std::collections::BTreeMap<(String, String), Vec<RawColumn>>,
+    foreign_keys: &[ForeignKey],
     counts: &std::collections::BTreeMap<(String, String), i64>,
 ) -> Option<(String, String)> {
-    // Sin claves foraneas no hay "la tabla mas referenciada", asi que el criterio es el
-    // numero de filas. Es una regla debil y por eso hay que decirlo: cuando las relaciones
-    // se puedan leer, esta funcion vuelve a mirar las referencias.
+    // La tabla que MAS CLAVES FORANEAS DECLARA.
+    //
+    // La firma de un esquema en estrella: la tabla de hechos esta en el lado de muchos y
+    // DECLARA las claves foraneas hacia las dimensiones. `product_boleta` declara dos.
+    //
+    // Contar las claves foraneas que apuntan a cada tabla da el resultado invertido:
+    // `boleta` recibe una y gana por tener mas filas, y el modelo trata la cabecera de las
+    // ventas como si fuera el detalle. Las medidas se generan sobre la tabla equivocada y
+    // todos los numeros estan mal en la misma direccion, lo que los hace parecer coherentes.
+    let mut declared: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for key in foreign_keys {
+        *declared.entry((key.schema.clone(), key.table.clone())).or_default() += 1;
+    }
     tables
         .keys()
         .max_by_key(|key| {
             (
+                declared.get(key).copied().unwrap_or(0),
                 counts.get(key).copied().unwrap_or(0),
                 tables.get(key).map(|c| c.len()).unwrap_or(0),
             )
@@ -299,26 +352,28 @@ fn choose_fact_table(
 /// Cuantas filas tiene cada tabla.
 ///
 /// Se consulta una por vez y no con un `UNION ALL` generado: el SQL tiene que poder fallar
-/// por tabla, y decir cual fallo es la mitad del diagnostico. Con muchas tablas esto es lo
-/// mas lento de la conexion, y lo correcto seria un estimador de Postgres.
+/// por tabla, y decir cual fallo es la mitad del diagnostico.
+///
+/// El alias de DuckDB va delante. `public.boleta` no resuelve cuando la base esta adjunta
+/// como `pg`: DuckDB busca el esquema `public` en su propio catalogo, no en el remoto, y
+/// responde "schema public does not exist" sin suggestencia util.
 fn table_counts(
     engine: &Engine,
     source: &str,
-    tables: &std::collections::BTreeMap<(String, String), Vec<RawColumn>>,
-) -> std::collections::BTreeMap<(String, String), i64> {
-    let keys: Vec<(String, String)> = tables.keys().cloned().collect();
-    let mut out = std::collections::BTreeMap::new();
-    for key in keys {
+    tables: &BTreeMap<(String, String), Vec<RawColumn>>,
+) -> BTreeMap<(String, String), i64> {
+    let mut out = BTreeMap::new();
+    for key in tables.keys() {
         let sql = format!(
             "SELECT COUNT(*) FROM {}.{}",
             quote_identifier(source),
             quote_qualified(&key.0, &key.1)
         );
-        if let Ok(rows) = engine.query_arrow(&sql)
-            && let Some(batch) = rows.first()
-        {
-            let text = cell_text(batch, 0, 0);
-            out.insert(key, text.parse().unwrap_or(0));
+        let Ok(batches) = engine.query_arrow(&sql) else {
+            continue;
+        };
+        if let Some(batch) = batches.first() {
+            out.insert(key.clone(), cell_text(batch, 0, 0).parse().unwrap_or(0));
         }
     }
     out

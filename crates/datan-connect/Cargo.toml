@@ -11,4 +11,5 @@ datan-dax-check = { path = "../datan-dax-check" }
 datan-dax-syntax = { path = "../datan-dax-syntax" }
 datan-model = { path = "../datan-model" }
 datan-storage = { path = "../datan-storage" }
+postgres = "0.19"
 thiserror.workspace = true

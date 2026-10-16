@@ -24,6 +24,13 @@ pub struct SourceMap {
     columns: HashMap<ObjectId, String>,
     /// De que tabla es cada columna. Se necesita para el semijoin de un filtro propagado.
     column_owners: HashMap<ObjectId, ObjectId>,
+    /// Prefijo de esquema o de base adjunta, sin punto. Vacio para tablas locales.
+    ///
+    /// Una base de Postgres adjunta a DuckDB vive bajo el alias del `ATTACH`: las tablas se
+    /// llaman `pg.product_boleta`, no `product_boleta`. Sin este prefijo el SQL se genera
+    /// bien y DuckDB responde "table does not exist", con la unica pista de que el nombre
+    /// existe con otro prefijo.
+    qualifier: String,
 }
 
 impl SourceMap {
@@ -41,6 +48,24 @@ impl SourceMap {
             }
         }
         map
+    }
+
+    /// Antepone un esquema o un alias de base a TODAS las tablas.
+    ///
+    /// Es lo que hace falta cuando la fuente es una base adjunta: `pg`, `main`,
+    /// `attached_db`. Un nombre con punto dentro ya no se escapa como identificador simple.
+    pub fn with_qualifier(mut self, qualifier: &str) -> Self {
+        self.qualifier = qualifier.trim_matches('.').to_string();
+        self
+    }
+
+    /// El nombre fisico de una tabla, con su calificador.
+    pub fn qualified(&self, table: ObjectId) -> Result<(String, ObjectId), SourceMapError> {
+        let (name, id) = self.table(table)?;
+        if self.qualifier.is_empty() {
+            return Ok((name.to_string(), id));
+        }
+        Ok((format!("{}.{}", self.qualifier, name), id))
     }
 
     /// Sobreescribe el nombre fisico de una tabla. Para renombrar en la conexion sin tocar

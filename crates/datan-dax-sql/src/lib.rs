@@ -33,7 +33,7 @@
 mod quote;
 mod source;
 
-pub use quote::{escape_string, quote_identifier};
+pub use quote::{escape_string, quote_identifier, quote_qualified};
 pub use source::{SourceMap, SourceMapError};
 
 use datan_dax_eval::{Atom, AtomKind, AtomSet, FilterContext, FilterSource, Granularity};
@@ -162,8 +162,9 @@ pub fn lower(
         ));
     }
 
-    let fact_physical = sources.table(fact_table)?.0.to_string();
-    let mut from_clause = format!("{} {}", quote_identifier(&fact_physical), aliases.of(fact_table));
+    // Calificado: una base adjunta vive bajo el alias del `ATTACH`.
+    let (fact_physical, _) = sources.qualified(fact_table)?;
+    let mut from_clause = aliases.of(fact_table);
 
     // Un JOIN por cada tabla extra, por el camino mas corto desde la tabla de hechos.
     for table in needed.iter().skip(1) {
@@ -179,10 +180,10 @@ pub fn lower(
             let (from_physical, _) = sources.column(edge.from_column)?;
             let (to_physical, _) = sources.column(edge.to_column)?;
             let _ = from_table;
-            let (to_table_physical, _) = sources.table(to_table)?;
+            let (to_table_physical, _) = sources.qualified(to_table)?;
             from_clause.push_str(&format!(
                 "\n  JOIN {} {} ON {}.{} = {}.{}",
-                quote_identifier(to_table_physical),
+                quote_qualified(&to_table_physical),
                 aliases.of(to_table),
                 aliases.of(from_table),
                 quote_identifier(from_physical),
@@ -251,8 +252,9 @@ pub fn lower(
     };
 
     let sql = format!(
-        "SELECT\n  {}\nFROM {}\n{}\nGROUP BY {}{order_clause}",
+        "SELECT\n  {}\nFROM {} {}{}\n\nGROUP BY {}{order_clause}",
         select.join(",\n  "),
+        quote_qualified(&fact_physical),
         from_clause,
         where_clause,
         group_by
@@ -542,7 +544,7 @@ fn lower_filter(
             origin_filters,
         } => {
             let (origin_physical, origin_table) = sources.column(*origin_column)?;
-            let (table_physical, _) = sources.table(origin_table)?;
+            let (table_physical, _) = sources.qualified(origin_table)?;
 
             // Los filtros del origen se aniden un nivel. Es un semijoin, no un join: no
             // duplica filas de la tabla de hechos.
