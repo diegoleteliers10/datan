@@ -50,7 +50,7 @@ pub use time::{
     shift,
 };
 
-use datan_dax_check::{Checked, CheckedExpr, check};
+use datan_dax_check::{Checked, check};
 use datan_model::Model;
 
 /// Error al evaluar una expresion de medidas.
@@ -137,5 +137,6 @@ pub fn needs_interpreter(
 }
 
 /// Reexportado por comodidad para el extractor.
-pub use datan_dax_check::CheckedExpr as _CheckedExpr;
+pub use datan_dax_check::CheckedExpr;
+pub use datan_dax_syntax::{BinaryOp, UnaryOp};
 const _: Option<CheckedExpr> = None;

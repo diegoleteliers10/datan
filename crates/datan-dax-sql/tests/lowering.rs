@@ -339,3 +339,155 @@ fn una_columna_de_agrupamiento_no_aparece_en_el_where() {
 fn escapa_identificadores() {
     assert_eq!(quote_identifier("Dim Product"), "\"Dim Product\"");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Agregaciones sobre expresion
+// ---------------------------------------------------------------------------------------------
+
+/// Un modelo con las columnas de negocio del plan: la linea de venta trae cantidad y
+/// precio, el producto trae el costo.
+///
+/// `Revenue = SUM(Qty * Price)` y `COGS = SUM(Qty * Cost)` son las medidas mas simples de
+/// cualquier informe real, y ninguna baja si el atomo solo puede llevar una columna.
+fn business_model() -> Model {
+    let mut model = model();
+    model.tables[0].columns.push(Column::new(
+        ObjectId(14),
+        "Price",
+        DataType::Moneda,
+    ));
+    model.tables[1].columns.push(Column::new(
+        ObjectId(24),
+        "Cost",
+        DataType::Moneda,
+    ));
+    model.measures = vec![
+        Measure::new(ObjectId(100), "Revenue", "SUM('Fact Sales'[Qty] * 'Fact Sales'[Price])"),
+        Measure::new(ObjectId(101), "COGS", "SUM('Fact Sales'[Qty] * 'Dim Product'[Cost])"),
+        Measure::new(ObjectId(102), "Qty", "SUM('Fact Sales'[Qty])"),
+    ];
+    model
+}
+
+#[test]
+fn una_agregacion_sobre_expresion_de_una_tabla_baja() {
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty] * 'Fact Sales'[Price])",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert!(
+        plan.sql.contains("SUM((t0.\"Qty\" * t0.\"Price\"))"),
+        "esperaba la expresion entera dentro del agregado:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn una_agregacion_sobre_expresion_de_dos_tablas_trae_la_dimensjon_al_from() {
+    // El caso que mas se escondia: la dimension no agrupa y no filtra, asi que el plan
+    // antiguo no la unia, y el `Cost` quedaba sin calificar. El SQL se generaba bien y
+    // DuckDB fallaba al ejecutarlo.
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty] * 'Dim Product'[Cost])",
+        &model,
+        &filters,
+        &[PRODUCT_CATEGORY],
+    )
+    .expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert!(
+        plan.sql.contains("JOIN \"Dim Product\""),
+        "la dimension del costo tiene que estar en el FROM:\n{}",
+        plan.sql
+    );
+    assert!(
+        plan.sql.contains("t1.\"Cost\""),
+        "el costo tiene que salir de la dimension, no de los hechos:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn una_agregacion_sobre_expresion_declara_las_dos_columnas() {
+    // El campo `column` del atomo es `None` para una expresion. El FROM se armaba mirando
+    // solo ese campo, asi que no encontraba tabla de hechos y rechazaba la medida entera.
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty] * 'Fact Sales'[Price])",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+
+    let atom = &atoms.atoms[0];
+    assert_eq!(atom.column, None, "una expresion no es una columna");
+    assert_eq!(
+        atom.referenced_columns(),
+        vec![FACT_QTY, ObjectId(14)],
+        "tiene que declarar las columnas que toca"
+    );
+    assert_eq!(
+        atom.anchor_table(&model),
+        Some(FACT),
+        "y con ellas se puede encontrar la tabla de hechos"
+    );
+}
+
+#[test]
+fn los_parentesis_de_la_expresion_no_se_pueden_sacar() {
+    // `SUM(a + b * c)` no es `SUM(a) + SUM(b) * SUM(c)`. Los parentesis vienen del arbol,
+    // no del texto: quitarlos cambia el resultado.
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty] * 'Fact Sales'[Price] + 1)",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert!(
+        plan.sql.contains("(t0.\"Qty\" * t0.\"Price\") + 1"),
+        "la precedencia tiene que venir del arbol:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn una_medida_que_referencia_otras_no_baja_a_sql_todavia() {
+    // Fijado a proposito, no por descuido. `Margin = ([Revenue] - [COGS]) / [Revenue]` es
+    // aritmetica ENTRE agregaciones: un atomo es una hoja y `Margin` es una expresion
+    // sobre tres. El SQL a mano lo resuelve repitiendo la expresion sin subconsulta, asi
+    // que el objetivo esta medido y la limitacion es conocida, no un olvido.
+    //
+    // Cuando esto cambie, el test tiene que fallar para que se note.
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms("([Revenue] - [COGS]) / [Revenue]", &model, &filters, &[PRODUCT_REGION])
+        .expect("extrae");
+
+    assert_eq!(
+        atoms.atoms.len(),
+        3,
+        "extrae las tres hojas, dos de ellas repetidas"
+    );
+    assert!(
+        lower(&model, &sources(&model), &atoms, &filters).is_err(),
+        "una medida que combina medidas CAE al interprete; cuando baje, hay que quitar \
+         este test y revisar el plan de ejecucion"
+    );
+}

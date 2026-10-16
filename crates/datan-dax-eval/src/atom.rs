@@ -66,6 +66,40 @@ pub struct Atom {
 }
 
 impl Atom {
+    /// Todas las columnas que el atomo toca.
+    ///
+    /// Un atomo no tiene SIEMPRE una columna. `SUM('Fact Sales'[Qty])` tiene una, pero
+    /// `SUM('Fact Sales'[Qty] * 'Fact Sales'[Price])` agrega sobre una EXPRESION de dos, y
+    /// `SUM('Fact Sales'[Qty] * 'Dim Product'[Cost])` sobre dos de tablas distintas.
+    ///
+    /// El campo `column` sigue siendo `Option` porque se necesita distinguir "agrega sobre
+    /// esta columna" de "agrega sobre una expresion", y esa distincion decide si el
+    /// lowering puede emitir `SUM(t0.qty)` o tiene que emitir la expresion entera. Lo que
+    /// no puede hacer es decidir la tabla de hechos mirando solo `column`: en una
+    /// agregacion sobre expresion no hay columna, y el lowering terminaba con "no se
+    /// encontro la tabla de hechos" en medidas tan simples como `Revenue`.
+    pub fn referenced_columns(&self) -> Vec<ObjectId> {
+        if let Some(column) = self.column {
+            return vec![column];
+        }
+        let Some(expression) = &self.expression else {
+            return Vec::new();
+        };
+        let mut columns = Vec::new();
+        collect_columns(expression, &mut columns);
+        columns
+    }
+
+    /// La tabla que aporta la columna agregada, si se puede determinar.
+    pub fn anchor_table(&self, model: &Model) -> Option<ObjectId> {
+        if let Some(table) = self.table {
+            return Some(table);
+        }
+        self.referenced_columns()
+            .into_iter()
+            .find_map(|column| model.column(column).map(|(table, _)| table.id))
+    }
+
     /// Si este atomo necesita el interprete en vez del fast path SQL.
     pub fn needs_interpreter(&self) -> bool {
         // Una granularidad mas fina que la de la consulta obliga a una subconsulta
@@ -394,4 +428,26 @@ fn is_iterator(name: &str) -> bool {
         name,
         "SUMX" | "AVERAGEX" | "MAXX" | "MINX" | "COUNTX" | "PRODUCTX" | "RANKX"
     )
+}
+
+/// Todas las columnas de un `CheckedExpr`, en orden de aparicion y sin repetir.
+fn collect_columns(expr: &CheckedExpr, out: &mut Vec<ObjectId>) {
+    match expr {
+        CheckedExpr::Column { column, .. } => {
+            if !out.contains(column) {
+                out.push(*column);
+            }
+        }
+        CheckedExpr::Binary { left, right, .. } => {
+            collect_columns(left, out);
+            collect_columns(right, out);
+        }
+        CheckedExpr::Unary { operand, .. } => collect_columns(operand, out),
+        CheckedExpr::Call { args, .. } => {
+            for arg in args {
+                collect_columns(arg, out);
+            }
+        }
+        _ => {}
+    }
 }

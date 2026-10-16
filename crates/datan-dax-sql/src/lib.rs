@@ -124,7 +124,16 @@ pub fn lower(
     //
     // Los alias `t0`, `t1` evitan colisiones: `fact_sales` y `dim_product` tienen las dos
     // una columna `product_id`.
+    //
+    // La tabla de cada COLUMNA de una agregacion tambien cuenta. `SUM(qty * costo)` necesita
+    // la dimension en el FROM aunque no agrupe por ella: sin el JOIN, el `costo` queda sin
+    // calificar y DuckDB falla al ejecutar.
     let mut needed: Vec<ObjectId> = vec![fact_table];
+    for table in required_tables(model, atoms) {
+        if !needed.contains(&table) {
+            needed.push(table);
+        }
+    }
     for column in grouping {
         let owner = owner_of(model, *column);
         if !needed.contains(&owner) {
@@ -276,12 +285,90 @@ fn first_fact_table(model: &Model, atoms: &AtomSet) -> Option<ObjectId> {
     atoms
         .atoms
         .iter()
-        .filter_map(|atom| {
-            atom.column
-                .and_then(|column| model.column(column).map(|(table, _)| table.id))
-                .or(atom.table)
-        })
-        .next()
+        .find_map(|atom| atom.anchor_table(model))
+}
+
+/// Todas las tablas que el conjunto de atomos necesita en el FROM.
+///
+/// Una agregacion sobre expresion puede tocar columnas de dos tablas: `SUM(qty * costo)`
+/// necesita el hecho Y la dimension. Antes el lowering solo unia la tabla que Seahia la
+/// columna agregada, asi que el `costo` de la dimension quedaba sin calificar y el SQL
+/// fallaba al ejecutarse.
+fn required_tables(model: &Model, atoms: &AtomSet) -> std::collections::BTreeSet<ObjectId> {
+    let mut tables = std::collections::BTreeSet::new();
+    for atom in &atoms.atoms {
+        for column in atom.referenced_columns() {
+            if let Some((table, _)) = model.column(column) {
+                tables.insert(table.id);
+            }
+        }
+        if let Some(table) = atom.table {
+            tables.insert(table);
+        }
+    }
+    for grouping in &atoms.grouping {
+        if let Some((table, _)) = model.column(*grouping) {
+            tables.insert(table.id);
+        }
+    }
+    tables
+}
+
+/// Renderiza un `CheckedExpr` como SQL, calificando cada columna con el alias de su tabla.
+///
+/// Devuelve `None` si la expresion trae un nodo que no es aritmetica. Un `CALCULATE` o una
+/// referencia a medida dentro del argumento de una agregacion no se renderiza: eso cae al
+/// interprete, que lo resuelve por celda de grupo.
+fn render_expression(
+    expr: &datan_dax_eval::CheckedExpr,
+    sources: &SourceMap,
+    aliases: &Aliases,
+) -> Result<String, LowerError> {
+    use datan_dax_eval::CheckedExpr as E;
+
+    Ok(match expr {
+        E::Column { column, .. } => {
+            let (name, table) = sources.column(*column)?;
+            format!("{}.{}", aliases.of(table), quote_identifier(name))
+        }
+        E::Number { value, .. } => value.to_string(),
+        E::Text { value, .. } => escape_string(value),
+        E::Binary { left, right, op, .. } => {
+            let left = render_expression(left, sources, aliases)?;
+            let right = render_expression(right, sources, aliases)?;
+            let operator = match op {
+                datan_dax_eval::BinaryOp::Add => "+",
+                datan_dax_eval::BinaryOp::Subtract => "-",
+                datan_dax_eval::BinaryOp::Multiply => "*",
+                datan_dax_eval::BinaryOp::Divide => "/",
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "el operador `{other:?}` no se baja a SQL dentro de una agregacion"
+                    )));
+                }
+            };
+            // Los parentesis importan: `SUM(a + b * c)` no es `SUM(a) + SUM(b) * SUM(c)`.
+            // Por eso cada lado va entre parentesis sin的条件, y la precedencia queda
+            // determinada por el arbol, no por el texto.
+            format!("({left} {operator} {right})")
+        }
+        E::Unary { op, operand, .. } => {
+            let inner = render_expression(operand, sources, aliases)?;
+            match op {
+                datan_dax_eval::UnaryOp::Negate => format!("(-{inner})"),
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "`{other:?}` no se baja a SQL dentro de una agregacion"
+                    )));
+                }
+            }
+        }
+        other => {
+            return Err(LowerError::Unsupported(format!(
+                "`{other:?}` no se baja a SQL dentro de una agregacion"
+            )));
+        }
+    })
 }
 
 fn lower_atom(
@@ -295,18 +382,24 @@ fn lower_atom(
         return Ok("COUNT(*)".to_string());
     }
 
-    let column_id = atom.column.ok_or_else(|| {
-        LowerError::Unsupported(format!(
-            "el atomo `{}` agrega sobre una expresion, no sobre una columna",
-            atom.label
-        ))
-    })?;
-    let (column_name, column_table) = sources.column(column_id)?;
-    let column_name = format!(
-        "{}.{}",
-        aliases.of(column_table),
-        quote_identifier(column_name)
-    );
+    // `SUM([Qty] * [Price])` no tiene columna: el argumento es una expresion. Se renderiza
+    // entera, con sus tablas calificadas. Sin esto, las medidas de negocio mas simples del
+    // plan, `Revenue` y `COGS`, no bajan a SQL.
+    let column_name = match atom.column {
+        Some(column_id) => {
+            let (name, table) = sources.column(column_id)?;
+            format!("{}.{}", aliases.of(table), quote_identifier(name))
+        }
+        None => match &atom.expression {
+            Some(expression) => render_expression(expression, sources, aliases)?,
+            None => {
+                return Err(LowerError::Unsupported(format!(
+                    "el atomo `{}` no tiene ni columna ni expresion",
+                    atom.label
+                )));
+            }
+        },
+    };
 
     let function = match atom.kind {
         AtomKind::Sum => "SUM",

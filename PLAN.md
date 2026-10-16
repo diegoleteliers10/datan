@@ -382,6 +382,60 @@ nodo hash aggregate y ningun `DELIM_JOIN`.
 
 Ademas arrancar el grid custom el dia 1 de esta fase, no en la Fase 5. Ver R7.
 
+**Test de semana 1, ejecutado: PASA.** Sobre 1.000.000 de lineas, `1 HASH_GROUP_BY`, `0
+DELIM_JOIN`, p50 1 ms, p95 4 ms. El conjunto fijo de medidas SI colapsa en una pasada, y el
+presupuesto de 300 ms no esta en riesgo.
+
+Linea base, por categoria: Revenue 9.750.000.000 / Margin 0.6209 para Almacen. El generador tiene
+que producir exactamente estos numeros.
+
+#### El hallazgo que la linea base destapo
+
+El IR no podia expresar las dos medidas mas simples de un informe real.
+
+`Revenue = SUM(Qty * Price)` es una agregacion sobre una EXPRESION de dos columnas. El atomo
+llevaba `column: Option<ObjectId>`, UNA columna. `first_fact_table` miraba solo ese campo, no
+encontraba tabla de hechos, y la medida entera se rechazaba con "no se encontro la tabla de
+hechos". Lo mismo con `COGS = SUM(Qty * Cost)`, que ademas cruza dos tablas.
+
+Lo que faltaba no era un caso especial: era que el atomo fuera una hoja cuando deberia ser una
+expresion. `Atom::referenced_columns()` y `Atom::anchor_table()` cierran la parte de las hojas, y
+`render_expression` emite el arbol entero con sus tablas calificadas.
+
+El segundo fallo era menos visible: la tabla de una COLUMNA de la agregacion no se unia al FROM.
+`SUM(Qty * Cost)` no agrupa por la dimension ni filtra por ella, asi que el plan la ignoraba y el
+`Cost` quedaba sin calificar. El SQL se generaba bien y DuckDB fallaba al ejecutarlo. Ahora
+`required_tables` mete en el FROM toda tabla que un atomo toque, no solo la que agrupa.
+
+Despues de los dos arreglos, las tres medidas hoja coinciden con la linea base a mano por `EXCEPT`
+en las dos direcciones, sobre 1M de lineas.
+
+#### Lo que queda: `Margin` NO baja a SQL todavia
+
+`Margin = ([Revenue] - [COGS]) / [Revenue]` es aritmetica ENTRE agregaciones. El extractor saca
+las tres hojas, pero un atomo es una hoja y `Margin` es una expresion sobre tres. El lowering no
+tiene donde poner la division.
+
+Ademas el contador de profundidad confunde dos cosas: una agregacion anidada de verdad
+(`SUMX(VALUES(A), CALCULATE(...))`, que recalcula por fila) con una agregacion dentro de una
+aritmetica de medidas. La segunda marca `Granularity::Finer` y cae al interprete sin motivo.
+
+La linea base a mano SI lo resuelve repitiendo la expresion en la lista de seleccion, sin
+subconsulta y sin `DELIM_JOIN`, como demostro el test de semana 1. El objetivo esta medido. Falta
+que el IR lleve la forma de la expresion, no solo una lista plana de atomos.
+
+Fijado con un test que FALLA cuando se arregle, para que el cambio se vea.
+
+#### Sobre el esquema real
+
+`boleta`, `product_boleta` y `catalogo_productos` no tienen columna de costo, y `COGS` la
+necesita. El costo pertenece al PRODUCTO, no a la linea: es la forma correcta y lo que permite
+calcular margen a nivel de categoria.
+
+Decidir con el usuario si se agrega `costo` a `catalogo_productos` en la base real. Mientras tanto
+todo corre contra `datan_bench`, una base aparte con el mismo esquema mas esa columna, y
+1.000.000 de lineas sembradas. La base real no se ha tocado.
+
 ### Fase 2: CALCULATE, context transition y el fallback. P0
 
 Entregable: `CALCULATE` con todos sus modificadores, context transition, `RELATED`, iteradores, y

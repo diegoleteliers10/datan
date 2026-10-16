@@ -216,6 +216,19 @@ impl Engine {
         Ok(batches)
     }
 
+    /// Corre una consulta y devuelve cuantos milisegundos tardo.
+    ///
+    /// El retorno importa tanto como el tiempo: una consulta que falla tiene un tiempo, y
+    /// mezclarlo con las que si funcionan en la misma muestra de latencia da un p95 que no
+    /// describe nada.
+    pub fn timed(&self, sql: &str) -> Result<u64> {
+        let started = std::time::Instant::now();
+        match self.query_arrow(sql) {
+            Ok(_) | Err(StorageError::EmptyResult) => Ok(started.elapsed().as_millis() as u64),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Ejecuta una sentencia sin resultado (DDL, refresh).
     pub fn execute(&self, sql: &str) -> Result<()> {
         self.conn.execute_batch(sql)?;
