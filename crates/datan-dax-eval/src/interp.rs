@@ -463,6 +463,37 @@ impl ColumnView for IntColumn {
     }
 }
 
+/// Una columna en memoria de fechas, en dias desde 1970-01-01.
+///
+/// El mismo numero entero que usa `FilterValue::Date` y que DuckDB devuelve al castear un
+/// `DATE` a `INTEGER`. Que los tres coincidan es lo que permite comparar los dos caminos sin
+/// una capa de conversion que pueda mentir.
+pub struct DateColumn {
+    pub values: Vec<Option<i32>>,
+}
+
+impl ColumnView for DateColumn {
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn value_at(&self, row: usize) -> Scalar {
+        match self.values.get(row) {
+            Some(Some(day)) => Scalar::Date(*day),
+            _ => Scalar::Blank,
+        }
+    }
+
+    fn non_blank_count(&self) -> usize {
+        self.values.iter().filter(|v| v.is_some()).count()
+    }
+
+    fn distinct_count(&self) -> usize {
+        let distinct: BTreeSet<i32> = self.values.iter().flatten().copied().collect();
+        distinct.len()
+    }
+}
+
 /// Una columna en memoria de texto.
 pub struct TextColumn {
     pub values: Vec<Option<String>>,

@@ -112,6 +112,15 @@ impl Filter {
         }
     }
 
+    /// Un filtro con un operador cualquiera y un valor.
+    pub fn new(column: ObjectId, operator: FilterOperator, value: FilterValue) -> Self {
+        Self {
+            column,
+            operator,
+            source: FilterSource::Concrete(vec![value]),
+        }
+    }
+
     /// Los valores, si el filtro es concreto. Un filtro propagado no los tiene.
     pub fn values(&self) -> &[FilterValue] {
         match &self.source {
@@ -151,6 +160,28 @@ impl FilterContext {
 
     pub fn with_equal(&self, column: ObjectId, value: FilterValue) -> Self {
         self.with(Filter::equal(column, value))
+    }
+
+    /// Un limite inferior o superior, para los rangos.
+    ///
+    /// Los filtros de rango son `>=` y `<=` por separado y no un `Between`, porque los dos
+    /// operadores ya existian y por eso un rango se propaga por las relationships sin un
+    /// caso especial. El `time intelligence` es el primer consumidor.
+    pub fn with_greater_equal(&self, column: ObjectId, value: FilterValue) -> Self {
+        self.with(Filter::new(column, FilterOperator::GreaterOrEqual, value))
+    }
+
+    pub fn with_less_equal(&self, column: ObjectId, value: FilterValue) -> Self {
+        self.with(Filter::new(column, FilterOperator::LessOrEqual, value))
+    }
+
+    /// Un filtro que no puede satisfacerse.
+    ///
+    /// Para modelar "no hay filas que cumplan". La ausencia de filtros significa lo
+    /// contrario, "sin restriccion", asi que un rango vacio necesita un filtro imposible en
+    /// vez de ninguno: si no, la celda devolveria el total en vez de BLANK.
+    pub fn with_greater(&self, column: ObjectId, value: FilterValue) -> Self {
+        self.with(Filter::new(column, FilterOperator::Greater, value))
     }
 
     /// Quita todos los filtros de una columna.
@@ -361,7 +392,7 @@ fn filters_in_table(&self, model: &Model, table: ObjectId) -> Vec<Filter> {
     }
 
     /// Todas las columnas del modelo que participan en alguna relationship. Son las que el
-    /// extractor de atomos tiene que mirar.
+/// extractor de atomos tiene que mirar.
     pub fn relationship_columns(model: &Model) -> BTreeSet<ObjectId> {
         model
             .relationships
@@ -416,3 +447,85 @@ impl ColumnInfo {
         })
     }
 }
+
+/// Propaga aplicando las relationships en un orden dado, ronda a ronda.
+///
+/// Existe para poder enumerar. La pregunta de la Fase 3 es "en un grafo ciclico, el
+/// resultado depende del orden?", y responderla exige poder elegir el orden.
+///
+/// Si todas las permutaciones dan lo mismo, la propagacion es conmutativa y el punto fijo
+/// es unico. Si alguna difiere, el algebra no define una semantica y hay que negarse a
+/// evaluar ese modelo.
+pub fn propagate_ordered(model: &Model, start: &FilterContext, order: &[usize]) -> FilterContext {
+let mut current = start.clone();
+let max_rounds = model.tables.iter().map(|t| t.columns.len()).sum::<usize>() + 1;
+
+for _ in 0..max_rounds {
+    let mut changed = false;
+    for index in order {
+        let Some(relationship) = model.relationships.get(*index) else {
+            continue;
+        };
+        let before = current.column_count();
+        current = current.propagate_one(model, relationship);
+        if current.column_count() != before {
+            changed = true;
+        }
+    }
+    if !changed {
+        break;
+    }
+}
+current
+}
+
+/// Enumera todas las permutaciones del orden y devuelve las que dan un resultado distinto.
+///
+/// Es el metodo, no una muestra: el numero de permutaciones de N relaciones es N!, asi que
+/// solo sirve para N chico. Para un grafo de 5 relaciones son 120, que es lo que hace falta
+    /// para responder la pregunta con certeza en vez de con ejemplos.
+    pub fn distinct_propagation_results(
+        model: &Model,
+        start: &FilterContext,
+    ) -> Vec<(Vec<usize>, FilterContext)> {
+        let mut seen: BTreeSet<Vec<ObjectId>> = BTreeSet::new();
+        let mut results = Vec::new();
+        for order in permutations(model.relationships.len()) {
+            let context = propagate_ordered(model, start, &order);
+            let signature: Vec<ObjectId> = context.filtered_columns().collect();
+            if seen.insert(signature) {
+                results.push((order, context));
+            }
+        }
+        results
+    }
+
+/// Genera todas las permutaciones de `0..n`.
+///
+/// La version anterior recursaba sobre sufijos y pasaba el SUFIJO al visitante, asi que
+/// `visit` recibia `[1]` en vez de `[0, 1]`. Con dos relaciones eso hacia que cada
+/// permutacion fuera "aplica solo la relationship 1" o "aplica solo la 0", y la
+/// enumeracion reportaba una divergencia que no existia: era un bug del arnes, no del
+/// algebra.
+///
+/// El bug importa mas que el bug que encontrado: una enumeracion mal escrita produce un
+/// veredicto falso, y un veredicto falso sobre la ambiguedad del ciclo manda cambiar el
+/// diseno del motor por nada.
+fn permutations(count: usize) -> Vec<Vec<usize>> {
+        let mut items: Vec<usize> = (0..count).collect();
+        let mut out = Vec::new();
+        permute(&mut items, 0, &mut out);
+        out
+    }
+
+    fn permute(items: &mut Vec<usize>, index: usize, out: &mut Vec<Vec<usize>>) {
+        if index == items.len() {
+            out.push(items.clone());
+            return;
+        }
+        for position in index..items.len() {
+            items.swap(index, position);
+            permute(items, index + 1, out);
+            items.swap(index, position);
+        }
+    }

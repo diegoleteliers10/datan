@@ -413,6 +413,75 @@ Test de semana 1: antes de escribir el optimizador, tomar un grafo ciclico y enu
 propagacion de filtros a mano. Si el orden de propagacion es ambiguo, el algebra tiene un bug y el
 optimizador lo va a tapar.
 
+**Resultado, ejecutado antes de escribir nada:** CONVERGE. Todas las permutaciones del orden de las
+relationships dan el mismo punto fijo, y el filtro da la vuelta completa por el ciclo
+(Product -> Bridge -> Customer -> Bridge -> Product). La propagacion es conmutativa.
+
+Lo que esto **no** significa: que el ciclo se pueda bajar a SQL. Un `JOIN` exige arbol de joins
+aciclico. Por eso `has_bidirectional_cycle` existe igual, para rechazar el fast path con un
+mensaje y dejar el calculo al interprete.
+
+**La ambiguedad de la que habla la documentacion de Power BI no esta en la propagacion de filtros.
+Esta en la secuencia de medidas.** El algebra es conmutativo; `CALCULATE` encadenado no lo es.
+
+La enumeracion encontro dos bugs antes de encontrar uno en el algebra:
+
+1. El generador de permutaciones pasaba sufijos en vez de permutaciones, asi que reportaba una
+   divergencia que no existia. Una enumeracion mal escrita produce un veredicto falso, y un
+   veredicto falso sobre la ambiguedad del ciclo manda cambiar el diseno del motor por nada.
+2. El modelo de prueba declaraba columnas que las relationships no referenciaban, asi que la
+   propagacion nunca ocurria y el test pasaba sin probar nada.
+
+Comprobacion del ciclo, dos: el detector no puede dar falsos positivos. Un star schema normal es
+el caso comun y rechazarlo seria rechazar el 90% de los modelos.
+
+#### Time intelligence
+
+Toda la time intelligence de DAX es un `CALCULATE` con un filtro sobre una tabla de fechas. La
+unica diferencia con `ALL` es que el filtro lo produce un CALCULO, no un literal. El rango son dos
+filtros, `>=` y `<=`, y no un `BETWEEN`: los dos operadores ya existian en el algebra y por eso el
+rango se propaga por las relationships sin un caso especial.
+
+Un rango vacio se modela con un filtro imposible, no con la ausencia de filtros. La ausencia
+significa "sin restriccion", que es lo contrario: la celda devolveria el total en vez de BLANK.
+
+Semantica que hay que fijar con test porque no es intuitiva:
+
+- `DATEADD` ancla en el inicio y conserva la longitud. Un rango que cruza el cambio de ano se
+  comprime dentro de diciembre: 28 dic 2023 - 6 ene 2024, desplazado un ano, da
+  28 dic 2022 - 10 dic 2022.
+- `PARALLELPERIOD` recorta a los limites del periodo calendario y si conserva el dia.
+
+Quien quiere "el mismo mes del ano pasado" usa `PARALLELPERIOD`. Quien quiere "la ventana
+desplazada" usa `DATEADD`. Un acumulado mensual y uno anual NO pueden dar el mismo numero.
+
+Trampa de calendario: la division de trimestres tiene que ser `div_euclid`. Con truncacion hacia
+cero, `-1 / 4` es `0`, y "un trimestre antes de Q1" cae en Q4 del mismo ano. El error solo se ve al
+cruzar el limite de ano, que es justo cuando un acumulado trimestral compara Q4 contra Q4 del ano
+anterior.
+
+#### Tres fallos que la fase destapo, todos de la misma clase
+
+Todos devuelven numeros sin fallar. Ninguno lo detectan los tipos.
+
+1. **`render_value` bajaba `Date` como `DATE '19723'`.** DuckDB espera `DATE '2024-01-01'` y
+   responde con un error de conversion. **Todo filtro de fecha habria fallado en el fast path.**
+   La funcion no tenia cobertura porque no existia ningun filtro de fecha hasta ahora.
+2. **`run_suite` se comia los errores con `filter_map(..ok())`.** Ocho casos de time intelligence
+   desaparecieron del informe sin dejar rastro, y el recuento bajo como si estuviera correcto. Un
+   caso que error no es un caso que no cuenta.
+3. **`NULL` de SQL se reportaba como "sin SQL".** Un `SUM` sobre cero filas es `NULL`, asi que
+   todos los casos de rango sin ventas se contaban como "el interprete es el unico camino". Los
+   tres estados son distintos: sin fast path, `NULL`, y divergencia.
+
+Y un cuarto, en el checker, que llevaba meses oculto por el `filter_map`:
+
+4. **`= 'Oeste'` fallaba con "`Oeste` no existe en el modelo".** En DAX un nombre entre comillas
+   sin `[` detras es tabla (`COUNTROWS('Fact Sales')`) o literal (`= 'Oeste'`), y el parser no
+   puede decidirlo. El checker lo resuelve contra el modelo: si el nombre existe, es tabla; si no,
+   es texto. Solo aplica a nombres entre comillas. `= Oeste` sin comillas sigue siendo error de
+   nombre, que es lo correcto.
+
 ### Fase 4: import de PBIP / TMDL. P1
 
 Entregable: abrir un proyecto PBIP real y obtener numeros.

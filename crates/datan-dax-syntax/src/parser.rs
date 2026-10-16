@@ -290,8 +290,11 @@ impl Parser<'_> {
                         span: join(token.span, close.span),
                     })
                 } else {
+                    // Sin `[` detras puede ser tabla o literal de cadena. El chequeo lo
+                    // decide contra el modelo.
                     Ok(Expr::Reference {
                         name: token.text,
+                        quoted: true,
                         span: token.span,
                     })
                 }
@@ -310,8 +313,12 @@ impl Parser<'_> {
                     name.push_str(&self.advance().text);
                 }
                 let close = self.advance();
+                // Los corchetes hacen la referencia inequivoca: `[Region]` y `['Region']`
+                // son columnas, nunca texto. Solo el nombre entre comillas SIN corchetes es
+                // ambiguo entre tabla y literal.
                 Ok(Expr::Reference {
                     name,
+                    quoted: false,
                     span: join(token.span, close.span),
                 })
             }
@@ -356,6 +363,7 @@ impl Parser<'_> {
                 // Nombre sin parentesis: una medida referenciada.
                 Ok(Expr::Reference {
                     name: token.text,
+                    quoted: false,
                     span: token.span,
                 })
             }
@@ -554,7 +562,11 @@ mod tests {
             Expr::Text { value, .. } => Expr::Text { value: value.clone(), span: zero },
             Expr::Boolean { value, .. } => Expr::Boolean { value: *value, span: zero },
             Expr::Blank { .. } => Expr::Blank { span: zero },
-            Expr::Reference { name, .. } => Expr::Reference { name: name.clone(), span: zero },
+            Expr::Reference { name, quoted, .. } => Expr::Reference {
+                name: name.clone(),
+                quoted: *quoted,
+                span: zero,
+            },
             Expr::QualifiedReference { table, column, .. } => Expr::QualifiedReference {
                 table: table.clone(),
                 column: column.clone(),

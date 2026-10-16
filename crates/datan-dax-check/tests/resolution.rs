@@ -284,3 +284,60 @@ fn el_contexto_de_fila_se_restaura_al_salir_del_iterador() {
     )
     .expect("el contexto vuelve a filtro despues del iterador");
 }
+
+#[test]
+fn un_nombre_entre_comillas_sin_corchetes_puede_ser_texto() {
+    // El caso que rompia la suite de conformidad: `= 'Oeste'` daba "`Oeste` no existe en
+    // el modelo". El usuario habia escrito un literal de texto, no un nombre mal escrito.
+    let model = model();
+    let checked = check("'Dim Product'[Region] = 'Oeste'", &model).expect("chequea");
+    let CheckedExpr::Binary { left, right, .. } = checked.expr else {
+        panic!("se esperaba comparacion, se obtuvo {:?}", checked.expr)
+    };
+    assert!(
+        matches!(*right, CheckedExpr::Text { ref value, .. } if value == "Oeste"),
+        "el lado derecho deberia ser texto, se obtuvo {right:?}"
+    );
+    assert!(matches!(*left, CheckedExpr::Column { .. }));
+}
+
+#[test]
+fn un_nombre_entre_comillas_que_es_tabla_sigue_siendo_tabla() {
+    // La ambiguedad de DAX es real y hay que resolverla a favor de la tabla cuando el
+    // nombre existe en el modelo. `COUNTROWS('Fact Sales')` no es el texto
+    // "Fact Sales".
+    let model = model();
+    let checked = check("COUNTROWS('Fact Sales')", &model).expect("chequea");
+    let CheckedExpr::Call { args, .. } = checked.expr else {
+        panic!("se esperaba llamada")
+    };
+    assert!(
+        matches!(&args[0], CheckedExpr::Table { .. }),
+        "el argumento deberia ser tabla, se obtuvo {:?}",
+        args[0]
+    );
+}
+
+#[test]
+fn un_nombre_sin_comillas_que_no_existe_sigue_siendo_error() {
+    // La regla no se extiende a los nombres sin comillas: en DAX un texto va siempre
+    // entre comillas, asi que `= Oeste` es un nombre mal escrito y tiene que decirlo.
+    let model = model();
+    let error = check("'Dim Product'[Region] = Oeste", &model)
+        .expect_err("un nombre sin comillas no es texto");
+    assert!(
+        matches!(error, CheckError::UnknownName { .. }),
+        "esperaba nombre desconocido, se obtuvo {error}"
+    );
+}
+
+#[test]
+fn los_corchetes_miguen_siempre_una_columna() {
+    // `[Region]` y `['Region']` son la misma referencia. Si el parser marcara la segunda
+    // como texto, `SUMX('Fact Sales', [Price])` pasaria donde tiene que fallar.
+    let model = model();
+    let plain = check("[Qty]", &model).expect("chequea");
+    let quoted = check("['Qty']", &model).expect("chequea");
+    assert!(matches!(plain.expr, CheckedExpr::Measure { .. }));
+    assert!(matches!(quoted.expr, CheckedExpr::Measure { .. }));
+}

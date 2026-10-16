@@ -27,19 +27,28 @@
 //! interprete por celda de grupo.
 
 mod atom;
+mod cycle;
+mod time;
 mod filter;
 mod interp;
 mod modifiers;
 
 pub use atom::{Atom, AtomKind, AtomSet, Granularity};
 pub use filter::{
+    distinct_propagation_results, propagate_ordered,
     ColumnInfo, Filter, FilterContext, FilterOperator, FilterSource, FilterValue,
 };
 pub use interp::{
-    CellResult, ColumnView, DataSource, IntColumn, InterpError, Interpreter, MemorySource, Scalar,
+    CellResult, ColumnView, DataSource, DateColumn, IntColumn, InterpError, Interpreter, MemorySource,
+    Scalar,
     TextColumn,
 };
 pub use modifiers::{Modifier, ModifierError, apply_modifiers};
+pub use cycle::has_bidirectional_cycle;
+pub use time::{
+    CalendarUnit, DateRange, TimeError, TimeFunction, date_column, filters, format_date,
+    shift,
+};
 
 use datan_dax_check::{Checked, CheckedExpr, check};
 use datan_model::Model;

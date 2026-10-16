@@ -17,8 +17,9 @@
 //! construye el dia 1, la divergencia aparece el dia 2.
 
 use datan_dax_eval::{
-    AtomKind, AtomSet, CellResult, FilterContext, FilterValue, IntColumn, Interpreter,
-    MemorySource, Scalar, TextColumn, extract_atoms,
+    AtomKind, AtomSet, CalendarUnit, CellResult, DateColumn, DateRange, FilterContext,
+    FilterValue, IntColumn, Interpreter, MemorySource, Scalar, TextColumn, TimeFunction,
+    extract_atoms, filters as time_filters,
 };
 use datan_dax_sql::{SourceMap, lower};
 use datan_model::{
@@ -38,6 +39,8 @@ pub struct PathResult {
     pub agrees: bool,
     /// El atomo cae al interprete y no tiene fast path. NO es un fallo.
     pub interpreter_only: bool,
+    /// El caso no se pudo correr. Un caso que falla NO es un caso que no cuenta.
+    pub error: Option<String>,
 }
 
 /// Un caso de la suite: un filtro y una medida.
@@ -45,6 +48,11 @@ pub struct Case {
     pub name: &'static str,
     pub measure: &'static str,
     pub filters: Vec<(&'static str, &'static str)>,
+    /// Una funcion de time intelligence y el rango sobre el que se aplica.
+    ///
+    /// Los tres campos van juntos porque no significan nada separados: `PREVIOUSYEAR` sin
+    /// un "hoy" es ambiguo, y un rango sin una funcion es un filtro comun.
+    pub time: Option<(TimeFunction, DateRange, i32)>,
     pub expected: Option<Scalar>,
 }
 
@@ -54,12 +62,19 @@ impl Case {
             name,
             measure,
             filters: Vec::new(),
+            time: None,
             expected: None,
         }
     }
 
     pub fn filter(mut self, column: &'static str, value: &'static str) -> Self {
         self.filters.push((column, value));
+        self
+    }
+
+    /// Aplica una funcion de time intelligence sobre `current`, con "hoy" en `today`.
+    pub fn time(mut self, function: TimeFunction, current: DateRange, today: i32) -> Self {
+        self.time = Some((function, current, today));
         self
     }
 
@@ -75,13 +90,21 @@ impl Case {
 
 pub const FACT: ObjectId = ObjectId(1);
 pub const PRODUCT: ObjectId = ObjectId(2);
+pub const DATE_TABLE: ObjectId = ObjectId(3);
 
 pub const FACT_QTY: ObjectId = ObjectId(11);
 pub const FACT_PRODUCT_ID: ObjectId = ObjectId(12);
 pub const FACT_AMOUNT: ObjectId = ObjectId(13);
+pub const FACT_DAY: ObjectId = ObjectId(14);
 pub const PRODUCT_ID: ObjectId = ObjectId(20);
 pub const PRODUCT_REGION: ObjectId = ObjectId(21);
 pub const PRODUCT_CATEGORY: ObjectId = ObjectId(22);
+pub const DATE_DAY: ObjectId = ObjectId(30);
+
+/// 2023-01-01 y 2024-01-01, en dias desde 1970. Los dos extremos que la suite usa de
+/// "hoy" para que `PREVIOUSYEAR` y `DATESYTD` tengan algo que comparar.
+pub const Y2023: i32 = 19358;
+pub const Y2024: i32 = 19723;
 
 /// El modelo de la suite. Nombres sin espacios, para que el mapeo fisico sea el del modelo.
 pub fn model() -> Model {
@@ -95,9 +118,24 @@ pub fn model() -> Model {
                     Column::new(FACT_QTY, "qty", DataType::Integer),
                     Column::new(FACT_PRODUCT_ID, "product_id", DataType::Integer),
                     Column::new(FACT_AMOUNT, "amount", DataType::Moneda),
+                    Column::new(FACT_DAY, "day", DataType::Date),
                 ],
                 key_columns: vec![],
                 is_date_table: false,
+            },
+            Table {
+                id: DATE_TABLE,
+                name: "dim_date".to_string(),
+                kind: TableKind::Dimension,
+                columns: vec![
+                    Column::new(DATE_DAY, "day", DataType::Date),
+                    // Una columna de fecha que NO es la clave. Si el time intelligence la
+                    // eligiera por tipo en vez de por clave, el rango devolveria filas que
+                    // dice excluir.
+                    Column::new(ObjectId(31), "day_of_week", DataType::Date),
+                ],
+                key_columns: vec![DATE_DAY],
+                is_date_table: true,
             },
             Table {
                 id: PRODUCT,
@@ -116,14 +154,24 @@ pub fn model() -> Model {
             Measure::new(ObjectId(100), "Qty", "SUM('fact_sales'[qty])"),
             Measure::new(ObjectId(101), "Amount", "SUM('fact_sales'[amount])"),
         ],
-        relationships: vec![Relationship {
-            from_column: PRODUCT_ID,
-            to_column: FACT_PRODUCT_ID,
-            cardinality: Cardinality::OneToMany,
-            direction: FilterDirection::Single,
-            role: RelationshipRole::Active,
-            assume_referential_integrity: false,
-        }],
+        relationships: vec![
+            Relationship {
+                from_column: PRODUCT_ID,
+                to_column: FACT_PRODUCT_ID,
+                cardinality: Cardinality::OneToMany,
+                direction: FilterDirection::Single,
+                role: RelationshipRole::Active,
+                assume_referential_integrity: false,
+            },
+            Relationship {
+                from_column: DATE_DAY,
+                to_column: FACT_DAY,
+                cardinality: Cardinality::OneToMany,
+                direction: FilterDirection::Single,
+                role: RelationshipRole::Active,
+                assume_referential_integrity: false,
+            },
+        ],
     }
 }
 
@@ -144,17 +192,30 @@ pub const FIXTURES: &str = "\
         i AS sale_id,
         ((i % 6) + 1) AS product_id,
         CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 9) + 1 END AS qty,
-        CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 5) * 1000 END AS amount
-    FROM range(1, 41) t(i);";
+        CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 5) * 1000 END AS amount,
+        -- Las ventas se reparten entre 2023 y 2024. Un reparto dentro de un solo ano
+        -- haria que PREVIOUSYEAR y DATESYTD dieran siempre la misma respuesta, y un test
+        -- que no puede fallar no prueba nada.
+        DATE '2023-01-01' + CAST((i * 37) % 730 AS INTEGER) AS day
+    FROM range(1, 41) t(i);
+
+    CREATE TABLE dim_date AS
+    SELECT DATE '2023-01-01' + CAST(i AS INTEGER) AS day,
+           DATE '2023-01-01' + CAST(i AS INTEGER) AS day_of_week
+    FROM range(0, 730) t(i);";
 
 /// Los datos en memoria, con la misma forma que `FIXTURES`.
 pub fn memory_source() -> MemorySource {
     let mut qty = Vec::new();
     let mut amount = Vec::new();
     let mut product_ids = Vec::new();
+    let mut day = Vec::new();
     for i in 1..=40 {
         let sale_id = i;
         product_ids.push(Some(((i % 6) + 1) as i64));
+        // El MISMO reparto que el SQL: `(i * 37) % 730` dias desde 2023-01-01. Si los dos
+        // caminos leen distinto, la divergencia no dice nada.
+        day.push(Some(Y2023 + (((i * 37) % 730) as i32)));
         qty.push(if i % 7 == 0 {
             None
         } else {
@@ -184,8 +245,23 @@ pub fn memory_source() -> MemorySource {
         category.push(Some(if i % 2 == 0 { "A" } else { "B" }.to_string()));
     }
 
+    let mut date_days = Vec::new();
+    let mut date_weekdays = Vec::new();
+    for i in 0..730i32 {
+        date_days.push(Some(Y2023 + i));
+        date_weekdays.push(Some(Y2023 + i));
+    }
+
     MemorySource::new()
         .with_column(FACT_QTY, Box::new(IntColumn { values: qty }))
+        .with_column(FACT_DAY, Box::new(DateColumn { values: day }))
+        .with_column(DATE_DAY, Box::new(DateColumn { values: date_days }))
+        .with_column(
+            ObjectId(31),
+            Box::new(DateColumn {
+                values: date_weekdays,
+            }),
+        )
         .with_column(FACT_AMOUNT, Box::new(IntColumn { values: amount }))
         .with_column(
             FACT_PRODUCT_ID,
@@ -221,13 +297,21 @@ pub fn context_for(model: &Model, case: &Case) -> FilterContext {
             "qty" => FACT_QTY,
             other => panic!("columna de filtro desconocida: {other}"),
         };
-        let _ = model;
         context = match id {
             PRODUCT_REGION | PRODUCT_CATEGORY => {
                 context.with_equal(id, FilterValue::Text(value.to_string()))
             }
             _ => context.with_equal(id, FilterValue::Integer(value.parse().unwrap_or(0))),
         };
+    }
+
+    // El time intelligence se aplica DESPUES de los filtros de columna, igual que en DAX:
+    // el `CALCULATE` de `PREVIOUSYEAR` descarta el filtro de fechas del contexto y pone el
+    // suyo. Aplicarlo antes haria que `previousyear` se combinara con un filtro de fecha
+    // preexistente y el rango se intersectara en vez de reemplazarse.
+    if let Some((function, current, today)) = &case.time {
+        context = time_filters(model, *function, *current, *today)
+            .unwrap_or_else(|e| panic!("{}: {e}", case.name));
     }
     context
 }
@@ -307,6 +391,7 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
         interp_value,
         agrees: agrees || interpreter_only,
         interpreter_only,
+        error: None,
     })
 }
 
@@ -322,11 +407,27 @@ fn scalars_agree(sql: &Scalar, interp: &Scalar) -> bool {
     (sql.as_number() - interp.as_number()).abs() < 1e-9
 }
 
-/// Ejecuta la suite entera y devuelve los casos que divergen.
+/// Ejecuta la suite entera.
+///
+/// Cada caso produce un resultado, termasuk los que fallan. La version anterior usaba
+/// `filter_map(..ok())` y se comia los errores: un caso que revienta desaparece del
+/// informe sin dejar rastro, y el recuento baja como si estuviera correcto. Ocho casos de
+/// time intelligence estuvieron invisibles hasta que esto se arreglo.
 pub fn run_suite(engine: &Engine, cases: &[Case]) -> Vec<PathResult> {
     cases
         .iter()
-        .filter_map(|case| run_case(engine, case).ok())
+        .map(|case| match run_case(engine, case) {
+            Ok(result) => result,
+            Err(error) => PathResult {
+                label: case.name.to_string(),
+                sql: None,
+                sql_value: None,
+                interp_value: None,
+                agrees: false,
+                interpreter_only: false,
+                error: Some(error),
+            },
+        })
         .collect()
 }
 
@@ -381,6 +482,78 @@ pub fn suite() -> Vec<Case> {
             "CALCULATE([Qty], 'dim_product'[region] = 'Oeste')",
         )
         .filter("region", "Norte"),
+
+        // Casos de time intelligence. Estos SI tienen fast path: el rango de fechas son dos
+        // filtros `>=` y `<=` sobre la columna de fecha, y los dos operadores ya bajan a SQL.
+        // Por eso son los que atrapan el fallo de los literales de fecha, que no se ve al
+        // compilar: DuckDB responde con un error de conversion en tiempo de ejecucion.
+        //
+        // "Hoy" es 15 de marzo de 2024 en todos ellos, asi que `PREVIOUSYEAR` es 2023 y
+        // `DATESYTD` es desde el 1 de enero de 2024.
+        Case::new("previousyear sobre la ventana actual", "SUM('fact_sales'[amount])")
+            .time(
+                TimeFunction::PreviousYear,
+                DateRange::new(Y2024 + 74, Y2024 + 74),
+                Y2024 + 74,
+            ),
+        Case::new("dateadd de un ano hacia atras", "SUM('fact_sales'[amount])")
+            .time(
+                TimeFunction::DateAdd {
+                    units: -1,
+                    unit: CalendarUnit::Year,
+                },
+                DateRange::new(Y2024 + 74, Y2024 + 74),
+                Y2024 + 74,
+            ),
+        Case::new("dateadd de un mes hacia atras", "SUM('fact_sales'[amount])")
+            .time(
+                TimeFunction::DateAdd {
+                    units: -1,
+                    unit: CalendarUnit::Month,
+                },
+                DateRange::new(Y2024 + 74, Y2024 + 74),
+                Y2024 + 74,
+            ),
+        Case::new("datesytd sobre un rango ancho", "SUM('fact_sales'[amount])")
+            .time(
+                TimeFunction::YearToDate,
+                DateRange::new(Y2023, Y2024 + 74),
+                Y2024 + 74,
+            ),
+        Case::new("parallelperiod de un ano", "SUM('fact_sales'[amount])")
+            .time(
+                TimeFunction::ParallelPeriod {
+                    amount: -1,
+                    unit: CalendarUnit::Year,
+                },
+                DateRange::new(Y2024 + 74, Y2024 + 74),
+                Y2024 + 74,
+            ),
+        // Un rango que cae antes de las ventas: tiene que dar BLANK, no el total. Un filtro
+        // de fecha que no filtra devuelve el total en silencio, y ese es el fallo que mas
+        // caro sale en un informe.
+        Case::new("previousyear anterior al modelo", "SUM('fact_sales'[amount])")
+            .time(
+                TimeFunction::PreviousYear,
+                DateRange::new(Y2023 - 365, Y2023 - 365),
+                Y2023 - 365,
+            )
+            .expecting(Scalar::Blank),
+        // Time intelligence combinado con un filtro de columna: los dos filtros travelan.
+        Case::new("previousyear con filtro de region", "SUM('fact_sales'[amount])")
+            .filter("region", "Norte")
+            .time(
+                TimeFunction::PreviousYear,
+                DateRange::new(Y2024 + 74, Y2024 + 74),
+                Y2024 + 74,
+            ),
+        Case::new("datesytd con filtro de region", "SUM('fact_sales'[amount])")
+            .filter("region", "Sur")
+            .time(
+                TimeFunction::YearToDate,
+                DateRange::new(Y2023, Y2024 + 74),
+                Y2024 + 74,
+            ),
     ]
 }
 

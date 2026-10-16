@@ -137,7 +137,7 @@ impl Checker<'_> {
             },
             Expr::Blank { span } => CheckedExpr::Blank { span: *span },
 
-            Expr::Reference { name, span } => self.resolve(name, *span)?,
+            Expr::Reference { name, quoted, span } => self.resolve(name, *span, *quoted)?,
 
             Expr::QualifiedReference {
                 table,
@@ -214,7 +214,12 @@ impl Checker<'_> {
     }
 
     /// Resuelve un nombre sin calificar. Es la regla central del crate.
-    fn resolve(&mut self, name: &str, span: Span) -> Result<CheckedExpr, CheckError> {
+    fn resolve(
+        &mut self,
+        name: &str,
+        span: Span,
+        quoted: bool,
+    ) -> Result<CheckedExpr, CheckError> {
         // 1. Una variable local gana sobre todo.
         if let Some(value) = self.variables.get(name) {
             return Ok(CheckedExpr::Variable {
@@ -263,6 +268,24 @@ impl Checker<'_> {
             .iter()
             .filter_map(|table| table.column_by_name(name).map(|c| (table.id, table.name.clone(), c.id, c.name.clone())))
             .collect();
+
+        // 5. Un nombre entre comillas que no es tabla, medida ni columna es un literal de
+        //    cadena.
+        //
+        //    `= 'Oeste'` y `COUNTROWS('Fact Sales')` llegan aqui con la misma forma. La
+        //    diferencia es que el segundo encuentra su tabla en el paso 2 y el primero no
+        //    encuentra nada. Sin esta regla, escribir un literal de texto en un filtro
+        //    daba "`Oeste` no existe en el modelo", que parece un nombre mal escrito y
+        //    esconde que el texto estaba bien.
+        //
+        //    Solo aplica a nombres entre comillas. Un `Oeste` sin comillas sigue siendo un
+        //    error de nombre, que es lo correcto: en DAX un texto va siempre entre comillas.
+        if quoted {
+            return Ok(CheckedExpr::Text {
+                value: name.to_string(),
+                span,
+            });
+        }
 
         match candidates.len() {
             0 => Err(CheckError::UnknownName {

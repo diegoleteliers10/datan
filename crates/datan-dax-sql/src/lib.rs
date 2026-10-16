@@ -458,7 +458,9 @@ fn render_value(value: &datan_dax_eval::FilterValue) -> String {
         V::Text(text) => escape_string(text),
         V::Integer(n) => n.to_string(),
         V::Decimal(n) => n.to_string(),
-        V::Date(days) => format!("DATE '{days}'"),
+        // DuckDB no acepta `DATE '19723'`: espera el literal de texto. Bajar el numero
+        // crudo daba un error de conversion en tiempo de ejecucion, no al compilar.
+        V::Date(days) => format!("DATE '{}'", datan_dax_eval::format_date(*days)),
         V::Boolean(b) => b.to_string(),
         V::Blank => "NULL".to_string(),
     }

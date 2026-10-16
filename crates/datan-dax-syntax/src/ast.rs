@@ -18,7 +18,21 @@ pub enum Expr {
     Blank { span: Span },
 
     /// Referencia sin calificar: `[Qty]` o `Revenue`.
-    Reference { name: String, span: Span },
+    /// Un nombre sin calificar: `[Qty]`, `Qty` o `'Nombre entre comillas'`.
+    ///
+    /// `quoted` decide el caso ambiguo de DAX. Un nombre entre comillas sin `[` detras es
+    /// nombre de tabla (`COUNTROWS('Fact Sales')`) o literal de cadena
+    /// (`'dim_product'[region] = 'Oeste'`), y el parser no puede distinguirlo con la
+    /// informacion que tiene. Lo resuelve el chequeo contra el modelo: si el nombre
+    /// corresponde a una tabla es tabla, y si no, es texto.
+    ///
+    /// Sin este campo, `= 'Oeste'` falla con "`Oeste` no existe en el modelo", que es un
+    /// error de nombre donde el usuario escribio un literal.
+    Reference {
+        name: String,
+        quoted: bool,
+        span: Span,
+    },
 
     /// Referencia calificada: `'Fact Sales'[Qty]`.
     QualifiedReference {
