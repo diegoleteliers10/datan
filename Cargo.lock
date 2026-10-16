@@ -1579,11 +1579,23 @@ name = "datan-app"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "datan-connect",
  "datan-dax-eval",
  "datan-dax-sql",
  "datan-model",
  "datan-storage",
  "gpui-kit",
+]
+
+[[package]]
+name = "datan-connect"
+version = "0.1.0"
+dependencies = [
+ "datan-dax-check",
+ "datan-dax-syntax",
+ "datan-model",
+ "datan-storage",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

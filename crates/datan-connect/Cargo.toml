@@ -1,0 +1,14 @@
+[package]
+name = "datan-connect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "De una base conectada a un modelo Datan. Sin gpui."
+
+[dependencies]
+datan-dax-check = { path = "../datan-dax-check" }
+datan-dax-syntax = { path = "../datan-dax-syntax" }
+datan-model = { path = "../datan-model" }
+datan-storage = { path = "../datan-storage" }
+thiserror.workspace = true
