@@ -45,8 +45,7 @@ cargo run --release -p datan-app --bin spike_day2
 cargo run --release -p datan-app --bin probe_connectors
 cargo run --release -p datan-app --bin probe_offline
 
-# la app. Requiere pantalla: conectar, elegir dimensiones y medidas, pinchar celdas.
-# Por defecto lee la base `datan_bench`; se cambia con DATABASE=mi_base
+# la app. Requiere pantalla. Elige una conexion de la lista y pincha celdas.
 cargo run --release -p datan-app
 ```
 

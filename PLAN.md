@@ -420,6 +420,22 @@ Sobre gpui-kit: es una FACHADA. Reexporta los tipos de gpui pero no sus traits d
 y los metodos de cadena (`on_click`, `when`) no existen en `Div`. `on_click` va por
 `interactivity()`, `Div` no tiene `when`, y el crate se llama `gpui-pre` con la libreria `gpui`.
 
+#### La pantalla de conexion elige, no escribe
+
+Escribir un DSN necesita un input con foco, teclado y estado. Todo eso no se puede verificar sin
+pantalla, y un campo de texto roto no se ve como roto: se ve como un campo que no responde.
+
+Elegir de una lista usa los mismos elementos clicables que el grid, que ya estan verificados.
+Las conexiones viven en `~/.datan/connections.toml`, y la que funciona se sube arriba: la lista
+ordena por USO, no por nombre, porque la base de ayer es la que se va a abrir hoy. Ordenar
+alfabeticamente haria que la conexion de todos los dias quedara en medio de la lista para siempre.
+
+El TOML no acepta un array en el raiz: `to_string` sobre un `Vec` falla en tiempo de ejecucion
+con "UnsupportedType", no al compilar. Va dentro de una tabla.
+
+Y la app arranca en la pantalla de conexion. No intenta conectar sola: una app que abre una base
+sin preguntar es una app que escribe en la base equivocada.
+
 **Test de semana 1, ejecutado: PASA.** Sobre 1.000.000 de lineas, `1 HASH_GROUP_BY`, `0
 DELIM_JOIN`, p50 1 ms, p95 4 ms. El conjunto fijo de medidas SI colapsa en una pasada, y el
 presupuesto de 300 ms no esta en riesgo.

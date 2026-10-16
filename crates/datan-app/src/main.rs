@@ -22,6 +22,9 @@ use std::time::Instant;
 
 use datan_connect::{PostgresCatalog, Source, introspect};
 use datan_model::{DataType, Model, ObjectId, TableKind};
+mod config;
+
+use config::Connections;
 use datan_report::{Header, Matrix, Report};
 use datan_storage::Engine;
 
@@ -34,12 +37,6 @@ use gpui_kit::component::Theme;
 // El crate se llama `gpui-pre` pero su libreria se llama `gpui`. Por eso el alias.
 use ::gpui::InteractiveElement;
 use gpui_kit::component::scroll::ScrollableElement;
-
-/// El campo de texto de la conexion.
-#[derive(Clone)]
-struct Connection {
-    database: SharedString,
-}
 
 /// Que se eligio del modelo.
 #[derive(Clone)]
@@ -80,7 +77,6 @@ enum State {
 
 /// La vista.
 struct Datan {
-    connection: Connection,
     state: State,
     selection: Selection,
     /// El informe actual, con sus filtros. Es la fuente de verdad del cross-filter.
@@ -101,13 +97,10 @@ struct Datan {
 
 impl Datan {
     fn new(_cx: &mut Context<Self>) -> Self {
-        let database = std::env::var("DATABASE").unwrap_or_else(|_| "datan_bench".to_string());
-
+        // Arranca en la pantalla de conexion. No se intenta conectar solo: una app que
+        // abre una base sin preguntar es una app que escribe en la base equivocada.
         Self {
-            connection: Connection {
-                database: SharedString::from(database.clone()),
-            },
-            state: State::Connecting,
+            state: State::Choosing,
             selection: Selection {
                 dimensions: Vec::new(),
                 measures: Vec::new(),
@@ -117,19 +110,60 @@ impl Datan {
             matrix: None,
             grid: None,
             stats: None,
-            database: Some(database),
+            database: None,
             scroll: UniformListScrollHandle::default(),
         }
     }
 
+    /// La lista de conexiones guardadas.
+    fn render_connections(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let connections = Connections::load().unwrap_or_default();
+        let mut list = div().flex_col().gap_2();
+
+        for connection in &connections.list {
+            let database = connection.database.clone();
+            let mut row = div()
+                .w(px(360.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_4()
+                .py_3()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.list_hover))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(connection.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.muted_foreground)
+                        .child(connection.database.clone()),
+                );
+            row.interactivity().on_click(cx.listener({
+                move |view, _event, _window, cx| view.connect(&database, cx)
+            }));
+            list = list.child(row);
+        }
+
+        list.into_any_element()
+    }
+
     /// Conecta y monta el modelo. Todo en el hilo de fondo.
-    fn connect(&mut self, cx: &mut Context<Self>) {
-        let database = self.connection.database.to_string();
+    fn connect(&mut self, database: &str, cx: &mut Context<Self>) {
         self.state = State::Connecting;
+        let database = database.to_string();
+        let db_for_build = database.clone();
 
         cx.spawn(async move |this, cx| {
             let built = cx
-                .background_spawn(async move { build_model(&database) })
+                .background_spawn(async move { build_model(&db_for_build) })
                 .await;
 
             _ = this.update(cx, |view, cx| {
@@ -137,7 +171,21 @@ impl Datan {
                     Ok((model, report)) => {
                         view.selection = suggested(&model);
                         view.report = Some(report);
-                        view.state = State::Choosing;
+
+                        // La conexion que funciono se recuerda. Un usuario que conecta
+                        // siempre a la misma base no deberia buscarla cada vez: la lista
+                        // ordena por uso y la de arriba es la de ayer.
+                        let mut saved = Connections::load().unwrap_or_default();
+                        saved.upsert(config::Connection {
+                            name: database.clone(),
+                            database: database.clone(),
+                        });
+                        if let Err(error) = saved.save() {
+                            eprintln!("[datan] no se pudo guardar la conexion: {error}");
+                        }
+
+                        view.state = State::Connecting;
+                        view.refresh(cx);
                     }
                     Err(error) => view.state = State::Failed(error),
                 }
@@ -299,6 +347,7 @@ fn attach(engine: &Engine, database: &str) -> Result<(), String> {
         })
 }
 
+#[allow(dead_code)]
 fn build_model(database: &str) -> Result<(Model, Report), String> {
     let engine = open_engine()?;
     attach(&engine, database)?;
@@ -416,11 +465,12 @@ fn clickable(
     element.into_any_element()
 }
 
-fn retry_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+fn retry_button(theme: &Theme, database: &str, cx: &mut Context<Datan>) -> AnyElement {
+    let database = database.to_string();
     clickable(
         theme,
         "Reintentar".to_string(),
-        cx.listener(|view, _event, _window, cx| view.connect(cx)),
+        cx.listener(move |view, _event, _window, cx| view.connect(&database, cx)),
     )
 }
 
@@ -495,6 +545,27 @@ impl Render for Datan {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let main = match &self.state {
+            State::Choosing => div()
+                .flex()
+                .flex_1()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(20.0))
+                        .child("Datan"),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(theme.muted_foreground)
+                        .child("Elige una conexion"),
+                )
+                .child(self.render_connections(cx))
+                .into_any_element(),
             State::Connecting => div()
                 .flex()
                 .flex_1()
@@ -519,7 +590,9 @@ impl Render for Datan {
                         .child("No se pudo conectar"),
                 )
                 .child(div().child(error.clone()))
-                .child(retry_button(&theme, cx))
+                .child(
+                retry_button(&theme, self.database.as_deref().unwrap_or("datan_bench"), cx),
+            )
                 .into_any_element(),
             _ => self.render_report(cx),
         };

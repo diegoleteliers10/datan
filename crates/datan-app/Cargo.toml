@@ -12,6 +12,9 @@ gpui = { package = "gpui-pre", version = "0.3.9" }
 datan-storage = { path = "../datan-storage" }
 datan-model = { path = "../datan-model" }
 datan-report = { path = "../datan-report" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+thiserror.workspace = true
 datan-connect = { path = "../datan-connect" }
 datan-dax-eval = { path = "../datan-dax-eval" }
 datan-dax-sql = { path = "../datan-dax-sql" }
