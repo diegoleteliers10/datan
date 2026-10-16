@@ -405,11 +405,14 @@ fn build_model(database: &str) -> Result<(Model, Report), String> {
 
     let mut catalog = PostgresCatalog::connect(&format!("host=localhost dbname={database}"))
         .map_err(|e| format!("no se pudo leer el catalogo de Postgres: {e}"))?;
+    // `None`: la tabla de hechos la elige la heuristica. Pasar aqui el nombre de la BASE
+    // era un bug: buscaba una tabla que se llamara como la base, y fallaba con cualquier
+    // conexion. La eleccion de hechos es un paso de UI que todavia no existe.
     let introspection = introspect(
         &engine,
         &Source::new("pg"),
         Some(&mut catalog),
-        Some(database),
+        None,
     )
     .map_err(|e| e.to_string())?;
     let model = introspection.model;

@@ -102,14 +102,22 @@ impl Connections {
 
     /// La lista inicial, para la primera ejecucion.
     ///
-    /// `datan_bench` es la base que los probes y la suite crean y llenan. Sin ella la app
-    /// arranca con una lista vacia y el usuario no ve que hay algo que elegir.
+    /// `datan_bench` es la base que los probes y la suite crean y llenan; `postgres` es la
+    /// base del esquema real (`boleta` -> `product_boleta` -> `catalogo_productos`). Sin
+    /// entradas la app arranca con una lista vacia y el usuario no ve que hay algo que
+    /// elegir. La base de pruebas va primero porque es la que tiene datos para mirar.
     fn seed() -> Self {
         Self {
-            list: vec![Connection {
-                name: "datan_bench".to_string(),
-                database: "datan_bench".to_string(),
-            }],
+            list: vec![
+                Connection {
+                    name: "datan_bench".to_string(),
+                    database: "datan_bench".to_string(),
+                },
+                Connection {
+                    name: "postgres (esquema real)".to_string(),
+                    database: "postgres".to_string(),
+                },
+            ],
         }
     }
 
@@ -158,19 +166,23 @@ mod tests {
     #[test]
     fn una_lista_vacia_se_siembra_con_una_conexion_de_ejemplo() {
         let connections = Connections::seed();
-        assert_eq!(connections.list.len(), 1);
+        assert_eq!(connections.list.len(), 2);
+        // La de pruebas va primero: es la que tiene datos para mirar el primer dia.
         assert_eq!(connections.list[0].database, "datan_bench");
+        assert_eq!(connections.list[1].database, "postgres");
     }
 
     #[test]
     fn upsert_actualiza_en_vez_de_duplicar() {
         let mut connections = Connections::seed();
         connections.upsert(connection("datan_bench", "otra_base"));
-        assert_eq!(connections.list.len(), 1);
+        assert_eq!(connections.list.len(), 2);
+        // La actualizada sube arriba: orden por uso, no por nombre.
         assert_eq!(connections.list[0].database, "otra_base");
 
         connections.upsert(connection("produccion", "prod"));
-        assert_eq!(connections.list.len(), 2);
+        assert_eq!(connections.list.len(), 3);
+        assert_eq!(connections.list[0].database, "prod");
     }
 
     #[test]
