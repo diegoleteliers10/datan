@@ -98,7 +98,8 @@ struct Datan {
     matrix: Option<Matrix>,
     grid: Option<Grid>,
     /// El total de cada medida seleccionada, para las tarjetas.
-    totals: Vec<(String, String)>,
+    /// (nombre, total, delta contra el mismo periodo del ano anterior).
+    totals: Vec<(String, String, Option<f64>)>,
     /// La barra de formula DAX.
     ///
     /// Se crea en el primer render porque `InputState::new` pide una `Window`, y `new` de la
@@ -434,18 +435,32 @@ impl Datan {
         // El rango de fechas va DESPUES de la igualdad: es otro filtro sobre otra columna y
         // el orden no altera el AND, pero aplicarlo aqui garantiza que el rango se imponga
         // aunque el cross-filter haya tocado la fecha.
-        if let Some(months) = self.date_months
-            && let Some(date) = self.date_column(report.model.clone())
+        // La ventana anterior se arma sobre una COPIA del informe con los mismos filtros de
+        // igualdad, antes de imponer el rango. Si se partiera del informe ya acotado, el
+        // rango actual y el anterior se intersectarian y el delta compararia una ventana de
+        // doce meses contra un solo dia.
+        let previous = match (self.date_months, self.date_column(report.model.clone())) {
+            (Some(months), Some(date)) => {
+                let today = today();
+                let ancla = datan_dax_eval::shift(
+                    datan_dax_eval::TimeFunction::DateAdd {
+                        units: -1,
+                        unit: datan_dax_eval::CalendarUnit::Year,
+                    },
+                    datan_dax_eval::DateRange::new(today, today),
+                    today,
+                )
+                .start;
+                let antes = window_of(ancla, months);
+                Some(report.filtered_between(date, antes.start, antes.end))
+            }
+            // Sin rango activo no hay periodo anterior con el que comparar: el historico
+            // completo contra el historico completo un ano antes no es un delta.
+            _ => None,
+        };
+        if let (Some(months), Some(date)) = (self.date_months, self.date_column(report.model.clone()))
         {
-            let today = today();
-            let range = datan_dax_eval::shift(
-                datan_dax_eval::TimeFunction::DateAdd {
-                    units: -(months as i64),
-                    unit: datan_dax_eval::CalendarUnit::Month,
-                },
-                datan_dax_eval::DateRange::new(today, today),
-                today,
-            );
+            let range = window_of(today(), months);
             report = report.filtered_between(date, range.start, range.end);
         }
 
@@ -455,7 +470,7 @@ impl Datan {
             .unwrap_or_else(|| "datan_bench".to_string());
         cx.spawn(async move |this, cx| {
             let built = cx
-                .background_spawn(async move { run_report(report, database, None) })
+                .background_spawn(async move { run_report(report, previous, database) })
                 .await;
             _ = this.update(cx, |view, cx| {
                 match built {
@@ -587,9 +602,9 @@ fn build_model(database: &str) -> Result<(Model, Report), String> {
 
 fn run_report(
     report: Report,
+    previous: Option<Report>,
     database: String,
-    _unused: Option<()>,
-) -> Result<(Matrix, String, Vec<(String, String)>), String> {
+) -> Result<(Matrix, String, Vec<(String, String, Option<f64>)>), String> {
     let queries = report.query_count().unwrap_or(0);
     let started = Instant::now();
 
@@ -601,6 +616,13 @@ fn run_report(
 
     let matrix = report.execute(&engine, None).map_err(|e| e.to_string())?;
     let totals = report.totals(&engine, None).map_err(|e| e.to_string())?;
+    // Una pasada extra de totales, sobre la ventana anterior. Las medidas comparten sus
+    // grupos de lectura, asi que no son N consultas: son las mismas de `totals` con otro
+    // filtro de fecha.
+    let before = match &previous {
+        Some(report) => Some(report.totals(&engine, None).map_err(|e| e.to_string())?),
+        None => None,
+    };
 
     let elapsed = started.elapsed();
     let stats = format!(
@@ -614,16 +636,23 @@ fn run_report(
         .measures
         .iter()
         .zip(&totals)
-        .map(|(id, total)| {
-            let name = report
-                .measure_name(*id)
-                .unwrap_or("?")
-                .to_string();
-            (name, total.clone())
+        .enumerate()
+        .map(|(index, (id, total))| {
+            let name = report.measure_name(*id).unwrap_or("?").to_string();
+            // Un total anterior de cero no da porcentaje: el denominador es cero y el
+            // resultado seria infinito. Se dice "nuevo" y no "+inf%".
+            let delta = before.as_ref().and_then(|totals| {
+                let antes = totals.get(index)?.parse::<f64>().ok()?;
+                let ahora = total.parse::<f64>().ok()?;
+                if antes.abs() < f64::EPSILON {
+                    return None;
+                }
+                Some((ahora - antes) / antes.abs())
+            });
+            (name, total.clone(), delta)
         })
         .collect();
 
-    let _ = _unused;
     Ok((matrix, stats, cards))
 }
 
@@ -736,6 +765,26 @@ fn clear_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
 }
 
 /// Una pastilla de filtro activo. Pincharla quita el filtro.
+/// La ventana de `months` meses que termina HOY.
+///
+/// `shift` conserva el TAMANO del rango que recibe, y un rango de un solo dia se desplaza a
+/// un solo dia. Pedirle una ventana de seis meses devuelve el dia de hoy hace seis meses, y
+/// el informe entero se reduce a las ventas de ESE dia sin decir nada. El inicio sale de
+/// `shift` y el fin es hoy: el rango es inclusivo en los dos extremos, como "ultimos tres
+/// meses" en la cabeza de cualquiera.
+fn window_of(today: i32, months: u8) -> datan_dax_eval::DateRange {
+    let inicio = datan_dax_eval::shift(
+        datan_dax_eval::TimeFunction::DateAdd {
+            units: -(months as i64),
+            unit: datan_dax_eval::CalendarUnit::Month,
+        },
+        datan_dax_eval::DateRange::new(today, today),
+        today,
+    )
+    .start;
+    datan_dax_eval::DateRange::new(inicio, today)
+}
+
 /// El boton de rango: 3M, 6M, 12M o Todo. `months` 0 es Todo.
 fn range_button(
     theme: &Theme,
@@ -1161,7 +1210,7 @@ impl Datan {
             let cards: Vec<AnyElement> = self
                 .totals
                 .iter()
-                .map(|(name, total)| {
+                .map(|(name, total, delta)| {
                     div()
                         .flex_1()
                         .mx_2()
@@ -1187,6 +1236,24 @@ impl Datan {
                                     total.parse::<f64>().map(format_value).unwrap_or(total.clone())
                                 }),
                         )
+                        .child(match delta {
+                            Some(delta) => div()
+                                .text_size(px(11.0))
+                                .text_color(if *delta >= 0.0 {
+                                    theme.accent
+                                } else {
+                                    theme.danger_foreground
+                                })
+                                .child(format!(
+                                    "{} {:+.1}% vs ano anterior",
+                                    if *delta >= 0.0 { "\u{2191}" } else { "\u{2193}" },
+                                    delta * 100.0
+                                )),
+                            None => div()
+                                .text_size(px(11.0))
+                                .text_color(theme.muted_foreground)
+                                .child("sin periodo anterior"),
+                        })
                         .into_any_element()
                 })
                 .collect();

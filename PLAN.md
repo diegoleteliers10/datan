@@ -964,3 +964,34 @@ Decisiones ya tomadas: los visuales se pintan con primitivas GPUI (divs, flex_gr
 lyon si hace falta curva), sin libreria de charts ni webview. Las paginas viven en el
 mismo archivo .toml de informe. El rango temporal es un filtro de fecha en el contexto,
 no un caso especial.
+
+## Correccion 2026-10-17: DATEADD conserva el dia del mes
+
+Decision: `add_months` ya no salta al primer dia del mes destino. `DATEADD(-6, MONTH)`
+desde el 31 de diciembre es el 30 de junio, no el 1 de junio, y el dia se recorta al ultimo
+que existe en el mes destino (31 de enero un mes adelante es 29 de febrero de 2024).
+
+Por que: Power BI conserva el dia del mes, y el proyecto acepta ser compatible a nivel de
+funcion. La version anterior solo se notaba desde el dia 29, 30 o 31, y fallaba en silencio:
+la ventana de un informe se alargaba hasta treinta dias sin que ninguna consulta fallara.
+
+Efecto secundario que se corrigio de paso: la barra de rango de la app (3M/6M/12M) usaba
+`shift` esperando una ventana y recibia un rango del mismo tamano que el de entrada. Como
+`DateRange::new(hoy, hoy)` tiene tamano 1, la ventana entera se reducia al dia de hoy hace
+N meses. La app ahora toma el INICIO de `shift` y el FIN es hoy, que es lo que quiere
+decir "ultimos tres meses".
+
+Pruebas: `dateadd_conserva_el_dia_del_mes` (nueva), `dateadd_mueve_la_ventana_y_conserva_el_
+dia_del_ano` (reescribe la que fijaba el comportamiento viejo),
+`la_ventana_anterior_mide_lo_mismo_que_la_actual`. 179 tests, 38 casos de conformance con 0
+divergencias.
+
+## Delta automatico en las tarjetas
+
+Cada tarjeta con rango de fechas activo muestra su variacion contra la MISMA ventana un ano
+antes. Es una pasada extra de `totals`, no N consultas: las medidas comparten sus grupos de
+lectura. Un total anterior de cero no da porcentaje y la tarjeta dice "sin periodo anterior"
+en vez de un infinito.
+
+Sin rango activo no hay delta: el historico completo contra el historico completo un ano
+antes no es una variacion.

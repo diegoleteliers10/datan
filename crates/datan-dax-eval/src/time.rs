@@ -313,9 +313,27 @@ fn add_months_index(year: i32, month: u32, delta: i64) -> (i32, u32) {
     (new_year as i32, new_month as u32)
 }
 
+/// Los dias que tiene un mes, con el año bisiesto al derecho.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        _ => 28,
+    }
+}
+
+/// Suma `delta` meses a un dia conservando el dia del mes.
+///
+/// `DATEADD` conserva el dia y recorta al ultimo dia que existe en el mes destino: del 31
+/// de diciembre a seis meses atras es el 30 de junio. Esta funcion devolvia el PRIMER dia
+/// del mes destino, asi que un `DATEADD` desde el dia 29, 30 o 31 aterrizaba en el dia 1 y
+/// un rango de seis meses se alargaba hasta treinta dias sin que nada fallara.
 fn add_months(day: i32, delta: i64) -> i32 {
     let (year, month) = year_month_of(day);
-    month_start(add_months_index(year, month, delta))
+    let (_, _, dia) = civil_from_days(day);
+    let (year, month) = add_months_index(year, month, delta);
+    month_start((year, month)) + (dia.min(days_in_month(year, month)) - 1) as i32
 }
 
 #[cfg(test)]
@@ -327,6 +345,20 @@ mod tests {
 
     fn at(offset_from_2024: i32) -> i32 {
         Y2024 + offset_from_2024
+    }
+
+    #[test]
+    fn dateadd_conserva_el_dia_del_mes() {
+        // Del 31 de diciembre a seis meses atras es el 30 de junio, no el 1 de junio.
+        let fin_de_anio = Y2024 + 365; // 2024-12-31: 2024 tiene 366 dias
+        assert_eq!(format_date(add_months(fin_de_anio, -6)), "2024-06-30");
+        assert_eq!(format_date(add_months(fin_de_anio, -12)), "2023-12-31");
+        // Del 31 de enero un mes adelante: febrero de 2024 tiene 29 dias y se recorta.
+        assert_eq!(format_date(add_months(Y2024 + 30, 1)), "2024-02-29");
+        // Y un mes atras es diciembre del ano anterior.
+        assert_eq!(format_date(add_months(Y2024 + 30, -1)), "2023-12-31");
+        // Un dia que existe en los dos meses no se mueve.
+        assert_eq!(format_date(add_months(Y2024 + 74, -1)), "2024-02-15");
     }
 
     #[test]
@@ -399,26 +431,22 @@ mod tests {
     }
 
     #[test]
-    fn dateadd_ancla_en_el_inicio_y_no_conserva_el_dia_del_ano() {
+    fn dateadd_mueve_la_ventana_y_conserva_el_dia_del_ano() {
         // Un rango de 10 dias del 28 de diciembre de 2023 al 6 de enero de 2024.
         let start = at(-4);
         let range = DateRange::new(start, start + 9);
         let shifted = shift_by(range, -1, CalendarUnit::Year);
 
-        // La longitud se conserva, pero las fechas se comprimen: el 1 de enero de 2024
-        // desplazado un ano cae el 1 de enero de 2023, que ya esta dentro del rango
-        // desplazado. El resultado es 28 dic 2022 a 10 dic 2022.
+        // `DATEADD` mueve la ventana completa y conserva el dia del ano, como en Power BI:
+        // del 28 dic 2023 al 6 ene 2024 un ano atras es del 28 dic 2022 al 6 ene 2023.
+        // La longitud se conserva.
         //
-        // Esto NO es un bug. Es la diferencia entre `DATEADD` y `PARALLELPERIOD`.
-        // `DATEADD` mueve la ventana y conserva su tamano; `PARALLELPERIOD` recorta a los
-        // limites del periodo calendario. Quien quiere "el mismo mes del ano pasado" usa
-        // `PARALLELPERIOD`. Quien quiere "la ventana desplazada" usa `DATEADD`.
-        //
-        // El test fija el comportamiento para que nadie lo lea como una sorpresa mas
-        // adelante.
+        // Esto NO es lo mismo que `PARALLELPERIOD`, que recorta a los limites del periodo
+        // calendario. Quien quiere "el mismo mes del ano pasado" usa `PARALLELPERIOD`.
+        // Quien quiere "la ventana desplazada" usa `DATEADD`.
         assert_eq!(shifted.len(), 10);
-        assert_eq!(year_month_of(shifted.start), (2022, 12));
-        assert_eq!(year_month_of(shifted.end), (2022, 12));
+        assert_eq!(format_date(shifted.start), "2022-12-28");
+        assert_eq!(format_date(shifted.end), "2023-01-06");
     }
 
     #[test]

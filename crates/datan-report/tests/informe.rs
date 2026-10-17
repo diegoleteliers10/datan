@@ -366,3 +366,44 @@ fn un_rango_de_fechas_acota_las_filas() {
     let antes = report.filtered_between(datan_testkit::FACT_DAY, Y2024 - 500, Y2024 - 400);
     assert_eq!(antes.execute(&engine, None).expect("corre").row_count(), 0);
 }
+
+#[test]
+fn la_ventana_anterior_mide_lo_mismo_que_la_actual() {
+    // El delta de las tarjetas compara la ventana actual contra la MISMA ventana un ano
+    // antes. Si las dos midieran distinto, un 29 de febrero haria que el total anterior
+    // cubriera un dia de mas y el porcentaje saldría falseado sin que nada fallara.
+    use datan_dax_eval::{shift, CalendarUnit, DateRange, TimeFunction};
+
+    let today = Y2024 + 365;
+    // La ventana de la app: el INICIO sale de `shift` y el FIN es el ancla. Pedirle a
+    // `shift` la ventana entera daria un rango del mismo tamaño que el de entrada, y un
+    // rango de un dia se desplaza a un dia.
+    let ventana = |ancla: i32| {
+        let inicio = shift(
+            TimeFunction::DateAdd {
+                units: -6,
+                unit: CalendarUnit::Month,
+            },
+            DateRange::new(ancla, ancla),
+            today,
+        )
+        .start;
+        DateRange::new(inicio, ancla)
+    };
+    let actual = ventana(today);
+    let un_ano_atras = shift(
+        TimeFunction::DateAdd {
+            units: -1,
+            unit: CalendarUnit::Year,
+        },
+        DateRange::new(today, today),
+        today,
+    )
+    .start;
+    let anterior = ventana(un_ano_atras);
+
+    assert_eq!(actual.len(), anterior.len(), "las dos ventanas, igual de largas");
+    assert!(actual.start > anterior.end, "la ventana anterior termina antes de empezar la actual");
+    assert!(actual.contains(today), "la ventana actual llega hasta hoy");
+    assert!(!anterior.contains(today), "la ventana anterior no llega hasta hoy");
+}
