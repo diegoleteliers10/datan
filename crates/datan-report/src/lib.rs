@@ -147,6 +147,19 @@ impl Report {
         next
     }
 
+    /// Acota la columna de fecha a un rango, como los botones 3M / 6M / 12M.
+    ///
+    /// Dos filtros, `>=` y `<=`, y no un `BETWEEN`: los dos operadores ya viajan por el
+    /// grafo de relaciones sin un caso especial.
+    pub fn filtered_between(&self, column: ObjectId, from: i32, to: i32) -> Self {
+        let mut next = self.clone();
+        next.filters = next
+            .filters
+            .with_greater_equal(column, FilterValue::Date(from))
+            .with_less_equal(column, FilterValue::Date(to));
+        next
+    }
+
     /// Suelta un filtro de una columna, como el que produce pinchar la cabecera.
     pub fn unfiltered(&self, column: ObjectId) -> Self {
         let mut next = self.clone();

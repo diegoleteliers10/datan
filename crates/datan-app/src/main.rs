@@ -104,6 +104,10 @@ struct Datan {
     /// Se crea en el primer render porque `InputState::new` pide una `Window`, y `new` de la
     /// vista no la tiene. Es el patron habitual en gpui.
     formula: Option<Entity<InputState>>,
+    /// La busqueda del panel Datos. Se crea en el primer render, como la de formula.
+    search: Option<Entity<InputState>>,
+    /// El rango de fechas activo en meses hacia atras. `None` es todo el historico.
+    date_months: Option<u8>,
     /// Cuantas consultas costo el ultimo informe, y cuantos ms.
     stats: Option<String>,
     database: Option<String>,
@@ -130,6 +134,8 @@ impl Datan {
             last_saved: None,
             sort: None,
             formula: None,
+            search: None,
+            date_months: None,
             stats: None,
             database: None,
             scroll: UniformListScrollHandle::default(),
@@ -381,6 +387,29 @@ impl Datan {
     }
 
     /// Recorre el informe con la seleccion actual.
+    /// La columna de fecha que gobierna el rango. La de la tabla de hechos si la hay, si no
+    /// la primera fecha de una tabla conectada.
+    fn date_column(&self, model: datan_model::Model) -> Option<ObjectId> {
+        let fact = self.report.as_ref().and_then(|r| r.fact_table().ok());
+        let connected = |id: ObjectId| match fact {
+            Some(fact_id) => fact_id == id || model.join_path(fact_id, id).is_some(),
+            None => false,
+        };
+        let dates: Vec<(ObjectId, ObjectId)> = model
+            .tables
+            .iter()
+            .filter(|t| connected(t.id))
+            .flat_map(|t| t.columns.iter().map(move |c| (t.id, c)))
+            .filter(|(_, c)| matches!(c.data_type, DataType::Date))
+            .map(|(table, column)| (table, column.id))
+            .collect();
+        dates
+            .iter()
+            .find(|(table, _)| Some(*table) == fact)
+            .or_else(|| dates.first())
+            .map(|(_, column)| *column)
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(base) = self.report.clone() else {
             return;
@@ -401,6 +430,23 @@ impl Datan {
                 };
                 report = report.filtered_by(filter.column, value);
             }
+        }
+        // El rango de fechas va DESPUES de la igualdad: es otro filtro sobre otra columna y
+        // el orden no altera el AND, pero aplicarlo aqui garantiza que el rango se imponga
+        // aunque el cross-filter haya tocado la fecha.
+        if let Some(months) = self.date_months
+            && let Some(date) = self.date_column(report.model.clone())
+        {
+            let today = today();
+            let range = datan_dax_eval::shift(
+                datan_dax_eval::TimeFunction::DateAdd {
+                    units: -(months as i64),
+                    unit: datan_dax_eval::CalendarUnit::Month,
+                },
+                datan_dax_eval::DateRange::new(today, today),
+                today,
+            );
+            report = report.filtered_between(date, range.start, range.end);
         }
 
         let database = self
@@ -690,6 +736,52 @@ fn clear_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
 }
 
 /// Una pastilla de filtro activo. Pincharla quita el filtro.
+/// El boton de rango: 3M, 6M, 12M o Todo. `months` 0 es Todo.
+fn range_button(
+    theme: &Theme,
+    label: &str,
+    active: bool,
+    months: u8,
+    cx: &mut Context<Datan>,
+) -> impl IntoElement {
+    let mut button = div()
+        .id(ElementId::Name(SharedString::from(format!("range-{months}"))))
+        .px_2()
+        .h(px(24.0))
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .text_size(px(11.0))
+        .cursor_pointer()
+        .child(label.to_string());
+    button = if active {
+        button.bg(theme.accent).text_color(theme.background)
+    } else {
+        button.hover(|style| style.bg(theme.list_hover))
+    };
+    button.on_click(cx.listener(move |view, _event, _window, cx| {
+        eprintln!("[datan] rango: {months}M");
+        view.date_months = (months != 0).then_some(months);
+        view.refresh(cx);
+    }))
+}
+
+/// El dia de hoy en dias desde 1970. Es UTC: en Chile puede ser el dia anterior, y en un
+/// rango de meses un dia de borde no cambia el informe.
+fn today() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| (elapsed.as_secs() / 86_400) as i32)
+        .unwrap_or(0)
+}
+
+/// Un texto coincide con la busqueda. Vacio coincide con todo: sin busqueda no se filtra.
+fn hit(text: &str, query: &str) -> bool {
+    query.is_empty() || text.to_lowercase().contains(query)
+}
+
 fn filter_pill(
     theme: &Theme,
     filter: &ActiveFilter,
@@ -837,15 +929,35 @@ impl Datan {
                 None => false,
             }
         };
+        // --- Busqueda del panel Datos ---
+        //
+        // Filtra por lo que se LEE, no por el nombre tecnico: buscar "fecha" tiene que
+        // encontrar la columna Fecha aunque su tabla se llame dim_tiempo.
+        if self.search.is_none() {
+            self.search = Some(cx.new(|cx| InputState::new(window, cx)));
+        }
+        let query = self
+            .search
+            .as_ref()
+            .map(|state| state.read(cx).value().to_string())
+            .unwrap_or_default();
+        let query = query.trim().to_lowercase();
+
         let dimensions: Vec<ObjectId> = model
             .tables
             .iter()
             .filter(|t| matches!(t.kind, TableKind::Dimension) && connected(t))
             .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
             .filter(|(t, c)| !t.key_columns.contains(&c.id) && !matches!(c.data_type, DataType::Date))
+            .filter(|(t, c)| hit(&c.name, &query) || hit(&t.name, &query))
             .map(|(_, c)| c.id)
             .collect();
-        let measures: Vec<ObjectId> = model.measures.iter().map(|m| m.id).collect();
+        let measures: Vec<ObjectId> = model
+            .measures
+            .iter()
+            .filter(|m| hit(&m.name, &query))
+            .map(|m| m.id)
+            .collect();
 
         let sidebar = div()
             .w(px(264.0))
@@ -864,7 +976,36 @@ impl Datan {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Datan"),
+                            .child("Datos"),
+                    ),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .h(px(28.0))
+                            .rounded_md()
+                            .bg(theme.background)
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.muted_foreground)
+                                    .flex_shrink_0()
+                                    .child("Buscar"),
+                            )
+                            .child(div().flex_1().child(Input::new(
+                                self.search.as_ref().expect("recien creada"),
+                            ))),
                     ),
             )
             .child(
@@ -874,7 +1015,17 @@ impl Datan {
                     .px_2()
                     .py_2()
                     .child(self.render_sidebar_section("Dimensiones", &dimensions, false, &model, cx))
-                    .child(self.render_sidebar_section("Medidas", &measures, true, &model, cx)),
+                    .child(self.render_sidebar_section("Medidas", &measures, true, &model, cx))
+                    .child(if query.is_empty() || !dimensions.is_empty() || !measures.is_empty() {
+                        div().into_any_element()
+                    } else {
+                        div()
+                            .px_2()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Sin coincidencias para \"{query}\"."))
+                            .into_any_element()
+                    }),
             )
             .child(
                 div()
@@ -886,6 +1037,50 @@ impl Datan {
                     .text_color(theme.muted_foreground)
                     .child(self.stats.clone().unwrap_or_else(|| "sin datos".into())),
             );
+
+        // --- Rango de fechas ---
+        let mut date_bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2();
+        date_bar = date_bar.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.muted_foreground)
+                .child("Rango"),
+        );
+        for months in [3u8, 6, 12] {
+            let label = format!("{months}M");
+            date_bar = date_bar.child(range_button(
+                &theme,
+                &label,
+                self.date_months == Some(months),
+                months,
+                cx,
+            ));
+        }
+        date_bar = date_bar.child(range_button(
+            &theme,
+            "Todo",
+            self.date_months.is_none(),
+            0,
+            cx,
+        ));
+        // Sin columna de fecha conectada NO se muestran los botones: un rango que no
+        // filtra nada y no lo dice es la falla silenciosa de siempre.
+        if let Some((_, column)) = self
+            .date_column(model.clone())
+            .and_then(|date| model.column(date))
+        {
+            date_bar = date_bar.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("sobre {}", column.name)),
+            );
+        }
 
         // --- Filtros activos ---
         let mut filter_bar = div()
@@ -1161,7 +1356,12 @@ impl Datan {
             .child(filter_bar)
             .child(match self.visual.as_str() {
                 "Tabla" => div().into_any_element(),
-                _ => canvas.into_any_element(),
+                _ => div()
+                    .flex_1()
+                    .flex_col()
+                    .child(date_bar)
+                    .child(canvas)
+                    .into_any_element(),
             })
             .child(match (self.visual.as_str(), empty_state) {
                 ("Tabla", _) => div().into_any_element(),
@@ -1372,7 +1572,7 @@ impl Datan {
                     .pt_2()
                     .text_size(px(11.0))
                     .text_color(theme.muted_foreground)
-                    .child(title.to_uppercase()),
+                    .child(title.to_string()),
             )
             .children(columns.iter().map(|column| {
                 let is_on = selected.contains(column);

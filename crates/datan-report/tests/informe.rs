@@ -8,7 +8,7 @@
 use datan_dax_eval::FilterValue;
 use datan_model::ObjectId;
 use datan_report::{Matrix, Report};
-use datan_testkit::{engine, model};
+use datan_testkit::{engine, model, Y2024};
 
 fn measure(id: &str) -> ObjectId {
     let model = model();
@@ -335,4 +335,34 @@ fn el_grafico_toma_los_primeros_valores_ordenados_por_la_medida() {
 fn el_grafico_con_mas_valores_de_los_que_hay_los_da_todos() {
     let matrix = matrix();
     assert_eq!(matrix.top(0, 1, 100).len(), 3);
+}
+
+#[test]
+fn un_rango_de_fechas_acota_las_filas() {
+    // Los botones 3M / 6M / 12M del lienzo. El rango se impone con dos filtros, `>=` y `<=`,
+    // sobre la columna de fecha de la tabla de hechos.
+    let report = Report::new(model())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")]);
+    let engine = engine().expect("motor");
+    let completo = report.execute(&engine, None).expect("corre");
+    assert!(completo.row_count() > 0, "el informe sin rango tiene filas");
+
+    // El fixture tiene dias desde Y2023 (2023-01-01) hacia adelante, 730 dias.
+    let seis_meses = report.filtered_between(datan_testkit::FACT_DAY, Y2024, Y2024 + 180);
+    let acotado = seis_meses.execute(&engine, None).expect("corre");
+    let qty: f64 = (0..acotado.row_count())
+        .filter_map(|row| acotado.cell(row, 1).and_then(|v| v.parse::<f64>().ok()))
+        .sum();
+    let qty_completo: f64 = (0..completo.row_count())
+        .filter_map(|row| completo.cell(row, 1).and_then(|v| v.parse::<f64>().ok()))
+        .sum();
+    assert!(
+        qty > 0.0 && qty < qty_completo,
+        "el rango tiene que recortar: {qty} contra {qty_completo}"
+    );
+
+    // Un rango anterior a todos los datos deja la matriz vacia, no falla.
+    let antes = report.filtered_between(datan_testkit::FACT_DAY, Y2024 - 500, Y2024 - 400);
+    assert_eq!(antes.execute(&engine, None).expect("corre").row_count(), 0);
 }
