@@ -353,6 +353,9 @@ impl Datan {
                     Ok((model, report)) => {
                         view.selection = suggested(&model);
                         view.report = Some(report);
+                        // Sin esto la cabecera dice "sin base" y el refresh cae por defecto a
+                        // `datan_bench`: la app aparentaba estar conectada a otra base.
+                        view.database = Some(database.clone());
                         // Las filas por tabla se cuentan al conectar, no en cada refresh:
                         // el numero cambia muy despacio y el panel se dibuja en cada frame.
                         // La primera tabla empieza abierta: una lista de campos vacia parece
@@ -930,7 +933,7 @@ fn range_button(
         .cursor_pointer()
         .child(label.to_string());
     button = if active {
-        button.bg(theme.accent).text_color(theme.background)
+        button.bg(theme.foreground).text_color(theme.background)
     } else {
         button.hover(|style| style.bg(theme.list_hover))
     };
@@ -1006,7 +1009,10 @@ fn sidebar_item(
         .child(div().w(px(12.0)).child(if is_on { "\u{2022}" } else { "" }))
         .child(label);
     if is_on {
-        element = element.bg(theme.accent);
+        // `accent` es el color de fondo de un hover: en tema claro es casi blanco y un
+        // campo seleccionado se volvia invisible. Lo seleccionado se pinta con `foreground`,
+        // que es el color de la tinta.
+        element = element.bg(theme.muted_foreground).text_color(theme.background);
     }
     element
         .on_click(cx.listener(move |view, _event, _window, cx| {
@@ -1336,7 +1342,11 @@ impl Datan {
         filter_bar = filter_bar.child(export_button(&theme, cx));
 
         // --- Barra de formula DAX ---
-        let mut canvas = div().flex().flex_col().flex_1().overflow_hidden();
+        // El lienzo es una columna que scrollea y el grid tiene alto FIJO. Con el alto
+        // repartido por flex, el grid se quedaba en cero pixeles: `uniform_list` pide las
+        // filas que caben en su caja, y una caja de cero no pide ninguna. Se veia una tabla
+        // con cabeceras y 500 filas debajo, sin una sola fila.
+        let mut canvas = div().flex().flex_col().flex_1().overflow_y_scrollbar();
         if self.formula.is_none() {
             self.formula = Some(cx.new(|cx| {
                 InputState::new(window, cx).default_value(
@@ -1413,7 +1423,7 @@ impl Datan {
                             Some(delta) => div()
                                 .text_size(px(11.0))
                                 .text_color(if *delta >= 0.0 {
-                                    theme.accent
+                                    theme.foreground
                                 } else {
                                     theme.danger_foreground
                                 })
@@ -1485,7 +1495,7 @@ impl Datan {
                                             .flex_grow(fraction as f32 * 1000.0)
                                             .h_full()
                                             .rounded_md()
-                                            .bg(theme.accent),
+                                            .bg(theme.foreground),
                                     )
                                     .child(div().flex_grow((1.0 - fraction) as f32 * 1000.0)),
                             )
@@ -1632,7 +1642,7 @@ impl Datan {
                 .cursor_pointer()
                 .child(label);
             if active {
-                button = button.bg(theme.accent);
+                button = button.bg(theme.foreground).text_color(theme.background);
             } else {
                 button = button.hover(|style| style.bg(theme.list_hover));
             }
@@ -2104,11 +2114,12 @@ impl Datan {
         );
 
         div()
-            .flex_1()
+            .h(px(420.0))
+            .flex_shrink_0()
             .flex_col()
             .overflow_hidden()
             .child(header)
-            .child(body)
+            .child(div().flex_1().overflow_hidden().child(body))
             .into_any_element()
     }
 }
@@ -2166,7 +2177,17 @@ fn main() {
         .with_assets(assets::Assets)
         .run(|cx| {
             init(cx);
-            open_window(WindowOptions::default(), cx, |_, cx| cx.new(Datan::new))
-                .expect("no se pudo abrir la ventana");
+            let database = std::env::var("DATAN_AUTOCONNECT").unwrap_or_default();
+            open_window(WindowOptions::default(), cx, |_, cx| {
+                let view = cx.new(Datan::new);
+                // `DATAN_AUTOCONNECT=datan_bench` arranca conectado. Es para desarrollo: en
+                // pruebas hay que poder mirar el lienzo sin un clic de por medio. Sin la
+                // variable, la app arranca en la pantalla de conexion, como debe.
+                if !database.is_empty() {
+                    view.update(cx, |view, cx| view.connect(&database, cx));
+                }
+                view
+            })
+            .expect("no se pudo abrir la ventana");
         });
 }

@@ -6,7 +6,7 @@
 //! y que pinchar una celda cambie el filtro de todas las medidas a la vez.
 
 use datan_dax_eval::FilterValue;
-use datan_model::ObjectId;
+use datan_model::{Measure, ObjectId};
 use datan_report::{Matrix, Report};
 use datan_testkit::{engine, model, Y2024};
 
@@ -406,4 +406,42 @@ fn la_ventana_anterior_mide_lo_mismo_que_la_actual() {
     assert!(actual.start > anterior.end, "la ventana anterior termina antes de empezar la actual");
     assert!(actual.contains(today), "la ventana actual llega hasta hoy");
     assert!(!anterior.contains(today), "la ventana anterior no llega hasta hoy");
+}
+
+#[test]
+fn dos_medidas_iguales_dan_el_mismo_numero() {
+    // Dos medidas con la MISMA expresion comparten un plan y una sola consulta, que trae
+    // una columna de medidas. Si cada una leyera la columna que le toca por posicion, la
+    // segunda leeria una columna que no existe y saldria EN BLANCO: un dato que no
+    // falta, que se pierde al pintarlo.
+    let mut model = model();
+    let original = model
+        .measures
+        .iter()
+        .find(|m| m.name == "Qty")
+        .expect("no esta Qty")
+        .clone();
+    model.measures.push(Measure::new(
+        ObjectId(900),
+        "Unidades",
+        original.expression.clone(),
+    ));
+
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![ObjectId(900), original.id]);
+    assert_eq!(
+        report.query_count().expect("cuenta"),
+        1,
+        "dos medidas iguales, una consulta"
+    );
+
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    assert_eq!(matrix.width(), 3, "una dimension y dos medidas");
+    for row in 0..matrix.row_count() {
+        let primera = matrix.cell(row, 1).unwrap_or("");
+        let segunda = matrix.cell(row, 2).unwrap_or("");
+        assert!(!segunda.is_empty(), "fila {row}: la segunda medida sale en blanco");
+        assert_eq!(primera, segunda, "fila {row}: medidas iguales, numeros distintos");
+    }
 }

@@ -371,10 +371,15 @@ impl Report {
             }
 
             if rows.is_empty() {
+                // La primera consulta aporta las DIMENSIONES y deja las medidas en su
+                // sitio vacias. Pegarlas despues, con el mismo bucle que las demas
+                // consultas, es lo que hace que una medida que comparte consulta con otra
+                // no salga en blanco.
                 rows = cells
                     .iter()
-                    .map(|row| {
-                        let mut full = row.clone();
+                    .map(|cell| {
+                        let mut full: Vec<String> =
+                            cell.iter().take(self.dimensions.len()).cloned().collect();
                         full.resize(width, String::new());
                         full
                     })
@@ -389,13 +394,23 @@ impl Report {
                     rows.len(),
                     cells.len()
                 )));
-            } else {
-                for (row, cell) in rows.iter_mut().zip(&cells) {
-                    for (offset, member) in members.iter().enumerate() {
-                        let target = self.dimensions.len() + member;
-                        if target < row.len() {
-                            row[target] = cell[self.dimensions.len() + offset].clone();
-                        }
+            }
+
+            // Pegar las medidas SIEMPRE, tambien las de la primera consulta. Antes solo se
+            // pegaban a partir de la segunda, y la matriz salia con la primera tanda de
+            // medidas en blanco: cuatro columnas a la vista y ningun numero.
+            let produced_measures = produced.saturating_sub(self.dimensions.len());
+            for (row, cell) in rows.iter_mut().zip(&cells) {
+                for (offset, member) in members.iter().enumerate() {
+                    let target = self.dimensions.len() + member;
+                    // Varias medidas con el MISMO conjunto de atomos comparten consulta y
+                    // dan el MISMO numero. Se leen de la ultima columna de medidas que el
+                    // plan produjo, no de la que les tocaria por posicion: sin esto, la
+                    // segunda medida del grupo se queda en blanco y parece un dato que no
+                    // existe.
+                    let source = self.dimensions.len() + offset.min(produced_measures - 1);
+                    if target < row.len() && source < cell.len() {
+                        row[target] = cell[source].clone();
                     }
                 }
             }
