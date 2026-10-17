@@ -17,6 +17,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 thiserror.workspace = true
 datan-connect = { path = "../datan-connect" }
+datan-dax-check = { path = "../datan-dax-check" }
+datan-dax-syntax = { path = "../datan-dax-syntax" }
 datan-dax-eval = { path = "../datan-dax-eval" }
 datan-dax-sql = { path = "../datan-dax-sql" }
 

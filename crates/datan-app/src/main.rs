@@ -28,6 +28,7 @@ use config::Connections;
 use datan_report::{Header, Matrix, Report};
 use datan_storage::Engine;
 
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 // `Div::on_click` vive en este trait y `gpui-kit` reexporta `gpui::*`, asi que entra aqui.
@@ -87,10 +88,16 @@ struct Datan {
     /// El grid de pintarla es una COPIA con `SharedString`. La matriz se queda porque pinchar
     /// una celda necesita saber que valor hay en esa posicion, y releerla del grid
     /// obligaria a desreferenciar los `Arc` en el manejador del clic.
+    formula_error: Option<String>,
     matrix: Option<Matrix>,
     grid: Option<Grid>,
     /// El total de cada medida seleccionada, para las tarjetas.
     totals: Vec<(String, String)>,
+    /// La barra de formula DAX.
+    ///
+    /// Se crea en el primer render porque `InputState::new` pide una `Window`, y `new` de la
+    /// vista no la tiene. Es el patron habitual en gpui.
+    formula: Option<Entity<InputState>>,
     /// Cuantas consultas costo el ultimo informe, y cuantos ms.
     stats: Option<String>,
     database: Option<String>,
@@ -112,6 +119,8 @@ impl Datan {
             matrix: None,
             grid: None,
             totals: Vec::new(),
+            formula_error: None,
+            formula: None,
             stats: None,
             database: None,
             scroll: UniformListScrollHandle::default(),
@@ -164,6 +173,68 @@ impl Datan {
         }
 
         list.into_any_element()
+    }
+
+    /// Crea una medida desde la barra de formula.
+    ///
+    /// El formato es `Nombre = expresion`, partido en el PRIMER `=`. Una expresion DAX puede
+    /// tener `=` dentro (los filtros de CALCULATE), asi que partir en todos partiria el
+    /// nombre de la medida en el lugar equivocado.
+    fn add_measure(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.formula.clone() else {
+            return;
+        };
+        let text = state.read(cx).value().to_string();
+        let Some((name, expression)) = text.split_once("=") else {
+            self.formula_error =
+                Some("formato: Nombre = expresion. Falta el `=`.".to_string());
+            cx.notify();
+            return;
+        };
+        let name = name.trim().to_string();
+        let expression = expression.trim().to_string();
+        if name.is_empty() || expression.is_empty() {
+            self.formula_error =
+                Some("formato: Nombre = expresion. Falta el nombre o la expresion.".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Se valida contra el modelo ANTES de tocar nada. Una medida que no chequea no se
+        // agrega: el usuario ve el error del chequeo, que es el mismo que veria Power BI.
+        let Some(report) = self.report.clone() else {
+            return;
+        };
+        let mut model = report.model.clone();
+        if let Err(error) = datan_dax_check::check(&expression, &model) {
+            self.formula_error = Some(format!("{error}"));
+            cx.notify();
+            return;
+        }
+
+        let next_id = model
+            .measures
+            .iter()
+            .map(|m| m.id.0)
+            .max()
+            .unwrap_or(10_000)
+            + 1;
+        let id = ObjectId(next_id);
+        model.measures.push(datan_model::Measure::new(
+            id,
+            name.clone(),
+            expression.clone(),
+        ));
+
+        self.formula_error = None;
+        self.report = Some(
+            Report::new(model)
+                .attached_to(&report.qualifier)
+                .with_dimensions(self.selection.dimensions.clone())
+                .with_measures(self.selection.measures.clone()),
+        );
+        self.toggle(id, true, cx);
+        eprintln!("[datan] medida creada: {name} = {expression}");
     }
 
     /// Guarda el informe actual. Sin nombre de archivo elegido a mano: el informe se llama
@@ -318,6 +389,7 @@ impl Datan {
                         view.matrix = Some(matrix);
                         view.stats = Some(stats);
                         view.totals = cards;
+                        view.formula_error = None;
                         view.state = State::Ready;
                     }
                     Err(error) => view.state = State::Failed(error),
@@ -645,7 +717,7 @@ fn sidebar_item(
 }
 
 impl Render for Datan {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let main = match &self.state {
             State::Choosing => div()
@@ -697,7 +769,7 @@ impl Render for Datan {
                 retry_button(&theme, self.database.as_deref().unwrap_or("datan_bench"), cx),
             )
                 .into_any_element(),
-            _ => self.render_report(cx),
+            _ => self.render_report(window, cx),
         };
 
         div()
@@ -711,7 +783,7 @@ impl Render for Datan {
 
 impl Datan {
     /// La barra lateral y el grid.
-    fn render_report(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_report(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(report) = self.report.clone() else {
             return div().into_any_element();
@@ -811,8 +883,50 @@ impl Datan {
         filter_bar = filter_bar.child(save_button(&theme, cx));
         filter_bar = filter_bar.child(export_button(&theme, cx));
 
-        // --- Tarjetas KPI: el total de cada medida ---
+        // --- Barra de formula DAX ---
         let mut canvas = div().flex().flex_col().flex_1().overflow_hidden();
+        if self.formula.is_none() {
+            self.formula = Some(cx.new(|cx| {
+                InputState::new(window, cx).default_value(
+                    "Nueva = SUM('fact_sales'[qty])",
+                )
+            }));
+        }
+
+        let formula_error = self.formula_error.clone();
+        canvas = canvas.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.muted_foreground)
+                        .flex_shrink_0()
+                        .child("DAX"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .child(Input::new(self.formula.as_ref().expect("recien creada"))),
+                )
+                .child(add_measure_button(&theme, cx)),
+        );
+        if let Some(error) = formula_error {
+            canvas = canvas.child(
+                div()
+                    .px_3()
+                    .pb_1()
+                    .text_size(px(12.0))
+                    .text_color(theme.danger_foreground)
+                    .child(error),
+            );
+        }
         if !self.totals.is_empty() {
             let cards: Vec<AnyElement> = self
                 .totals
@@ -1170,6 +1284,15 @@ impl Datan {
             .child(body)
             .into_any_element()
     }
+}
+
+fn add_measure_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+    clickable(
+        theme,
+        "add-measure".into(),
+        "Crear medida".to_string(),
+        cx.listener(|view, _event, _window, cx| view.add_measure(cx)),
+    )
 }
 
 fn save_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {

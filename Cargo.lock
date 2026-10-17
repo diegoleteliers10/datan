@@ -1595,8 +1595,10 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "datan-connect",
+ "datan-dax-check",
  "datan-dax-eval",
  "datan-dax-sql",
+ "datan-dax-syntax",
  "datan-model",
  "datan-report",
  "datan-storage",
