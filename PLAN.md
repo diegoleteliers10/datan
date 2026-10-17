@@ -1022,3 +1022,53 @@ Pie:
   informe. N es lo que se PINTA segun el visual activo, no los tipos disponibles.
 
 179 tests.
+
+## Fase UI-2: replicar el mockup de Lumen
+
+El alcance es la capa de presentacion. Ni una consulta, ni una regla de DAX, ni el modelo de
+datos cambian. Lo que Datan tiene y Lumen no (barra DAX, "Crear medida", CSV, barra de filtros
+activos) se queda, reubicado o reestilado.
+
+### Paso 1: tokens y componentes base (20312a0)
+
+`tokens.rs` junta las medidas y la escala de letra en un solo sitio, y la paleta de SERIES.
+La paleta del tema (`chart.1` a `chart.5`) es una rampa de azul: cinco tonos del mismo color
+no distinguen cinco categorias. `components.rs` da los botones, el control segmentado, la
+pastilla, la fila de dato, la tarjeta y la nota. El lienzo pasa a gris y las tarjetas a
+blanco, que es como Lumen separa las superficies.
+
+182 tests.
+
+### Paso 2: barras superior e inferior (2953e33)
+
+La barra superior dice que informe se mira (marca, base, pagina, estado de guardado) y que se
+puede hacer con el (undo, redo, Editar/Lectura, Compartir, Publicar). `last_saved` guardaba la
+palabra "Guardado"; ahora guarda el instante y la barra escribe "Guardado hace X" o "Sin
+guardar". Sin dependencia de zona horaria no hay reloj local: la hora en UTC seria la hora
+equivocada. Undo, redo, Compartir y Publicar no tienen backend y se dibujan apagados.
+Editar/Lectura si hace algo: en Lectura el clic no filtra y Guardar y Crear medida se apagan.
+La barra inferior lleva la pestana, un "+" apagado y las estadisticas con plural de verdad.
+
+182 tests.
+
+### Paso 3: panel de Datos
+
+Encabezado con el numero de tablas, buscador con la lupa dentro del campo, tablas plegadas con
+su conteo de filas en mono, campos escalonados debajo, medidas con su conteo y el pie con
+"Obtener datos", que vuelve a la lista de conexiones: es el unico camino que existe para
+cambiar de fuente.
+
+Tres defectos de presentacion que salieron al mirar la ventana:
+
+- `hit` daba coincidencia con la busqueda VACIA (`contains("")` es verdadero para cualquier
+  texto), asi que "sin busqueda" significaba "abre las tres tablas y muestra los treinta
+  campos" y las tablas nunca nacian plegadas.
+- `.flex_col()` sin `.flex()` deja el div como bloque: los hijos se apilan pero `flex_1` no
+  crece, asi que el pie del panel quedaba flotando a media altura con un hueco al final. El
+  alto del panel sale de la ventana, porque el alto al 100 % no se resuelve contra un
+  contenedor con `flex_1`.
+- `flex_1` y `overflow_y_scrollbar` en el MISMO div no conviven: el envoltorio del scroll se
+  dibuja `size_full()` y empuja a los hermanos fuera de la caja. El `flex_1` va en un div y el
+  scroll en el de adentro.
+
+184 tests.

@@ -376,11 +376,10 @@ impl Datan {
                         view.database = Some(database.clone());
                         // Las filas por tabla se cuentan al conectar, no en cada refresh:
                         // el numero cambia muy despacio y el panel se dibuja en cada frame.
-                        // La primera tabla empieza abierta: una lista de campos vacia parece
-                        // un panel que no cargo.
-                        let tablas: Vec<ObjectId> =
-                            model.tables.iter().map(|t| t.id).collect();
-                        view.expanded = tablas.first().copied().into_iter().collect();
+                        // Las tablas empiezan cerradas: el panel muestra QUE hay, y abrir una
+                        // es una decision del usuario. Con busqueda, la que coincide se abre
+                        // sola, que es cuando hay una razon para abrirla.
+                        view.expanded.clear();
                         view.counted_at = None;
                         view.count_rows(cx);
 
@@ -985,8 +984,13 @@ fn today() -> i32 {
 }
 
 /// Un texto coincide con la busqueda. Vacio coincide con todo: sin busqueda no se filtra.
+/// Si el texto coincide con lo que se busca.
+///
+/// Sin texto que buscar la respuesta es NO: `contains("")` es verdadero en Rust, y una
+/// coincidencia universal hace que "sin busqueda" signifique "abre todas las tablas y muestra
+/// todos los campos". Que todo se muestre cuando no se busca es una decision de quien llama.
 fn hit(text: &str, query: &str) -> bool {
-    query.is_empty() || text.to_lowercase().contains(query)
+    !query.is_empty() && text.to_lowercase().contains(query)
 }
 
 fn filter_pill(
@@ -1171,7 +1175,7 @@ impl Datan {
         // Filtra por lo que se LEE, no por el nombre tecnico: buscar "fecha" tiene que
         // encontrar la columna Fecha aunque su tabla se llame dim_tiempo.
         if self.search.is_none() {
-            self.search = Some(cx.new(|cx| InputState::new(window, cx)));
+            self.search = Some(cx.new(|cx| InputState::new(window, cx).placeholder("Buscar campos")));
         }
         let query = self
             .search
@@ -1186,7 +1190,7 @@ impl Datan {
             .filter(|t| matches!(t.kind, TableKind::Dimension) && connected(t))
             .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
             .filter(|(t, c)| !t.key_columns.contains(&c.id) && !matches!(c.data_type, DataType::Date))
-            .filter(|(t, c)| hit(&c.name, &query) || hit(&t.name, &query))
+            .filter(|(t, c)| query.is_empty() || hit(&c.name, &query) || hit(&t.name, &query))
             .map(|(_, c)| c.id)
             .collect();
         // Las tablas que aportan campos, la de hechos primero: es la que el informe agrupa
@@ -1201,13 +1205,20 @@ impl Datan {
         let measures: Vec<ObjectId> = model
             .measures
             .iter()
-            .filter(|m| hit(&m.name, &query))
+            .filter(|m| query.is_empty() || hit(&m.name, &query))
             .map(|m| m.id)
             .collect();
 
+        // El alto del panel sale de la ventana: `h_full` (100 %) no se resuelve contra un
+        // contenedor con `flex_1`, y un panel sin alto definido mide lo que mide su
+        // contenido. Con el contenido corto, el pie queda flotando a media altura y el
+        // espacio libre se ve como un hueco al final de la lista.
+        let alto_panel =
+            window.viewport_size().height - px(tokens::BARRA_SUPERIOR) - px(tokens::ALTO_PESTANAS);
         let sidebar = div()
+            .flex()
             .w(px(tokens::PANEL_DATOS))
-            .h_full()
+            .h(alto_panel)
             .flex_shrink_0()
             .bg(theme.background)
             .border_r_1()
@@ -1219,79 +1230,73 @@ impl Datan {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .py_2()
+                    .h(px(40.0))
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Datos"),
-                    )
+                    .child(components::titulo_tarjeta(&theme, "Datos"))
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{} tablas", tablas.len())),
-                    ),
+                    .child(components::nota(
+                        &theme,
+                        plural(tablas.len(), "tabla", "tablas"),
+                    )),
             )
-            .child(
-                div()
-                    .px_2()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_2()
-                            .h(px(28.0))
-                            .rounded_md()
-                            .bg(theme.background)
-                            .border_1()
-                            .border_color(theme.border)
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.muted_foreground)
-                                    .flex_shrink_0()
-                                    .child("Buscar"),
-                            )
-                            .child(div().flex_1().child(Input::new(
-                                self.search.as_ref().expect("recien creada"),
-                            ))),
-                    ),
-            )
+            .child(div().px_3().py_2().flex_shrink_0().child(
+                // La lupa va DENTRO del campo y el campo dibuja su propio borde: un icono
+                // afuera y una caja alrededor hacen dos marcos para un solo control.
+                Input::new(self.search.as_ref().expect("recien creada"))
+                    .h(px(32.0))
+                    .cleanable(true)
+                    .prefix(components::icono(
+                        IconName::Search,
+                        tokens::LETRA_ICONO,
+                        theme.muted_foreground,
+                    )),
+            ))
             .child(
                 div()
                     .flex_1()
-                    .overflow_y_scrollbar()
-                    .px_2()
-                    .py_2()
-                    .child(self.render_tables(&tablas, &dimensions, &model, &query, cx))
-                    .child(self.render_sidebar_section("Medidas", &measures, true, &model, cx))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .overflow_y_scrollbar()
+                            .px_2()
+                            .py_2()
+                            .child(self.render_tables(&tablas, &dimensions, &model, &query, cx))
+                    .child(self.render_sidebar_section(
+                        plural(measures.len(), "medida", "medidas"),
+                        &measures,
+                        true,
+                        &model,
+                        cx,
+                    ))
                     .child(if query.is_empty() || !tablas.is_empty() || !measures.is_empty() {
                         div().into_any_element()
                     } else {
                         div()
                             .px_2()
-                            .text_size(px(12.0))
+                            .text_size(px(tokens::LETRA_TITULO))
                             .text_color(theme.muted_foreground)
                             .child(format!("Sin coincidencias para \"{query}\"."))
                             .into_any_element()
                     }),
+                    ),
             )
             .child(
                 div()
-                    .px_3()
-                    .py_2()
+                    .p_2()
+                    .flex_shrink_0()
                     .border_t_1()
                     .border_color(theme.border)
-                    .text_size(px(12.0))
-                    .text_color(theme.muted_foreground)
-                    .child(self.stats.clone().unwrap_or_else(|| "sin datos".into())),
+                    .child(components::boton_ancho(
+                        &theme,
+                        "obtener-datos",
+                        Some(IconName::Plus),
+                        "Obtener datos",
+                        cx.listener(|view, _event, _window, cx| {
+                            view.state = State::Choosing;
+                            cx.notify();
+                        }),
+                    )),
             );
 
         // --- Rango de fechas ---
@@ -1826,7 +1831,7 @@ impl Datan {
             .items_center()
             .gap_2()
             .px_3()
-            .h(px(40.0))
+            .h(px(tokens::ALTO_PESTANAS))
             .bg(theme.background)
             .border_t_1()
             .border_color(theme.border)
@@ -1891,12 +1896,19 @@ impl Datan {
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let mut list = div().flex_col();
+        if !tablas.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .child(components::nota(&theme, "Tablas")),
+            );
+        }
 
         for table in tablas {
             // Con busqueda, una tabla se abre sola si tiene un campo que coincide: buscar
             // "region" tiene que mostrar el campo, no una lista de tablas cerradas.
-            let auto = !query.is_empty()
-                && table.columns.iter().any(|c| hit(&c.name, query))
+            let auto = table.columns.iter().any(|c| hit(&c.name, query))
                 || hit(&table.name, query);
             let open = self.expanded.contains(&table.id) || auto;
             let count = self.row_counts.get(&table.id).copied();
@@ -1907,29 +1919,40 @@ impl Datan {
                 .items_center()
                 .gap_2()
                 .px_2()
-                .py_1()
+                .h(px(tokens::ALTO_FILA))
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.list_hover))
+                .child(components::icono(
+                    if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    },
+                    tokens::LETRA_ICONO,
+                    theme.muted_foreground,
+                ))
+                .child(components::icono(
+                    IconName::Table,
+                    tokens::LETRA_ICONO,
+                    theme.muted_foreground,
+                ))
                 .child(
                     div()
-                        .w(px(10.0))
-                        .text_size(px(10.0))
-                        .text_color(theme.muted_foreground)
-                        .child(if open { "\u{25be}" } else { "\u{25b8}" }),
-                )
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(12.0))
                         .flex_1()
                         .overflow_hidden()
+                        .truncate()
+                        .text_size(px(tokens::LETRA_TITULO))
                         .child(table.name.clone()),
                 );
             if let Some(count) = count {
+                // El conteo va en mono y alineado a la derecha: en una lista de seis tablas
+                // los numeros tienen que caer en la misma columna para poder compararlos de
+                // un vistazo.
                 header = header.child(
                     div()
-                        .text_size(px(11.0))
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(px(tokens::LETRA_NOTA))
                         .text_color(theme.muted_foreground)
                         .child(count_text(count)),
                 );
@@ -1945,6 +1968,9 @@ impl Datan {
             })));
 
             if open {
+                // Un escalon debajo de la tabla: los campos son de la tabla de arriba, y
+                // alineados con su nombre se leen como tablas hermanas.
+                let mut campos = div().flex_col().pl_4();
                 for definition in &table.columns {
                     let column = definition.id;
                     let is_measure = false;
@@ -1954,7 +1980,7 @@ impl Datan {
                     if !query.is_empty() && !hit(&definition.name, query) {
                         continue;
                     }
-                    list = list.child(sidebar_item(
+                    campos = campos.child(sidebar_item(
                         &theme,
                         definition.name.clone(),
                         is_on,
@@ -1963,6 +1989,7 @@ impl Datan {
                         cx,
                     ));
                 }
+                list = list.child(campos);
             }
         }
 
@@ -1972,7 +1999,7 @@ impl Datan {
 
     fn render_sidebar_section(
         &self,
-        title: &str,
+        etiqueta: String,
         columns: &[ObjectId],
         is_measure: bool,
         model: &Model,
@@ -1988,14 +2015,12 @@ impl Datan {
         div()
             .flex_col()
             .gap_1()
-            .mb_3()
+            .mt_2()
             .child(
                 div()
                     .px_2()
                     .pt_2()
-                    .text_size(px(11.0))
-                    .text_color(theme.muted_foreground)
-                    .child(title.to_string()),
+                    .child(components::nota(&theme, etiqueta)),
             )
             .children(columns.iter().map(|column| {
                 let is_on = selected.contains(column);
@@ -2260,4 +2285,26 @@ fn main() {
             })
             .expect("no se pudo abrir la ventana");
         });
+}
+#[cfg(test)]
+mod tests {
+    use super::hit;
+
+    #[test]
+    fn sin_busqueda_no_hay_coincidencia() {
+        // `contains("")` es verdadero para cualquier texto, asi que la comprobacion
+        // ingenua dice que TODAS las tablas coinciden cuando no se busca nada. El panel
+        // entonces abre las tres tablas y muestra los treinta campos: la lista deja de
+        // caber y no se ve lo que hay.
+        assert!(!hit("region", ""));
+        assert!(!hit("catalogo_productos", ""));
+    }
+
+    #[test]
+    fn la_busqueda_ignora_mayusculas_y_mira_lo_que_se_lee() {
+        assert!(hit("Fecha", "fecha"));
+        assert!(hit("catalogo_productos", "catalogo"));
+        assert!(hit("precio_unitario", "unitario"));
+        assert!(!hit("catalogo_productos", "region"));
+    }
 }

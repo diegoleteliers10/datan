@@ -126,6 +126,42 @@ pub fn boton_apagado_con_icono(
     base.child(etiqueta.into()).into_any_element()
 }
 
+/// Un boton secundario que ocupa el ancho que le den.
+///
+/// El ancho no se puede pedir desde afuera porque el boton se devuelve ya construido: por eso
+/// esta variante en vez de un `.w_full()` en el que lo usa.
+pub fn boton_ancho<F>(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    nombre: Option<IconName>,
+    etiqueta: impl Into<SharedString>,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let mut base = div()
+        .id(ElementId::Name(id.into()))
+        .w_full()
+        .h(px(tokens::ALTO_CONTROL))
+        .px_3()
+        .rounded_lg()
+        .bg(theme.background)
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .text_size(px(tokens::LETRA_TITULO))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.list_hover));
+    if let Some(nombre) = nombre {
+        base = base.child(icono(nombre, tokens::LETRA_ICONO, theme.foreground));
+    }
+    base.child(etiqueta.into()).on_click(on_click).into_any_element()
+}
+
 /// Un boton de solo icono.
 pub fn boton_icono<F>(
     theme: &Theme,

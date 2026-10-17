@@ -22,6 +22,8 @@ pub const BARRA_SUPERIOR: f32 = 48.0;
 pub const PANEL_DATOS: f32 = 264.0;
 /// El ancho del panel de Visualizaciones.
 pub const PANEL_VISUALES: f32 = 264.0;
+/// El alto de la barra de pestanas.
+pub const ALTO_PESTANAS: f32 = 40.0;
 /// El alto del grid.
 ///
 /// La lista de filas mide su alto contra el de su caja: necesita un alto definido arriba, o
