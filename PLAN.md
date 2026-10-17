@@ -938,3 +938,29 @@ Ninguno bloquea el inicio de la Fase 0. Todo es para fases posteriores.
   bajo churn no esta documentado.
 - Costo de construir `libduckdb-sys` con el scanner de Postgres en los tres sistemas objetivo.
 - Firms con la semantica de Not Matching Blank en comparaciones de medidas DAX.
+## Fase UI-1: el lienzo Lumen (rediseno hacia el mockup)
+
+Objetivo visual: barra superior (Datan > conexion > informe, guardado, Actualizar), panel
+Datos a la izquierda (busqueda, tablas expandibles con conteo de filas), lienzo central
+(titulo, rango 3M/6M/12M, tarjetas KPI con delta vs ano anterior y sparkline, linea
+temporal, dona por categoria, tablas), panel Visualizaciones a la derecha (tipos +
+propiedades: titulo, ancho, eje, valores), pestañas de paginas abajo.
+
+El motor YA soporta casi todo: DAX completo, time intelligence (DATEADD/PREVIOUSYEAR para
+el delta), totales sin GROUP BY, cross-filter, guardar. Faltante de motor: sparkline
+(serie mensual = GROUP BY mes, ya se hace), dona (agregado por categoria, ya se hace),
+delta porcentual (medida DAX con DATEADD, ya se escribe).
+
+Orden de construccion, cada paso verificable headless donde se pueda:
+1. Esqueleto de 3 paneles + barra superior + pestañas de paginas (sin logica).
+2. Panel Datos: busqueda de tablas/campos (Input), expandir/contraer, conteo de filas.
+3. Tarjetas KPI con delta: medida DAX con DATEADD -1 ano + sparkline (GROUP BY mes).
+4. Linea temporal: GROUP BY mes de la tabla de fechas; dona: agregado por categoria.
+5. Panel Visualizaciones: elegir tipo del visual activo + propiedades (titulo, ancho 1/4
+   a completo, eje, valores).
+6. Estado Editar/Lectura: en lectura el lienzo no responde clics de edicion.
+
+Decisiones ya tomadas: los visuales se pintan con primitivas GPUI (divs, flex_grow, y
+lyon si hace falta curva), sin libreria de charts ni webview. Las paginas viven en el
+mismo archivo .toml de informe. El rango temporal es un filtro de fecha en el contexto,
+no un caso especial.
