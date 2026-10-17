@@ -2057,6 +2057,7 @@ impl Datan {
         // `uniform_list` entrega un `&mut App`, no un `&mut Context`. Para tocar la vista
         // desde el manejador del clic hay que pasar por la entidad.
         let view = cx.entity();
+        let scroll = self.scroll.clone();
 
         let header = div()
             .flex()
@@ -2075,10 +2076,12 @@ impl Datan {
                 // Solo las MEDIDAS ordenan. Una dimension ya define las filas; ordenar por
                 // ella es el orden del GROUP BY, que ya esta aplicado.
                 let base = div()
-                    .w(px(200.0))
+                    .w(px(tokens::ANCHO_CELDA))
                     .flex_shrink_0()
                     .px_3()
                     .py_2()
+                    .overflow_hidden()
+                    .truncate()
                     .text_size(px(12.0))
                     .text_color(theme.muted_foreground)
                     .child(format!("{}{arrow}", column.header));
@@ -2116,7 +2119,7 @@ impl Datan {
                             // convertidos.
                             
                             let mut cell = div()
-                                .w(px(200.0))
+                                .w(px(tokens::ANCHO_CELDA))
                                 .flex_shrink_0()
                                 .px_3()
                                 .py_1()
@@ -2164,7 +2167,15 @@ impl Datan {
                     })
                     .collect::<Vec<_>>()
             },
-        );
+        )
+        // `ListSizingBehavior` es `Auto` por defecto, y `Auto` significa "no calcules un
+        // tamano fijo": la lista se queda con el alto del estilo, que es automatico, o sea
+        // cero. Con cero de alto no pinta NINGUNA fila y la tabla se ve con cabeceras y sin
+        // datos. `Infer` mide una fila y pide las que caben en el alto disponible.
+        .with_sizing_behavior(ListSizingBehavior::Infer)
+        // Sin el handle, `scroll_to_item(0)` de `refresh` no mueve nada: la lista no tiene
+        // a quien pedirle que suba.
+        .track_scroll(&scroll);
 
         div()
             .h(px(tokens::ALTO_GRID))
