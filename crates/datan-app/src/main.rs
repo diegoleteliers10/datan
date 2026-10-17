@@ -89,6 +89,8 @@ struct Datan {
     /// una celda necesita saber que valor hay en esa posicion, y releerla del grid
     /// obligaria a desreferenciar los `Arc` en el manejador del clic.
     formula_error: Option<String>,
+    /// Orden de la matriz: (indice de columna, descendente). Tercer clic lo quita.
+    sort: Option<(usize, bool)>,
     matrix: Option<Matrix>,
     grid: Option<Grid>,
     /// El total de cada medida seleccionada, para las tarjetas.
@@ -120,6 +122,7 @@ impl Datan {
             grid: None,
             totals: Vec::new(),
             formula_error: None,
+            sort: None,
             formula: None,
             stats: None,
             database: None,
@@ -235,6 +238,29 @@ impl Datan {
         );
         self.toggle(id, true, cx);
         eprintln!("[datan] medida creada: {name} = {expression}");
+    }
+
+    /// Filtra por el valor de texto de una dimension, como pinchar una barra.
+    fn filter_by_label(&mut self, column: ObjectId, label: &str, cx: &mut Context<Self>) {
+        // Pinchar dos veces la misma barra CAMBIA el valor, no acumula dos filtros que se
+        // intersectan y dejan la matriz vacia.
+        self.filters.retain(|filter| filter.column != column);
+        self.filters.push(ActiveFilter {
+            column,
+            label: SharedString::from(
+                self.model_column_name(column),
+            ),
+            value: SharedString::from(label.to_string()),
+        });
+        self.refresh(cx);
+    }
+
+    fn model_column_name(&self, column: ObjectId) -> String {
+        self.report
+            .as_ref()
+            .and_then(|r| r.model.column(column))
+            .map(|(_, c)| c.name.clone())
+            .unwrap_or_default()
     }
 
     /// Guarda el informe actual. Sin nombre de archivo elegido a mano: el informe se llama
@@ -955,7 +981,7 @@ impl Datan {
                                 .child(if total.is_empty() {
                                     "-".to_string()
                                 } else {
-                                    total.clone()
+                                    total.parse::<f64>().map(format_value).unwrap_or(total.clone())
                                 }),
                         )
                         .into_any_element()
@@ -979,14 +1005,23 @@ impl Datan {
                     .map(|h| h.label.clone())
                     .unwrap_or_default();
 
+                let bar_dimension = self.selection.dimensions[0];
                 let bars: Vec<AnyElement> = top
                     .iter()
                     .map(|(label, value)| {
                         let fraction = (value / max).clamp(0.02, 1.0);
-                        div()
+                        let value_label = label.clone();
+                        let dimension_column = bar_dimension;
+                        let mut bar_row = div()
+                            .id(ElementId::Name(SharedString::from(format!(
+                                "bar-{}",
+                                value_label
+                            ))))
                             .flex()
                             .items_center()
                             .gap_2()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.list_hover))
                             .child(
                                 div()
                                     .w(px(150.0))
@@ -1018,7 +1053,11 @@ impl Datan {
                                     .text_size(px(12.0))
                                     .text_align(TextAlign::Right)
                                     .child(format_value(*value)),
-                            )
+                            );
+                        bar_row
+                            .on_click(cx.listener(move |view, _event, _window, cx| {
+                                view.filter_by_label(dimension_column, &value_label, cx);
+                            }))
                             .into_any_element()
                     })
                     .collect();
@@ -1177,6 +1216,26 @@ impl Datan {
     /// su propia virtualizacion sin medir. gpui-kit se usa para el tema y los estilos.
     fn render_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        if let Some(matrix) = self.matrix.as_mut()
+            && let Some((column, descending)) = self.sort
+        {
+            // Ordenar en su sitio para que `drill` lea la misma fila que pinto. Un orden en
+            // la pantalla y otro en el modelo haria que el clic filtrara por el valor de
+            // OTRO producto.
+            matrix.rows.sort_by(|a, b| {
+                let parse = |row: &Vec<String>| {
+                    row.get(column)
+                        .and_then(|value| value.parse::<f64>().ok())
+                };
+                parse(a)
+                    .partial_cmp(&parse(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if descending {
+                matrix.rows.reverse();
+            }
+        }
+
         let Some(grid) = self.grid.clone() else {
             return div().into_any_element();
         };
@@ -1196,19 +1255,45 @@ impl Datan {
             .flex_shrink_0()
             .bg(theme.muted)
             .children(columns.iter().enumerate().map(|(index, column)| {
-                div()
+                let arrow = if index < dimension_count {
+                    "  \u{25be}"
+                } else {
+                    match self.sort {
+                        Some((sorted_column, false)) if sorted_column == index => "  \u{2191}",
+                        Some((sorted_column, true)) if sorted_column == index => "  \u{2193}",
+                        _ => "  \u{21c5}",
+                    }
+                };
+                // Solo las MEDIDAS ordenan. Una dimension ya define las filas; ordenar por
+                // ella es el orden del GROUP BY, que ya esta aplicado.
+                let base = div()
                     .w(px(200.0))
                     .flex_shrink_0()
                     .px_3()
                     .py_2()
                     .text_size(px(12.0))
                     .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "{}{}",
-                        column.header,
-                        // La flecha solo en las dimensiones: es lo que se puede filtrar.
-                        if index < dimension_count { "  \u{25be}" } else { "" }
-                    ))
+                    .child(format!("{}{arrow}", column.header));
+
+                if index >= dimension_count {
+                    let column_index = index;
+                    base.id(ElementId::Name(SharedString::from(format!(
+                        "head-{column_index}"
+                    ))))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.list_hover))
+                    .on_click(cx.listener(move |view, _event, _window, cx| {
+                        view.sort = match view.sort {
+                            Some((c, false)) if c == column_index => Some((c, true)),
+                            Some((c, true)) if c == column_index => None,
+                            _ => Some((column_index, false)),
+                        };
+                        cx.notify();
+                    }))
+                    .into_any_element()
+                } else {
+                    base.into_any_element()
+                }
             }));
 
         let body = uniform_list(
