@@ -1012,7 +1012,7 @@ impl Datan {
                         let fraction = (value / max).clamp(0.02, 1.0);
                         let value_label = label.clone();
                         let dimension_column = bar_dimension;
-                        let mut bar_row = div()
+                        let bar_row = div()
                             .id(ElementId::Name(SharedString::from(format!(
                                 "bar-{}",
                                 value_label
