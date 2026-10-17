@@ -89,6 +89,10 @@ struct Datan {
     /// una celda necesita saber que valor hay en esa posicion, y releerla del grid
     /// obligaria a desreferenciar los `Arc` en el manejador del clic.
     formula_error: Option<String>,
+    /// El visual activo del lienzo: Todo, Tarjetas, Barras o Tabla.
+    visual: String,
+    /// El indicador de la barra superior tras guardar.
+    last_saved: Option<SharedString>,
     /// Orden de la matriz: (indice de columna, descendente). Tercer clic lo quita.
     sort: Option<(usize, bool)>,
     matrix: Option<Matrix>,
@@ -122,6 +126,8 @@ impl Datan {
             grid: None,
             totals: Vec::new(),
             formula_error: None,
+            visual: "Todo".to_string(),
+            last_saved: None,
             sort: None,
             formula: None,
             stats: None,
@@ -284,6 +290,7 @@ impl Datan {
         match datan_report::saved::save(&report, &name) {
             Ok(()) => {
                 self.stats = Some(format!("guardado como `{label}`"));
+                self.last_saved = Some(SharedString::from("Guardado"));
                 cx.notify();
             }
             Err(error) => {
@@ -416,6 +423,7 @@ impl Datan {
                         view.stats = Some(stats);
                         view.totals = cards;
                         view.formula_error = None;
+                        view.last_saved = None;
                         view.state = State::Ready;
                     }
                     Err(error) => view.state = State::Failed(error),
@@ -1143,22 +1151,199 @@ impl Datan {
                 .into_any_element()
         };
 
-        let content = match empty_state {
-            Some(empty) => div().flex().flex_1().flex_col().child(empty),
-            None => div()
+        // El lienzo segun el visual activo. La barra de formula vive dentro de `canvas`
+        // porque es la entrada de medidas: se ve en todos los modos menos Tabla.
+        let canvas_column = div()
+            .flex()
+            .flex_1()
+            .flex_col()
+            .overflow_hidden()
+            .child(filter_bar)
+            .child(match self.visual.as_str() {
+                "Tabla" => div().into_any_element(),
+                _ => canvas.into_any_element(),
+            })
+            .child(match (self.visual.as_str(), empty_state) {
+                ("Tabla", _) => div().into_any_element(),
+                (_, Some(empty)) => empty,
+                (_, None) => body,
+            });
+
+        // --- Panel Visualizaciones ---
+        let tipos = [
+            ("Tarjetas", "Tarjetas"),
+            ("Barras", "Barras"),
+            ("Tabla", "Tabla"),
+        ];
+        let mut viz_buttons = div().flex().flex_wrap().gap_1();
+        for (label, key) in tipos {
+            let active = self.visual == key || (key == "Tarjetas" && self.visual == "Todo");
+            let mut button = div()
+                .id(ElementId::Name(SharedString::from(format!("viz-{key}"))))
+                .w(px(64.0))
+                .h(px(44.0))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
                 .flex()
-                .flex_1()
-                .flex_col()
-                .child(filter_bar)
-                .child(canvas)
-                .child(body),
-        };
+                .items_center()
+                .justify_center()
+                .text_size(px(10.0))
+                .cursor_pointer()
+                .child(label);
+            if active {
+                button = button.bg(theme.accent);
+            } else {
+                button = button.hover(|style| style.bg(theme.list_hover));
+            }
+            viz_buttons = viz_buttons.child(
+                button.on_click(cx.listener(move |view, _event, _window, cx| {
+                    eprintln!("[datan] visual: {key}");
+                    view.visual = key.to_string();
+                    cx.notify();
+                })),
+            );
+        }
+
+        let visualizaciones = div()
+            .w(px(220.0))
+            .h_full()
+            .flex_shrink_0()
+            .bg(theme.sidebar)
+            .border_l_1()
+            .border_color(theme.sidebar_border)
+            .flex_col()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.0))
+                    .child("Visualizaciones"),
+            )
+            .child(div().px_2().pb_2().child(viz_buttons))
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(theme.sidebar_border)
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .child("Propiedades"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted_foreground)
+                            .child("Titulo: Informe"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted_foreground)
+                            .child("Ancho: completo"),
+                    ),
+            );
+
+        // --- Barra superior ---
+        let mut top_bar = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .h(px(48.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded_md()
+                    .bg(theme.foreground)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .text_color(theme.background)
+                    .child("D"),
+            )
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(13.0))
+                    .child("Datan"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{}  \u{203a}  Informe",
+                        self.database.as_deref().unwrap_or("sin base")
+                    )),
+            );
+        if let Some(saved) = &self.last_saved {
+            top_bar = top_bar.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("\u{2713} {saved}")),
+            );
+        }
+        top_bar = top_bar.child(div().flex_1());
+        top_bar = top_bar.child(clickable(
+            &theme,
+            "refresh".into(),
+            "Actualizar".to_string(),
+            cx.listener(|view, _event, _window, cx| view.refresh(cx)),
+        ));
+
+        // --- Pestañas de paginas ---
+        let tabs = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.muted)
+                    .text_size(px(12.0))
+                    .child("Informe"),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(self.stats.clone().unwrap_or_default()),
+            );
 
         div()
             .flex()
-            .flex_1()
-            .child(sidebar)
-            .child(content)
+            .flex_col()
+            .size_full()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(top_bar)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(sidebar)
+                    .child(canvas_column)
+                    .child(visualizaciones),
+            )
+            .child(tabs)
             .into_any_element()
     }
 
