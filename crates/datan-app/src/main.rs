@@ -814,11 +814,12 @@ impl Datan {
         let measures: Vec<ObjectId> = model.measures.iter().map(|m| m.id).collect();
 
         let sidebar = div()
-            .w(px(280.0))
+            .w(px(264.0))
             .h_full()
             .flex_shrink_0()
+            .bg(theme.sidebar)
             .border_r_1()
-            .border_color(theme.border)
+            .border_color(theme.sidebar_border)
             .flex_col()
             .child(
                 div()
@@ -936,22 +937,20 @@ impl Datan {
                         .flex_1()
                         .mx_2()
                         .my_2()
-                        .p_3()
+                        .p_4()
                         .rounded_lg()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.background)
+                        .bg(theme.muted)
                         .flex_col()
                         .gap_1()
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(px(12.0))
                                 .text_color(theme.muted_foreground)
                                 .child(name.clone()),
                         )
                         .child(
                             div()
-                                .text_size(px(22.0))
+                                .text_size(px(20.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(if total.is_empty() {
                                     "-".to_string()
@@ -1028,15 +1027,14 @@ impl Datan {
                     div()
                         .mx_2()
                         .my_2()
-                        .p_3()
+                        .p_4()
                         .rounded_lg()
-                        .border_1()
-                        .border_color(theme.border)
+                        .bg(theme.muted)
                         .flex_col()
                         .gap_2()
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(px(12.0))
                                 .text_color(theme.muted_foreground)
                                 .child(format!(
                                     "{} por {} (top {})",
@@ -1196,8 +1194,7 @@ impl Datan {
         let header = div()
             .flex()
             .flex_shrink_0()
-            .border_b_1()
-            .border_color(theme.border)
+            .bg(theme.muted)
             .children(columns.iter().enumerate().map(|(index, column)| {
                 div()
                     .w(px(200.0))
