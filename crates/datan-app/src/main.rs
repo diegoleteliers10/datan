@@ -89,6 +89,8 @@ struct Datan {
     /// obligaria a desreferenciar los `Arc` en el manejador del clic.
     matrix: Option<Matrix>,
     grid: Option<Grid>,
+    /// El total de cada medida seleccionada, para las tarjetas.
+    totals: Vec<(String, String)>,
     /// Cuantas consultas costo el ultimo informe, y cuantos ms.
     stats: Option<String>,
     database: Option<String>,
@@ -109,6 +111,7 @@ impl Datan {
             filters: Vec::new(),
             matrix: None,
             grid: None,
+            totals: Vec::new(),
             stats: None,
             database: None,
             scroll: UniformListScrollHandle::default(),
@@ -302,11 +305,11 @@ impl Datan {
             .unwrap_or_else(|| "datan_bench".to_string());
         cx.spawn(async move |this, cx| {
             let built = cx
-                .background_spawn(async move { run_report(report, database) })
+                .background_spawn(async move { run_report(report, database, None) })
                 .await;
             _ = this.update(cx, |view, cx| {
                 match built {
-                    Ok((matrix, stats)) => {
+                    Ok((matrix, stats, cards)) => {
                         // Volver arriba tras filtrar. Sin esto, el usuario pincha una fila
                         // del medio, el resultado baja a tres filas, y se queda mirando la
                         // posicion 400 de una lista de tres: el grid parece vacio.
@@ -314,6 +317,7 @@ impl Datan {
                         view.grid = Some(build_grid(&matrix));
                         view.matrix = Some(matrix);
                         view.stats = Some(stats);
+                        view.totals = cards;
                         view.state = State::Ready;
                     }
                     Err(error) => view.state = State::Failed(error),
@@ -429,7 +433,11 @@ fn build_model(database: &str) -> Result<(Model, Report), String> {
     Ok((model, report))
 }
 
-fn run_report(report: Report, database: String) -> Result<(Matrix, String), String> {
+fn run_report(
+    report: Report,
+    database: String,
+    _unused: Option<()>,
+) -> Result<(Matrix, String, Vec<(String, String)>), String> {
     let queries = report.query_count().unwrap_or(0);
     let started = Instant::now();
 
@@ -440,6 +448,7 @@ fn run_report(report: Report, database: String) -> Result<(Matrix, String), Stri
     attach(&engine, &database)?;
 
     let matrix = report.execute(&engine, None).map_err(|e| e.to_string())?;
+    let totals = report.totals(&engine, None).map_err(|e| e.to_string())?;
 
     let elapsed = started.elapsed();
     let stats = format!(
@@ -447,7 +456,23 @@ fn run_report(report: Report, database: String) -> Result<(Matrix, String), Stri
         matrix.row_count(),
         matrix.width()
     );
-    Ok((matrix, stats))
+    // Los nombres de las medidas, en el MISMO orden que los totales: la tarjeta i es la
+    // medida i.
+    let cards = report
+        .measures
+        .iter()
+        .zip(&totals)
+        .map(|(id, total)| {
+            let name = report
+                .measure_name(*id)
+                .unwrap_or("?")
+                .to_string();
+            (name, total.clone())
+        })
+        .collect();
+
+    let _ = _unused;
+    Ok((matrix, stats, cards))
 }
 
 /// La seleccion por defecto: la primera dimension de texto y las primeras medidas.
@@ -786,6 +811,171 @@ impl Datan {
         filter_bar = filter_bar.child(save_button(&theme, cx));
         filter_bar = filter_bar.child(export_button(&theme, cx));
 
+        // --- Tarjetas KPI: el total de cada medida ---
+        let mut canvas = div().flex().flex_col().flex_1().overflow_hidden();
+        if !self.totals.is_empty() {
+            let cards: Vec<AnyElement> = self
+                .totals
+                .iter()
+                .map(|(name, total)| {
+                    div()
+                        .flex_1()
+                        .mx_2()
+                        .my_2()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.background)
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.muted_foreground)
+                                .child(name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(22.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(if total.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    total.clone()
+                                }),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+            canvas = canvas.child(div().flex().flex_shrink_0().children(cards));
+        }
+
+        // --- Grafico de barras: la primera dimension contra la primera medida ---
+        if let Some(matrix) = self.matrix.as_ref()
+            && matrix.row_count() > 0
+            && self.selection.dimensions.len() > 0
+            && self.selection.measures.len() > 0
+        {
+            let dim_count = self.selection.dimensions.len();
+            let top = matrix.top(0, dim_count, 8);
+            let max = top.iter().map(|(_, v)| *v).fold(0.0f64, f64::max);
+            if max > 0.0 && top.len() > 1 {
+                let measure_name = matrix
+                    .header(dim_count)
+                    .map(|h| h.label.clone())
+                    .unwrap_or_default();
+
+                let bars: Vec<AnyElement> = top
+                    .iter()
+                    .map(|(label, value)| {
+                        let fraction = (value / max).clamp(0.02, 1.0);
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(150.0))
+                                    .flex_shrink_0()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.muted_foreground)
+                                    .overflow_hidden()
+                                    .child(label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .h(px(18.0))
+                                    .rounded_md()
+                                    .child(
+                                        div()
+                                            .flex_grow(fraction as f32 * 1000.0)
+                                            .h_full()
+                                            .rounded_md()
+                                            .bg(theme.accent),
+                                    )
+                                    .child(div().flex_grow((1.0 - fraction) as f32 * 1000.0)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(90.0))
+                                    .flex_shrink_0()
+                                    .text_size(px(12.0))
+                                    .text_align(TextAlign::Right)
+                                    .child(format_value(*value)),
+                            )
+                            .into_any_element()
+                    })
+                    .collect();
+
+                canvas = canvas.child(
+                    div()
+                        .mx_2()
+                        .my_2()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.muted_foreground)
+                                .child(format!(
+                                    "{} por {} (top {})",
+                                    measure_name,
+                                    self.report
+                                        .as_ref()
+                                        .and_then(|r| r
+                                            .model
+                                            .column(self.selection.dimensions[0])
+                                            .map(|(_, c)| c.name.clone()))
+                                        .unwrap_or_default(),
+                                    top.len()
+                                )),
+                        )
+                        .child(div().flex_col().gap_1().children(bars)),
+                );
+            }
+        }
+
+        // Un grid vacio NO se ve igual que un grid sin datos. Con 0 filas hay que decirlo:
+        // un area en blanco parece una app congelada, y en una base sin ventas es la
+        // respuesta correcta.
+        let empty_state: Option<AnyElement> = self
+            .grid
+            .as_ref()
+            .filter(|grid| grid.row_count == 0)
+            .map(|_| {
+                div()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .flex_col()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Sin datos: la consulta no devolvio filas."),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        "Revisa los filtros, o prueba la base de pruebas                                          desde la pantalla de conexion.",
+                                    ),
+                            ),
+                    )
+                    .into_any_element()
+            });
+
         // --- El grid ---
         let body: AnyElement = if self.grid.is_some() {
             self.render_grid(cx).into_any_element()
@@ -802,18 +992,22 @@ impl Datan {
                 .into_any_element()
         };
 
+        let content = match empty_state {
+            Some(empty) => div().flex().flex_1().flex_col().child(empty),
+            None => div()
+                .flex()
+                .flex_1()
+                .flex_col()
+                .child(filter_bar)
+                .child(canvas)
+                .child(body),
+        };
+
         div()
             .flex()
             .flex_1()
             .child(sidebar)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .flex_col()
-                    .child(filter_bar)
-                    .child(body),
-            )
+            .child(content)
             .into_any_element()
     }
 
@@ -988,6 +1182,26 @@ fn export_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
     clickable(theme, "export".into(), "CSV".to_string(), cx.listener(
         |view, _event, _window, cx| view.export_csv(cx),
     ))
+}
+
+/// Un numero para una tarjeta o un eje: sin decimales inutiles.
+///
+/// `10000.0` y `10000.50` se leen distinto; `10000.000000` y `10000.500000` no. Tres
+/// decimales es el punto donde un margen sigue siendo un margen y el ruido ya no molesta.
+fn format_value(value: f64) -> String {
+    if value.abs() >= 1e12 {
+        format!("{:.1}B", value / 1e12)
+    } else if value.abs() >= 1e9 {
+        format!("{:.1}MM", value / 1e9)
+    } else if value.abs() >= 1e6 {
+        format!("{:.1}M", value / 1e6)
+    } else if value.abs() >= 1e3 {
+        format!("{:.1}K", value / 1e3)
+    } else if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 /// Un `Div` con estilo de hover.

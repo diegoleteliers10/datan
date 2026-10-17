@@ -5,7 +5,7 @@
 //! Measure IR es un IR y no "DAX compila a SQL".
 
 use datan_dax_eval::{FilterContext, FilterValue, extract_atoms};
-use datan_dax_sql::{SourceMap, lower, quote_identifier};
+use datan_dax_sql::{SourceMap, lower, lower_scalar, quote_identifier};
 use datan_model::{
     Cardinality, Column, DataType, FilterDirection, Measure, Model, ObjectId, Relationship,
     RelationshipRole, Table, TableKind,
@@ -634,4 +634,40 @@ fn un_filtro_concreto_no_lo_tira_la_propagacion() {
         "y el semijoin de la region tambien tiene que estar: {:?}",
         on_fact
     );
+}
+
+#[test]
+fn el_total_de_una_medida_no_lleva_group_by() {
+    // Una tarjeta KPI muestra el total. `lower` exige agrupamiento porque una matriz sin
+    // filas no es una matriz; el total no tiene filas por definicion. Y calcularlo sumando
+    // los grupos de una matriz solo vale para medidas aditivas: el promedio de promedios no
+    // es el promedio.
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[PRODUCT_REGION])
+        .expect("extrae");
+
+    let plan = lower_scalar(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert!(
+        !plan.sql.contains("GROUP BY"),
+        "el total no agrupa:\n{}",
+        plan.sql
+    );
+    assert!(
+        plan.sql.contains("SUM(t0.\"Qty\")"),
+        "y si agrega la columna:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn el_total_de_margin_baja_con_nullif_y_sin_group_by() {
+    let model = business_model();
+    let filters = FilterContext::empty();
+    let atoms = extract_atoms("([Revenue] - [COGS]) / [Revenue]", &model, &filters, &[PRODUCT_REGION])
+        .expect("extrae");
+
+    let plan = lower_scalar(&model, &sources(&model), &atoms, &filters).expect("baja");
+    assert!(plan.sql.contains("NULLIF"), "\n{}", plan.sql);
+    assert!(!plan.sql.contains("GROUP BY"), "\n{}", plan.sql);
 }

@@ -30,7 +30,7 @@ pub mod saved;
 use std::collections::BTreeMap;
 
 use datan_dax_eval::{AtomSet, FilterContext, FilterValue, Interpreter, Scalar};
-use datan_dax_sql::{SourceMap, lower};
+use datan_dax_sql::{SourceMap, lower, lower_scalar};
 use datan_model::{DataType, Measure, Model, ObjectId};
 use datan_storage::Engine;
 
@@ -152,6 +152,75 @@ impl Report {
         let mut next = self.clone();
         next.filters = next.filters.without_column(column);
         next
+    }
+
+    /// El total de cada medida, para las tarjetas.
+    ///
+    /// Sin agrupamiento. Sumar las filas de la matriz solo vale para medidas aditivas: el
+    /// promedio de promedios no es el promedio, y el conteo distinto de conteos tampoco.
+    ///
+    /// Devuelve en el MISMO orden que `self.measures`, para que la tarjeta i es la medida i.
+    pub fn totals(
+        &self,
+        engine: &Engine,
+        source: Option<&dyn datan_dax_eval::DataSource>,
+    ) -> Result<Vec<String>, ReportError> {
+        let sources = SourceMap::from_model(&self.model).with_qualifier(&self.qualifier);
+        let definitions = self.measure_definitions()?;
+
+        // Los mismos grupos de lectura que `execute`: medidas con las mismas hojas
+        // comparten consulta.
+        let mut groups: Vec<(AtomSet, Vec<usize>)> = Vec::new();
+        for (index, measure) in definitions.iter().enumerate() {
+            let atoms = datan_dax_eval::extract_atoms(
+                &measure.expression,
+                &self.model,
+                &self.filters,
+                &self.dimensions,
+            )
+            .map_err(|error| ReportError::Interp(error.to_string()))?;
+            match groups
+                .iter_mut()
+                .find(|(set, _)| set.signature() == atoms.signature())
+            {
+                Some((_, members)) => members.push(index),
+                None => groups.push((atoms, vec![index])),
+            }
+        }
+
+        let mut out = vec![String::new(); self.measures.len()];
+        for (atoms, members) in &groups {
+            let values: Vec<String> = if atoms.needs_interpreter() {
+                let src = source.ok_or_else(|| ReportError::NoSource {
+                    measure: members
+                        .first()
+                        .and_then(|i| self.measures.get(*i))
+                        .and_then(|id| self.measure_name(*id))
+                        .unwrap_or("?")
+                        .to_string(),
+                })?;
+                let interpreter = Interpreter::new(&self.model, src);
+                interpreter
+                    .evaluate_totals(&atoms.atoms, &atoms.outputs, &self.filters)
+                    .map_err(|e| ReportError::Interp(e.to_string()))?
+                    .iter()
+                    .map(scalar_to_text)
+                    .collect()
+            } else {
+                let plan = lower_scalar(&self.model, &sources, atoms, &self.filters)
+                    .map_err(|e| ReportError::Interp(e.to_string()))?;
+                let rows = engine
+                    .render_rows(&plan.sql)
+                    .map_err(|e| ReportError::Query(e.to_string()))?;
+                rows.first().cloned().unwrap_or_default()
+            };
+
+            for (offset, member) in members.iter().enumerate() {
+                out[*member] = values.get(offset).cloned().unwrap_or_default();
+            }
+        }
+
+        Ok(out)
     }
 
     /// Las cabeceras: primero las dimensiones, luego las medidas.
@@ -366,6 +435,26 @@ impl Matrix {
     /// El valor de una celda.
     pub fn cell(&self, row: usize, column: usize) -> Option<&str> {
         self.rows.get(row)?.get(column).map(String::as_str)
+    }
+
+    /// Los primeros `n` valores de una columna de dimension, ordenados por una de medidas.
+    ///
+    /// Es lo que alimenta un grafico de barras. Las celdas que no parsean a numero se
+    /// descartan: una dimension agrupada junto a una medida no numerica no es un grafico, es
+    /// un error de seleccion que la UI debio evitar.
+    pub fn top(&self, dimension: usize, measure: usize, n: usize) -> Vec<(String, f64)> {
+        let mut values: Vec<(String, f64)> = self
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let label = row.get(dimension)?.clone();
+                let value = row.get(measure)?.parse::<f64>().ok()?;
+                Some((label, value))
+            })
+            .collect();
+        values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        values.truncate(n);
+        values
     }
 
     /// La cabecera de una columna.

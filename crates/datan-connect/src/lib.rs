@@ -521,7 +521,10 @@ fn generate_measures(model: &mut Model) -> Result<Vec<Measure>, ConnectError> {
                 && matches!(column.data_type, DataType::Text)
                 && meaningful
             {
-                let name = format!("{} {}", table.name, column.name);
+                // El prefijo `#` marca la medida como CONTEO. Sin el, `nombre` la dimension
+                // y `tabla nombre` la medida de conteo se ven como la misma cosa dos veces,
+                // y en la barra lateral parecen un duplicado.
+                let name = format!("# {}", column.name);
                 let expression = format!("DISTINCTCOUNT('{}'[{}])", table.name, column.name);
                 measures.push(build_measure(ObjectId(next_id), name, expression, model)?);
                 next_id += 1;

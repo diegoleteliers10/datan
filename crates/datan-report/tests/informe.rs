@@ -81,7 +81,7 @@ fn el_total_de_la_matriz_es_la_suma_de_sus_filas() {
     let matrix = matrix();
     let mut total = 0.0f64;
     for row in 0..matrix.row_count() {
-        total += matrix.cell(row, 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        total += matrix.cell(row, 2).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
     }
     assert_eq!(total, 74000.0, "el total de Amount en la suite");
 
@@ -98,9 +98,9 @@ fn margin_no_es_qty_repetido() {
     // distinto: es `(Qty - Amount) / Qty`.
     let matrix = matrix();
     for row in 0..matrix.row_count() {
-        let qty: f64 = matrix.cell(row, 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let amount: f64 = matrix.cell(row, 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let margin: f64 = matrix.cell(row, 3).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let qty: f64 = matrix.cell(row, 1).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let amount: f64 = matrix.cell(row, 2).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let margin: f64 = matrix.cell(row, 3).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let expected = if qty == 0.0 { 0.0 } else { (qty - amount) / qty };
         assert!(
             (margin - expected).abs() < 1e-6,
@@ -290,4 +290,49 @@ fn los_nombres_de_medidas_guardadas_resuelven_contra_el_modelo() {
         datan_report::saved::folder()
             .join("informe de nombres.toml"),
     );
+}
+
+#[test]
+fn los_totales_de_las_tarjetas_son_los_mismos_que_la_suma_de_la_matriz() {
+    // Para una medida ADITIVA, el total de la tarjeta tiene que coincidir con la suma de la
+    // matriz. Es la prueba de que los dos caminos (con y sin GROUP BY) leen lo mismo.
+    let model = model();
+    let report = datan_report::Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), measure("Amount")]);
+    let engine = engine().expect("motor");
+
+    let matrix = report.execute(&engine, None).expect("corre");
+    let totals = report.totals(&engine, None).expect("totales");
+
+    let qty_matriz: f64 = (0..matrix.row_count())
+        .filter_map(|row| matrix.cell(row, 1).and_then(|v| v.parse::<f64>().ok()))
+        .sum();
+    let qty_total: f64 = totals[0].parse().unwrap_or(0.0);
+    assert!((qty_matriz - qty_total).abs() < 1e-6);
+
+    let amount_matriz: f64 = (0..matrix.row_count())
+        .filter_map(|row| matrix.cell(row, 2).and_then(|v| v.parse::<f64>().ok()))
+        .sum();
+    let amount_total: f64 = totals[1].parse().unwrap_or(0.0);
+    assert!((amount_matriz - amount_total).abs() < 1e-6);
+}
+
+#[test]
+fn el_grafico_toma_los_primeros_valores_ordenados_por_la_medida() {
+    let matrix = matrix();
+    let top = matrix.top(0, 1, 2);
+
+    assert_eq!(top.len(), 2);
+    assert!(
+        top[0].1 >= top[1].1,
+        "ordenado de mayor a menor: {top:?}"
+    );
+    assert!(top.iter().all(|(label, _)| ["Norte", "Sur", "Este"].contains(&label.as_str())));
+}
+
+#[test]
+fn el_grafico_con_mas_valores_de_los_que_hay_los_da_todos() {
+    let matrix = matrix();
+    assert_eq!(matrix.top(0, 1, 100).len(), 3);
 }

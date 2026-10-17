@@ -877,6 +877,40 @@ impl<'a> Interpreter<'a> {
         Ok(out)
     }
 
+    /// Evalua las salidas de una medida SIN agrupar: el total.
+    ///
+    /// Es lo que alimenta una tarjeta KPI. `evaluate_grouped` produce filas; un total no
+    /// tiene filas, y sumar las filas de una matriz solo vale para medidas aditivas: el
+    /// promedio de promedios no es el promedio.
+    pub fn evaluate_totals(
+        &self,
+        atoms: &[Atom],
+        outputs: &[MeasureOutput],
+        context: &FilterContext,
+    ) -> Result<Vec<Scalar>, InterpError> {
+        let propagated = context.propagate(self.model);
+        let mut result = CellResult::default();
+        for atom in atoms {
+            let merged = Atom {
+                context: atom.context.union(&propagated),
+                ..atom.clone()
+            };
+            let value = self.evaluate_atom(&merged, &propagated)?;
+            result.values.insert(atom.label.clone(), value);
+        }
+
+        Ok(match outputs.first() {
+            Some(_) => outputs
+                .iter()
+                .map(|output| self.eval_shape(&output.shape, atoms, &result.values))
+                .collect(),
+            None => atoms
+                .iter()
+                .map(|atom| result.get(&atom.label).cloned().unwrap_or(Scalar::Blank))
+                .collect(),
+        })
+    }
+
     /// Los indices de fila de una tabla que sobreviven al contexto de filtro.
     ///
     /// Este es el unico lugar donde el interprete recorre filas. Y solo lo hace para

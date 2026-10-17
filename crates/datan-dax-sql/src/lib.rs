@@ -300,6 +300,116 @@ pub fn lower(
     Ok(SqlPlan { sql, columns })
 }
 
+/// Baja un `AtomSet` a una consulta SIN agrupamiento: el total de la medida.
+///
+/// Es lo que alimenta una tarjeta KPI. `lower` exige agrupamiento porque una matriz sin
+/// filas no es una matriz; un total no tiene filas por definicion, y forzar un `GROUP BY`
+/// para calcularlo obligaria a sumar los grupos despues, que solo vale para medidas
+/// aditivas. `AVG` de promedios no es el promedio, y `DISTINCTCOUNT` de conteos tampoco.
+///
+/// La forma es la misma que `lower` menos el `GROUP BY`, el `ORDER BY` y las columnas de
+/// agrupamiento.
+pub fn lower_scalar(
+    model: &Model,
+    sources: &SourceMap,
+    atoms: &AtomSet,
+    filters: &FilterContext,
+) -> Result<SqlPlan, LowerError> {
+    if atoms.needs_interpreter() {
+        let culprit = atoms
+            .atoms
+            .iter()
+            .find(|atom| atom.needs_interpreter())
+            .map(|atom| atom.label.clone())
+            .unwrap_or_default();
+        return Err(LowerError::Unsupported(format!(
+            "el atomo `{culprit}` necesita el interprete"
+        )));
+    }
+
+    let fact_table = first_fact_table(model, atoms).ok_or_else(|| {
+        LowerError::Unsupported("no se encontro la tabla de hechos".to_string())
+    })?;
+
+    let mut needed: Vec<ObjectId> = vec![fact_table];
+    for table in required_tables(model, atoms) {
+        if !needed.contains(&table) {
+            needed.push(table);
+        }
+    }
+
+    let aliases = Aliases::new(&needed);
+    let mut select = Vec::with_capacity(atoms.atoms.len());
+    let mut columns = Vec::with_capacity(atoms.atoms.len());
+
+    if !atoms.outputs.is_empty() {
+        for (index, output) in atoms.outputs.iter().enumerate() {
+            let name = SqlPlan::atom_column(index);
+            let expression = render_shape(&output.shape, atoms, model, sources, &aliases)?;
+            select.push(format!("{expression} AS {}", quote_identifier(&name)));
+            columns.push(OutputColumn {
+                name,
+                source: atoms.outputs_atom_column(&output.shape),
+                atom: Some(output.label.clone()),
+                measure: Some(output.label.clone()),
+            });
+        }
+    } else {
+        for (index, atom) in atoms.atoms.iter().enumerate() {
+            let name = SqlPlan::atom_column(index);
+            let expression = lower_atom(model, sources, &aliases, atom)?;
+            select.push(format!("{expression} AS {}", quote_identifier(&name)));
+            columns.push(OutputColumn {
+                name,
+                source: atom.column,
+                atom: Some(atom.label.clone()),
+                measure: None,
+            });
+        }
+    }
+
+    let (fact_physical, _) = sources.qualified(fact_table)?;
+    let mut from_clause = aliases.of(fact_table);
+    for table in needed.iter().skip(1) {
+        let path = model.join_path(fact_table, *table).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "no hay relationship entre la tabla de hechos y la tabla {table}"
+            ))
+        })?;
+        for edge in &path {
+            let from_table = owner_of(model, edge.from_column);
+            let to_table = owner_of(model, edge.to_column);
+            let (from_physical, _) = sources.column(edge.from_column)?;
+            let (to_physical, _) = sources.column(edge.to_column)?;
+            let (to_table_physical, _) = sources.qualified(to_table)?;
+            from_clause.push_str(&format!(
+                "\n  JOIN {} {} ON {}.{} = {}.{}",
+                quote_qualified(&to_table_physical),
+                aliases.of(to_table),
+                aliases.of(from_table),
+                quote_identifier(from_physical),
+                aliases.of(to_table),
+                quote_identifier(to_physical),
+            ));
+        }
+    }
+
+    let where_clause = match lower_filters(model, sources, &aliases, &atoms.grouping, filters)? {
+        empty if empty.is_empty() => String::new(),
+        clause => format!("\n{clause}"),
+    };
+
+    let sql = format!(
+        "SELECT\n  {}\nFROM {} {}{}\n",
+        select.join(",\n  "),
+        quote_qualified(&fact_physical),
+        from_clause,
+        where_clause
+    );
+
+    Ok(SqlPlan { sql, columns })
+}
+
 /// Intenta bajar a SQL, y devuelve `None` si hace falta el interprete.
 pub fn try_lower(
     model: &Model,
