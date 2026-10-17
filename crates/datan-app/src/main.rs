@@ -22,8 +22,11 @@ use std::time::Instant;
 
 use datan_connect::{PostgresCatalog, Source, introspect};
 use datan_model::{DataType, Model, ObjectId, TableKind};
+mod components;
 mod config;
+mod tokens;
 
+use components::Peso;
 use config::Connections;
 use datan_report::{Header, Matrix, Report};
 use datan_storage::Engine;
@@ -37,6 +40,7 @@ use gpui_kit::component::Theme;
 // interactividad, que son los que traen `on_click`, `when` y los estilos de hover.
 // El crate se llama `gpui-pre` pero su libreria se llama `gpui`. Por eso el alias.
 use ::gpui::InteractiveElement;
+use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::scroll::ScrollableElement;
 
 /// Que se eligio del modelo.
@@ -781,24 +785,25 @@ fn clickable(
     label: String,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    div()
-        .id(ElementId::Name(id))
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .text_size(px(12.0))
-        .cursor_pointer()
-        .child(label)
-        .on_click(on_click)
-        .into_any_element()
+    clickable_peso(theme, Peso::Secundario, id, label, on_click)
+}
+
+/// Un boton con el peso que se le pida.
+fn clickable_peso(
+    theme: &Theme,
+    peso: Peso,
+    id: SharedString,
+    label: String,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    components::boton(theme, peso, id, label, on_click)
 }
 
 fn retry_button(theme: &Theme, database: &str, cx: &mut Context<Datan>) -> AnyElement {
     let database = database.to_string();
-    clickable(
+    clickable_peso(
         theme,
+        Peso::Primario,
         "retry".into(),
         "Reintentar".to_string(),
         cx.listener(move |view, _event, _window, cx| view.connect(&database, cx)),
@@ -806,7 +811,7 @@ fn retry_button(theme: &Theme, database: &str, cx: &mut Context<Datan>) -> AnyEl
 }
 
 fn clear_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
-    clickable(theme, "clear".into(), "Limpiar todo".to_string(), cx.listener(
+    clickable_peso(theme, Peso::Fantasma, "clear".into(), "Limpiar todo".to_string(), cx.listener(
         |view, _event, _window, cx| {
             view.filters.clear();
             view.refresh(cx);
@@ -920,28 +925,17 @@ fn range_button(
     months: u8,
     cx: &mut Context<Datan>,
 ) -> impl IntoElement {
-    let mut button = div()
-        .id(ElementId::Name(SharedString::from(format!("range-{months}"))))
-        .px_2()
-        .h(px(24.0))
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .flex()
-        .items_center()
-        .text_size(px(11.0))
-        .cursor_pointer()
-        .child(label.to_string());
-    button = if active {
-        button.bg(theme.foreground).text_color(theme.background)
-    } else {
-        button.hover(|style| style.bg(theme.list_hover))
-    };
-    button.on_click(cx.listener(move |view, _event, _window, cx| {
-        eprintln!("[datan] rango: {months}M");
-        view.date_months = (months != 0).then_some(months);
-        view.refresh(cx);
-    }))
+    components::segmento(
+        theme,
+        SharedString::from(format!("range-{months}")),
+        label.to_string(),
+        active,
+        cx.listener(move |view, _event, _window, cx| {
+            eprintln!("[datan] rango: {months}M");
+            view.date_months = (months != 0).then_some(months);
+            view.refresh(cx);
+        }),
+    )
 }
 
 /// El dia de hoy en dias desde 1970. Es UTC: en Chile puede ser el dia anterior, y en un
@@ -964,21 +958,63 @@ fn filter_pill(
     index: usize,
     cx: &mut Context<Datan>,
 ) -> AnyElement {
-    let label = format!("{} = {}  x", filter.label, filter.value);
-    div()
-        .id(ElementId::Name(SharedString::from(format!("pill-{index}"))))
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .text_size(px(12.0))
-        .cursor_pointer()
-        .hover(|style| style.opacity(0.7))
-        .child(label)
-        .on_click(cx.listener(move |view, _event, _window, cx| {
+    components::pastilla(
+        theme,
+        SharedString::from(format!("pill-{index}")),
+        format!("{} = {}", filter.label, filter.value),
+        cx.listener(move |view, _event, _window, cx| {
             view.clear_filter(index, cx);
-        }))
+        }),
+    )
+}
+
+/// Una tarjeta KPI: el nombre de la medida, el valor grande y el delta contra el mismo
+/// periodo del ano anterior.
+///
+/// El delta se muestra siempre que haya con que comparar, en verde si sube y en rojo si baja.
+/// Sin periodo anterior se dice con esas palabras y no se esconde el hueco: una tarjeta sin
+/// comparacion no dice si el numero esta bien o mal.
+fn tarjeta_kpi(theme: &Theme, nombre: &str, total: &str, delta: Option<f64>) -> AnyElement {
+    let valor = if total.is_empty() {
+        "-".to_string()
+    } else {
+        total
+            .parse::<f64>()
+            .map(format_value)
+            .unwrap_or_else(|_| total.to_string())
+    };
+    let comparacion: AnyElement = match delta {
+        Some(delta) => {
+            // `chart_bullish` y `chart_bearish` son los dos colores con significado del
+            // tema: verde y rojo. `danger_foreground` NO sirve para esto: es el color del
+            // texto que va ENCIMA de un fondo rojo, o sea casi blanco, y una bajada se veia
+            // como un texto invisible.
+            let (color, flecha) = if delta >= 0.0 {
+                (theme.chart_bullish, "\u{2191}")
+            } else {
+                (theme.chart_bearish, "\u{2193}")
+            };
+            div()
+                .text_size(px(tokens::LETRA_NOTA))
+                .text_color(color)
+                .child(format!("{flecha} {:+.1}% vs ano anterior", delta * 100.0))
+                .into_any_element()
+        }
+        None => components::nota(theme, "sin periodo anterior").into_any_element(),
+    };
+    components::tarjeta(theme)
+        .flex_1()
+        .p_4()
+        .flex_col()
+        .gap_1()
+        .child(components::nota(theme, nombre.to_string()))
+        .child(
+            div()
+                .text_size(px(tokens::LETRA_VALOR))
+                .font_semibold()
+                .child(valor),
+        )
+        .child(comparacion)
         .into_any_element()
 }
 
@@ -991,34 +1027,19 @@ fn sidebar_item(
     is_measure: bool,
     cx: &mut Context<Datan>,
 ) -> AnyElement {
-    let mut element = div()
-        .id(ElementId::Name(SharedString::from(format!(
+    components::fila_dato(
+        theme,
+        SharedString::from(format!(
             "side-{}-{}",
             if is_measure { "m" } else { "d" },
             column.0
-        ))))
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .text_size(px(13.0))
-        .cursor_pointer()
-        .hover(|style| style.bg(theme.list_hover))
-        .child(div().w(px(12.0)).child(if is_on { "\u{2022}" } else { "" }))
-        .child(label);
-    if is_on {
-        // `accent` es el color de fondo de un hover: en tema claro es casi blanco y un
-        // campo seleccionado se volvia invisible. Lo seleccionado se pinta con `foreground`,
-        // que es el color de la tinta.
-        element = element.bg(theme.muted_foreground).text_color(theme.background);
-    }
-    element
-        .on_click(cx.listener(move |view, _event, _window, cx| {
+        )),
+        label,
+        is_on,
+        cx.listener(move |view, _event, _window, cx| {
             view.toggle(column, is_measure, cx);
-        }))
-        .into_any_element()
+        }),
+    )
 }
 
 impl Render for Datan {
@@ -1080,7 +1101,7 @@ impl Render for Datan {
         div()
             .flex()
             .size_full()
-            .bg(theme.background)
+            .bg(theme.muted)
             .text_color(theme.foreground)
             .child(main)
     }
@@ -1148,10 +1169,10 @@ impl Datan {
             .collect();
 
         let sidebar = div()
-            .w(px(264.0))
+            .w(px(tokens::PANEL_DATOS))
             .h_full()
             .flex_shrink_0()
-            .bg(theme.sidebar)
+            .bg(theme.background)
             .border_r_1()
             .border_color(theme.sidebar_border)
             .flex_col()
@@ -1274,14 +1295,18 @@ impl Datan {
         date_bar = date_bar.child(div().w(px(16.0)));
         date_bar = date_bar.child(
             div()
-                .text_size(px(18.0))
-                .font_weight(FontWeight::BOLD)
+                .text_size(px(tokens::LETRA_H1))
+                .font_semibold()
                 .child("Resumen de ventas"),
         );
         date_bar = date_bar.child(div().flex_1());
+        // Los rangos van en un control segmentado porque son excluyentes: elegir 3M apaga
+        // 6M. Una fila de botones con borde se lee como cuatro acciones sueltas, y no dice
+        // cual esta elegida.
+        let mut rangos = components::caja_segmentada(&theme);
         for months in [3u8, 6, 12] {
             let label = format!("{months}M");
-            date_bar = date_bar.child(range_button(
+            rangos = rangos.child(range_button(
                 &theme,
                 &label,
                 self.date_months == Some(months),
@@ -1289,13 +1314,14 @@ impl Datan {
                 cx,
             ));
         }
-        date_bar = date_bar.child(range_button(
+        rangos = rangos.child(range_button(
             &theme,
             "Todo",
             self.date_months.is_none(),
             0,
             cx,
         ));
+        date_bar = date_bar.child(rangos);
         // Sin columna de fecha conectada NO se muestran los botones: un rango que no
         // filtra nada y no lo dice es la falla silenciosa de siempre.
         if let Some((_, column)) = self
@@ -1384,8 +1410,10 @@ impl Datan {
                 div()
                     .px_3()
                     .pb_1()
-                    .text_size(px(12.0))
-                    .text_color(theme.danger_foreground)
+                    .text_size(px(tokens::LETRA_ETIQUETA))
+                    // Rojo de texto. `danger_foreground` es el color del texto que va encima
+                    // de un fondo rojo, o sea casi blanco: un error se veia invisible.
+                    .text_color(theme.chart_bearish)
                     .child(error),
             );
         }
@@ -1393,54 +1421,17 @@ impl Datan {
             let cards: Vec<AnyElement> = self
                 .totals
                 .iter()
-                .map(|(name, total, delta)| {
-                    div()
-                        .flex_1()
-                        .mx_2()
-                        .my_2()
-                        .p_4()
-                        .rounded_lg()
-                        .bg(theme.muted)
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(theme.muted_foreground)
-                                .child(name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(20.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(if total.is_empty() {
-                                    "-".to_string()
-                                } else {
-                                    total.parse::<f64>().map(format_value).unwrap_or(total.clone())
-                                }),
-                        )
-                        .child(match delta {
-                            Some(delta) => div()
-                                .text_size(px(11.0))
-                                .text_color(if *delta >= 0.0 {
-                                    theme.foreground
-                                } else {
-                                    theme.danger_foreground
-                                })
-                                .child(format!(
-                                    "{} {:+.1}% vs ano anterior",
-                                    if *delta >= 0.0 { "\u{2191}" } else { "\u{2193}" },
-                                    delta * 100.0
-                                )),
-                            None => div()
-                                .text_size(px(11.0))
-                                .text_color(theme.muted_foreground)
-                                .child("sin periodo anterior"),
-                        })
-                        .into_any_element()
-                })
+                .map(|(name, total, delta)| tarjeta_kpi(&theme, name, total, *delta))
                 .collect();
-            canvas = canvas.child(div().flex().flex_shrink_0().children(cards));
+            canvas = canvas.child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .gap_3()
+                    .px_3()
+                    .pt_3()
+                    .children(cards),
+            );
         }
 
         // --- Grafico de barras: la primera dimension contra la primera medida ---
@@ -1495,7 +1486,7 @@ impl Datan {
                                             .flex_grow(fraction as f32 * 1000.0)
                                             .h_full()
                                             .rounded_md()
-                                            .bg(theme.foreground),
+                                            .bg(tokens::serie_unica()),
                                     )
                                     .child(div().flex_grow((1.0 - fraction) as f32 * 1000.0)),
                             )
@@ -1516,31 +1507,26 @@ impl Datan {
                     .collect();
 
                 canvas = canvas.child(
-                    div()
-                        .mx_2()
-                        .my_2()
+                    components::tarjeta(&theme)
+                        .mx_3()
+                        .mt_3()
                         .p_4()
-                        .rounded_lg()
-                        .bg(theme.muted)
                         .flex_col()
                         .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(theme.muted_foreground)
-                                .child(format!(
-                                    "{} por {} (top {})",
-                                    measure_name,
-                                    self.report
-                                        .as_ref()
-                                        .and_then(|r| r
-                                            .model
-                                            .column(self.selection.dimensions[0])
-                                            .map(|(_, c)| c.name.clone()))
-                                        .unwrap_or_default(),
-                                    top.len()
-                                )),
-                        )
+                        .child(components::titulo_tarjeta(
+                            &theme,
+                            format!(
+                                "{} por {}",
+                                measure_name,
+                                self.report
+                                    .as_ref()
+                                    .and_then(|r| r
+                                        .model
+                                        .column(self.selection.dimensions[0])
+                                        .map(|(_, c)| c.name.clone()))
+                                    .unwrap_or_default()
+                            ),
+                        ))
                         .child(div().flex_col().gap_1().children(bars)),
                 );
             }
@@ -1656,10 +1642,10 @@ impl Datan {
         }
 
         let visualizaciones = div()
-            .w(px(220.0))
+            .w(px(tokens::PANEL_VISUALES))
             .h_full()
             .flex_shrink_0()
-            .bg(theme.sidebar)
+            .bg(theme.background)
             .border_l_1()
             .border_color(theme.sidebar_border)
             .flex_col()
@@ -1704,7 +1690,7 @@ impl Datan {
             .items_center()
             .gap_3()
             .px_3()
-            .h(px(48.0))
+            .h(px(tokens::BARRA_SUPERIOR))
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -1806,7 +1792,7 @@ impl Datan {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.background)
+            .bg(theme.muted)
             .text_color(theme.foreground)
             .child(top_bar)
             .child(
@@ -2114,7 +2100,7 @@ impl Datan {
         );
 
         div()
-            .h(px(420.0))
+            .h(px(tokens::ALTO_GRID))
             .flex_shrink_0()
             .flex_col()
             .overflow_hidden()
@@ -2134,7 +2120,7 @@ fn add_measure_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
 }
 
 fn save_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
-    clickable(theme, "save".into(), "Guardar".to_string(), cx.listener(
+    clickable_peso(theme, Peso::Primario, "save".into(), "Guardar".to_string(), cx.listener(
         |view, _event, _window, cx| view.save_report(cx),
     ))
 }
