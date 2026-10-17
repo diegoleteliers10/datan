@@ -40,6 +40,7 @@ use gpui_kit::component::Theme;
 // interactividad, que son los que traen `on_click`, `when` y los estilos de hover.
 // El crate se llama `gpui-pre` pero su libreria se llama `gpui`. Por eso el alias.
 use ::gpui::InteractiveElement;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::scroll::ScrollableElement;
 
@@ -96,7 +97,14 @@ struct Datan {
     /// El visual activo del lienzo: Todo, Tarjetas, Barras o Tabla.
     visual: String,
     /// El indicador de la barra superior tras guardar.
-    last_saved: Option<SharedString>,
+    /// Cuando se guardo el informe que se esta mirando, en segundos desde la epoca. `None`
+    /// es un informe con cambios sin guardar, o sin guardar todavia.
+    last_saved: Option<i64>,
+    /// Modo Lectura: el informe se mira y no se toca.
+    ///
+    /// Un boton que no hace nada no se muestra; este modo SI hace algo: apaga el filtro por
+    /// clic, que es el gesto que cambia el informe.
+    lectura: bool,
     /// Orden de la matriz: (indice de columna, descendente). Tercer clic lo quita.
     sort: Option<(usize, bool)>,
     matrix: Option<Matrix>,
@@ -143,6 +151,7 @@ impl Datan {
             formula_error: None,
             visual: "Todo".to_string(),
             last_saved: None,
+            lectura: false,
             sort: None,
             formula: None,
             search: None,
@@ -268,6 +277,11 @@ impl Datan {
 
     /// Filtra por el valor de texto de una dimension, como pinchar una barra.
     fn filter_by_label(&mut self, column: ObjectId, label: &str, cx: &mut Context<Self>) {
+        if self.lectura {
+            self.stats = Some("modo Lectura: el clic no filtra".to_string());
+            cx.notify();
+            return;
+        }
         // Pinchar dos veces la misma barra CAMBIA el valor, no acumula dos filtros que se
         // intersectan y dejan la matriz vacia.
         self.filters.retain(|filter| filter.column != column);
@@ -310,7 +324,7 @@ impl Datan {
         match datan_report::saved::save(&report, &name) {
             Ok(()) => {
                 self.stats = Some(format!("guardado como `{label}`"));
-                self.last_saved = Some(SharedString::from("Guardado"));
+                self.last_saved = Some(epoch_now());
                 cx.notify();
             }
             Err(error) => {
@@ -551,6 +565,13 @@ impl Datan {
 
     /// Cross-filter: pinchar una celda de una dimension.
     fn drill(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
+        if self.lectura {
+            // El clic no filtra a proposito, y se dice. Un clic que no responde parece una
+            // app rota, y este es el gesto que mas se usa.
+            self.stats = Some("modo Lectura: el clic no filtra".to_string());
+            cx.notify();
+            return;
+        }
         let Some(report) = self.report.clone() else {
             return;
         };
@@ -678,11 +699,15 @@ fn run_report(
         None => None,
     };
 
-    let elapsed = started.elapsed();
+    // Los milisegundos enteros: `241.941792ms` es la duracion de un cronometro, no un dato
+    // que alguien lea en la barra de abajo. Y un informe que tarda menos de un milisegundo
+    // tardo algo: no se redondea a cero.
+    let ms = started.elapsed().as_millis().max(1);
     let stats = format!(
-        "{queries} consulta(s), {} filas, {} columnas, {elapsed:?}",
-        matrix.row_count(),
-        matrix.width()
+        "{}, {}, {}, {ms} ms",
+        plural(queries, "consulta", "consultas"),
+        plural(matrix.row_count(), "fila", "filas"),
+        plural(matrix.width(), "columna", "columnas"),
     );
     // Los nombres de las medidas, en el MISMO orden que los totales: la tarjeta i es la
     // medida i.
@@ -866,6 +891,18 @@ fn epoch_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|e| e.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Un conteo con su sustantivo en el numero que corresponde: "1 fila", "3 filas".
+///
+/// Un "(es)" en la interfaz es una decision que nadie tomo, y "1 visualizacion(es)" se lee
+/// como un error del programa.
+fn plural(cantidad: usize, singular: &str, plural: &str) -> String {
+    if cantidad == 1 {
+        format!("{cantidad} {singular}")
+    } else {
+        format!("{cantidad} {plural}")
+    }
 }
 
 /// Un numero con los puntos de miles, como los muestra la gente: 1.284.310.
@@ -1322,6 +1359,14 @@ impl Datan {
             cx,
         ));
         date_bar = date_bar.child(rangos);
+        // Actualizar vive al lado del periodo: las dos cosas cambian QUE datos se ven, y
+        // estaban en dos extremos de la ventana.
+        date_bar = date_bar.child(components::boton_icono(
+            &theme,
+            "refresh",
+            IconName::RefreshCw,
+            cx.listener(|view, _event, _window, cx| view.refresh(cx)),
+        ));
         // Sin columna de fecha conectada NO se muestran los botones: un rango que no
         // filtra nada y no lo dice es la falla silenciosa de siempre.
         if let Some((_, column)) = self
@@ -1364,7 +1409,7 @@ impl Datan {
         // Guardar y exportar. Van aqui y no en un menu porque son las dos acciones que
         // existen sobre un informe, y un menu que no se abre no ensena sus opciones.
         filter_bar = filter_bar.child(div().flex_1());
-        filter_bar = filter_bar.child(save_button(&theme, cx));
+        filter_bar = filter_bar.child(save_button(&theme, self.lectura, cx));
         filter_bar = filter_bar.child(export_button(&theme, cx));
 
         // --- Barra de formula DAX ---
@@ -1403,7 +1448,7 @@ impl Datan {
                         .flex_1()
                         .child(Input::new(self.formula.as_ref().expect("recien creada"))),
                 )
-                .child(add_measure_button(&theme, cx)),
+                .child(add_measure_button(&theme, self.lectura, cx)),
         );
         if let Some(error) = formula_error {
             canvas = canvas.child(
@@ -1685,57 +1730,77 @@ impl Datan {
             );
 
         // --- Barra superior ---
-        let mut top_bar = div()
+        //
+        // A la izquierda, que informe se mira: la marca, la base, la pagina y desde cuando
+        // esta guardado. A la derecha, que se puede hacer con el. El estado de guardado va
+        // junto al nombre del informe porque es un estado DEL informe.
+        let guardado: AnyElement = match self.last_saved {
+            Some(at) => components::nota(
+                &theme,
+                format!("\u{2713} Guardado {}", ago_text(epoch_now() - at)),
+            )
+            .into_any_element(),
+            None => components::nota(&theme, "Sin guardar").into_any_element(),
+        };
+        // Sin backend de undo no hay historial; sin backend de publicacion no hay destino. Los
+        // cuatro se dibujan apagados en vez de esconderse: la barra es la misma en las dos
+        // versiones, y un hueco que aparece y desaparece mueve todo lo demas.
+        let mut modo = components::caja_segmentada(&theme);
+        for (etiqueta, lectura) in [("Editar", false), ("Lectura", true)] {
+            modo = modo.child(components::segmento(
+                &theme,
+                SharedString::from(format!(
+                    "modo-{}",
+                    if lectura { "lectura" } else { "editar" }
+                )),
+                etiqueta.to_string(),
+                self.lectura == lectura,
+                cx.listener(move |view, _event, _window, cx| {
+                    view.lectura = lectura;
+                    cx.notify();
+                }),
+            ));
+        }
+
+        let top_bar = div()
             .flex()
             .items_center()
             .gap_3()
             .px_3()
             .h(px(tokens::BARRA_SUPERIOR))
+            .bg(theme.background)
             .border_b_1()
             .border_color(theme.border)
             .child(
                 div()
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .rounded_md()
-                    .bg(theme.foreground)
+                    .w(px(26.0))
+                    .h(px(26.0))
+                    .rounded_lg()
+                    .bg(theme.primary)
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.0))
-                    .text_color(theme.background)
-                    .child("D"),
-            )
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(13.0))
-                    .child("Datan"),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "{}  \u{203a}  Informe",
-                        self.database.as_deref().unwrap_or("sin base")
+                    .child(components::icono(
+                        IconName::ChartColumn,
+                        15.0,
+                        theme.primary_foreground,
                     )),
-            );
-        if let Some(saved) = &self.last_saved {
-            top_bar = top_bar.child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(theme.muted_foreground)
-                    .child(format!("\u{2713} {saved}")),
-            );
-        }
-        top_bar = top_bar.child(div().flex_1());
-        top_bar = top_bar.child(clickable(
-            &theme,
-            "refresh".into(),
-            "Actualizar".to_string(),
-            cx.listener(|view, _event, _window, cx| view.refresh(cx)),
-        ));
+            )
+            .child(div().font_semibold().text_size(px(13.0)).child("Datan"))
+            .child(components::nota(
+                &theme,
+                format!(
+                    "{}  \u{203a}  Resumen de ventas",
+                    self.database.as_deref().unwrap_or("sin base")
+                ),
+            ))
+            .child(guardado)
+            .child(div().flex_1())
+            .child(components::boton_icono_apagado(&theme, IconName::Undo2))
+            .child(components::boton_icono_apagado(&theme, IconName::Redo2))
+            .child(modo)
+            .child(components::boton_apagado(&theme, "Compartir"))
+            .child(components::boton_apagado(&theme, "Publicar"));
 
         // Cuantos visuales hay ahora en el lienzo. Se cuenta lo que se PINTA, no lo que
         // el informe podria pintar.
@@ -1753,40 +1818,42 @@ impl Datan {
         };
 
         // --- Pestañas de paginas ---
+        //
+        // Una sola pagina. El "+" esta y no se puede tocar: la app sabe pintar un informe, no
+        // varios guardados en la misma ventana.
         let tabs = div()
             .flex()
             .items_center()
             .gap_2()
             .px_3()
-            .py_1()
+            .h(px(40.0))
+            .bg(theme.background)
             .border_t_1()
             .border_color(theme.border)
             .child(
                 div()
+                    .h(px(24.0))
                     .px_3()
-                    .py_1()
                     .rounded_md()
                     .bg(theme.muted)
-                    .text_size(px(12.0))
+                    .flex()
+                    .items_center()
+                    .font_semibold()
+                    .text_size(px(tokens::LETRA_TITULO))
                     .child("Resumen de ventas"),
             )
+            .child(components::boton_icono_apagado(&theme, IconName::Plus))
             .child(div().flex_1())
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.muted_foreground)
-                    // Cuantos visuales hay de verdad en el lienzo, no los que caben en
-                    // el papel. Con "Tarjetas" seleccionado son dos, aunque el informe tenga
-                    // ocho tipos disponibles.
-                    .child(format!(
-                        "{} visualizacion(es){}",
-                        visuales,
-                        match self.stats.clone() {
-                            Some(stats) => format!("  ·  {stats}"),
-                            None => String::new(),
-                        }
-                    )),
-            );
+            .child(components::nota(
+                &theme,
+                match self.stats.clone() {
+                    Some(stats) => format!(
+                        "{}  \u{00b7}  {stats}",
+                        plural(visuales, "visualizacion", "visualizaciones")
+                    ),
+                    None => plural(visuales, "visualizacion", "visualizaciones"),
+                },
+            ));
 
         div()
             .flex()
@@ -2110,7 +2177,10 @@ impl Datan {
     }
 }
 
-fn add_measure_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+fn add_measure_button(theme: &Theme, lectura: bool, cx: &mut Context<Datan>) -> AnyElement {
+    if lectura {
+        return components::boton_apagado(theme, "Crear medida");
+    }
     clickable(
         theme,
         "add-measure".into(),
@@ -2119,7 +2189,10 @@ fn add_measure_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
     )
 }
 
-fn save_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+fn save_button(theme: &Theme, lectura: bool, cx: &mut Context<Datan>) -> AnyElement {
+    if lectura {
+        return components::boton_apagado(theme, "Guardar");
+    }
     clickable_peso(theme, Peso::Primario, "save".into(), "Guardar".to_string(), cx.listener(
         |view, _event, _window, cx| view.save_report(cx),
     ))

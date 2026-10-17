@@ -8,6 +8,7 @@
 //! lista se construye con el tema del render que lo pide, y asi el dia que el tema cambie no
 //! hay una copia del color viejo guardada en una constante.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 // `Div::on_click` y `Div::hover` viven en este trait. `gpui-kit` reexporta los tipos de gpui
@@ -43,7 +44,26 @@ pub fn boton<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
-    let base = div()
+    boton_con_icono(theme, peso, id, None, etiqueta, on_click)
+}
+
+/// Un boton con un icono adelante del texto.
+pub fn boton_con_icono<F>(
+    theme: &Theme,
+    peso: Peso,
+    id: impl Into<SharedString>,
+    nombre: Option<IconName>,
+    etiqueta: impl Into<SharedString>,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let color = match peso {
+        Peso::Primario => theme.primary_foreground,
+        _ => theme.foreground,
+    };
+    let mut base = div()
         .id(ElementId::Name(id.into()))
         .h(px(tokens::ALTO_CONTROL))
         .px_3()
@@ -52,8 +72,11 @@ where
         .items_center()
         .gap_1()
         .text_size(px(tokens::LETRA_TITULO))
-        .cursor_pointer()
-        .child(etiqueta.into());
+        .cursor_pointer();
+    if let Some(nombre) = nombre {
+        base = base.child(icono(nombre, tokens::LETRA_ICONO, color));
+    }
+    let base = base.child(etiqueta.into());
     let pintado = match peso {
         Peso::Primario => base
             .bg(theme.primary)
@@ -69,6 +92,90 @@ where
             .hover(|style| style.bg(theme.list_hover)),
     };
     pintado.on_click(on_click).into_any_element()
+}
+
+/// Un boton que existe pero no hace nada, porque el flujo que lo respalda no existe.
+///
+/// Se dibuja apagado y no recibe clic. Un boton que se ve activo y no responde es peor que
+/// uno apagado: el usuario cree que la app se colgo. Y uno pintado con el color de la accion
+/// principal, aunque este apagado, se sigue leyendo como la accion principal.
+pub fn boton_apagado(theme: &Theme, etiqueta: impl Into<SharedString>) -> AnyElement {
+    boton_apagado_con_icono(theme, None, etiqueta)
+}
+
+/// Un boton apagado con un icono adelante.
+pub fn boton_apagado_con_icono(
+    theme: &Theme,
+    nombre: Option<IconName>,
+    etiqueta: impl Into<SharedString>,
+) -> AnyElement {
+    let mut base = div()
+        .h(px(tokens::ALTO_CONTROL))
+        .px_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_size(px(tokens::LETRA_TITULO))
+        .text_color(theme.muted_foreground);
+    if let Some(nombre) = nombre {
+        base = base.child(icono(nombre, tokens::LETRA_ICONO, theme.muted_foreground));
+    }
+    base.child(etiqueta.into()).into_any_element()
+}
+
+/// Un boton de solo icono.
+pub fn boton_icono<F>(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    nombre: IconName,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let base = div()
+        .id(ElementId::Name(id.into()))
+        .w(px(tokens::ALTO_CONTROL))
+        .h(px(tokens::ALTO_CONTROL))
+        .rounded_lg()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(tokens::LETRA_ICONO))
+        .text_color(theme.muted_foreground)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.list_hover))
+        .child(nombre);
+    base.on_click(on_click).into_any_element()
+}
+
+/// Un boton de solo icono que no se puede tocar.
+pub fn boton_icono_apagado(theme: &Theme, nombre: IconName) -> AnyElement {
+    div()
+        .w(px(tokens::ALTO_CONTROL))
+        .h(px(tokens::ALTO_CONTROL))
+        .rounded_lg()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(tokens::LETRA_ICONO))
+        // El borde del tema, que es el tono mas tenue: un icono apagado tiene que leerse
+        // como apagado, no como un icono gris mas.
+        .text_color(theme.border)
+        .child(nombre)
+        .into_any_element()
+}
+
+/// Un icono del catalogo, con su tamano y su color.
+pub fn icono(nombre: IconName, tamano: f32, color: Hsla) -> AnyElement {
+    div()
+        .text_size(px(tamano))
+        .text_color(color)
+        .child(nombre)
+        .into_any_element()
 }
 
 /// La caja de un control segmentado: un fondo tenue con la opcion activa adentro.

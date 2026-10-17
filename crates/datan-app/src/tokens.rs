@@ -45,6 +45,8 @@ pub const LETRA_TITULO: f32 = 12.0;
 pub const LETRA_ETIQUETA: f32 = 12.0;
 /// Un conteo, una nota al pie, la leyenda.
 pub const LETRA_NOTA: f32 = 11.0;
+/// Un icono de control.
+pub const LETRA_ICONO: f32 = 16.0;
 
 // --- Paleta de series -----------------------------------------------------------------------
 
