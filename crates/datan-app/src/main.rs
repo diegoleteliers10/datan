@@ -109,6 +109,12 @@ struct Datan {
     search: Option<Entity<InputState>>,
     /// El rango de fechas activo en meses hacia atras. `None` es todo el historico.
     date_months: Option<u8>,
+    /// Las tablas abiertas en el panel Datos, por id.
+    expanded: Vec<ObjectId>,
+    /// Filas por tabla, para el contador del panel. `COUNT(*)` por tabla al conectar.
+    row_counts: std::collections::BTreeMap<ObjectId, i64>,
+    /// Cuando se consultaron los conteos, para el "actualizado hace X min".
+    counted_at: Option<i64>,
     /// Cuantas consultas costo el ultimo informe, y cuantos ms.
     stats: Option<String>,
     database: Option<String>,
@@ -137,6 +143,9 @@ impl Datan {
             formula: None,
             search: None,
             date_months: None,
+            expanded: Vec::new(),
+            row_counts: Default::default(),
+            counted_at: None,
             stats: None,
             database: None,
             scroll: UniformListScrollHandle::default(),
@@ -344,6 +353,15 @@ impl Datan {
                     Ok((model, report)) => {
                         view.selection = suggested(&model);
                         view.report = Some(report);
+                        // Las filas por tabla se cuentan al conectar, no en cada refresh:
+                        // el numero cambia muy despacio y el panel se dibuja en cada frame.
+                        // La primera tabla empieza abierta: una lista de campos vacia parece
+                        // un panel que no cargo.
+                        let tablas: Vec<ObjectId> =
+                            model.tables.iter().map(|t| t.id).collect();
+                        view.expanded = tablas.first().copied().into_iter().collect();
+                        view.counted_at = None;
+                        view.count_rows(cx);
 
                         // La conexion que funciono se recuerda. Un usuario que conecta
                         // siempre a la misma base no deberia buscarla cada vez: la lista
@@ -363,6 +381,35 @@ impl Datan {
                     Err(error) => view.state = State::Failed(error),
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Cuenta las filas de cada tabla para el panel Datos.
+    fn count_rows(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = self.report.as_ref().map(|r| r.model.clone()) else {
+            return;
+        };
+        let database = self
+            .database
+            .clone()
+            .unwrap_or_else(|| "datan_bench".to_string());
+        let tables: Vec<(ObjectId, String)> = model
+            .tables
+            .iter()
+            .map(|t| (t.id, t.name.clone()))
+            .collect();
+
+        cx.spawn(async move |this, cx| {
+            let counted = cx
+                .background_spawn(async move { count_rows(&tables, &database) })
+                .await;
+            _ = this.update(cx, |view, _cx| {
+                if let Ok(counts) = counted {
+                    view.row_counts = counts;
+                    view.counted_at = Some(epoch_now());
+                }
             });
         })
         .detach();
@@ -765,6 +812,83 @@ fn clear_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
 }
 
 /// Una pastilla de filtro activo. Pincharla quita el filtro.
+/// `COUNT(*)` por tabla, en el hilo de trabajo.
+///
+/// Una consulta por tabla y no un `UNION ALL` generado: el SQL tiene que poder fallar por
+/// tabla, y decir cual fallo es la mitad del diagnostico. Una tabla que falla cuenta 0 y no
+/// tumba el panel entero.
+fn count_rows(
+    tables: &[(ObjectId, String)],
+    database: &str,
+) -> Result<std::collections::BTreeMap<ObjectId, i64>, String> {
+    let engine = open_engine()?;
+    attach(&engine, database)?;
+    let mut out = std::collections::BTreeMap::new();
+    for (id, table) in tables {
+        // El mismo nombre que usa el motor: la tabla del modelo, con el calificador de la
+        // base adjunta. Sin comillas, una tabla con guion o palabra reservada da un error
+        // de sintaxis que parece del motor.
+        let sql = format!("SELECT COUNT(*) FROM pg.\"{}\"", table.replace('"', ""));
+        let Ok(batches) = engine.query_arrow(&sql) else {
+            out.insert(*id, 0);
+            continue;
+        };
+        let count = batches
+            .first()
+            .and_then(|batch| count_of(batch))
+            .unwrap_or(0);
+        out.insert(*id, count);
+    }
+    Ok(out)
+}
+
+/// El `COUNT(*)` de la primera columna de un lote.
+fn count_of(batch: &datan_storage::arrow::record_batch::RecordBatch) -> Option<i64> {
+    use datan_storage::arrow::array::{Array, Int64Array};
+    batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .map(|values| values.value(0))
+}
+
+/// Segundos desde la epoca, para el "actualizado hace 2 min".
+fn epoch_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|e| e.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Un numero con los puntos de miles, como los muestra la gente: 1.284.310.
+fn count_text(value: i64) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push('.');
+        }
+        out.push(ch);
+    }
+    if value < 0 {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
+/// "hace 2 min", para la cabecera del lienzo.
+fn ago_text(seconds: i64) -> String {
+    let minutes = seconds / 60;
+    match minutes {
+        0 => "hace instantes".to_string(),
+        1 => "hace 1 min".to_string(),
+        m if m < 60 => format!("hace {m} min"),
+        h if h < 24 => format!("hace {h} h"),
+        d => format!("hace {d} d"),
+    }
+}
+
 /// La ventana de `months` meses que termina HOY.
 ///
 /// `shift` conserva el TAMANO del rango que recibe, y un rango de un solo dia se desplaza a
@@ -1001,6 +1125,15 @@ impl Datan {
             .filter(|(t, c)| hit(&c.name, &query) || hit(&t.name, &query))
             .map(|(_, c)| c.id)
             .collect();
+        // Las tablas que aportan campos, la de hechos primero: es la que el informe agrupa
+        // y la primera que uno quiere ver abierta.
+        let mut tablas: Vec<&datan_model::Table> = model
+            .tables
+            .iter()
+            .filter(|t| connected(t))
+            .collect();
+        tablas.sort_by_key(|t| t.id != fact.unwrap_or(ObjectId(0)));
+
         let measures: Vec<ObjectId> = model
             .measures
             .iter()
@@ -1018,6 +1151,9 @@ impl Datan {
             .flex_col()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .px_3()
                     .py_2()
                     .border_b_1()
@@ -1026,6 +1162,13 @@ impl Datan {
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Datos"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{} tablas", tablas.len())),
                     ),
             )
             .child(
@@ -1063,9 +1206,9 @@ impl Datan {
                     .overflow_y_scrollbar()
                     .px_2()
                     .py_2()
-                    .child(self.render_sidebar_section("Dimensiones", &dimensions, false, &model, cx))
+                    .child(self.render_tables(&tablas, &dimensions, &model, &query, cx))
                     .child(self.render_sidebar_section("Medidas", &measures, true, &model, cx))
-                    .child(if query.is_empty() || !dimensions.is_empty() || !measures.is_empty() {
+                    .child(if query.is_empty() || !tablas.is_empty() || !measures.is_empty() {
                         div().into_any_element()
                     } else {
                         div()
@@ -1092,14 +1235,44 @@ impl Datan {
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
-            .py_2();
+            .px_4()
+            .pt_4()
+            .pb_2();
+        // El titulo de la pagina va arriba, con el nombre de la base como etiqueta y la
+        // ultima actualizacion al lado: uno tiene que saber que informe mira y de cuando
+        // son los numeros sin leer nada mas.
+        let mut page_header = div().flex().items_center().gap_2().flex_1();
+        page_header = page_header.child(
+            div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(theme.muted)
+                .text_size(px(12.0))
+                .child(
+                    self.database
+                        .clone()
+                        .unwrap_or_else(|| "sin base".to_string()),
+                ),
+        );
+        page_header = page_header.child(
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.muted_foreground)
+                .child(match self.counted_at {
+                    Some(at) => format!("Actualizado {}", ago_text(epoch_now() - at)),
+                    None => "Contando filas".to_string(),
+                }),
+        );
+        date_bar = date_bar.child(page_header);
+        date_bar = date_bar.child(div().w(px(16.0)));
         date_bar = date_bar.child(
             div()
-                .text_size(px(11.0))
-                .text_color(theme.muted_foreground)
-                .child("Rango"),
+                .text_size(px(18.0))
+                .font_weight(FontWeight::BOLD)
+                .child("Resumen de ventas"),
         );
+        date_bar = date_bar.child(div().flex_1());
         for months in [3u8, 6, 12] {
             let label = format!("{months}M");
             date_bar = date_bar.child(range_button(
@@ -1568,6 +1741,21 @@ impl Datan {
             cx.listener(|view, _event, _window, cx| view.refresh(cx)),
         ));
 
+        // Cuantos visuales hay ahora en el lienzo. Se cuenta lo que se PINTA, no lo que
+        // el informe podria pintar.
+        let con_filas = self.matrix.as_ref().is_some_and(|m| m.row_count() > 0);
+        let grafico_listo = con_filas
+            && !self.selection.dimensions.is_empty()
+            && !self.selection.measures.is_empty();
+        let visuales = match self.visual.as_str() {
+            "Tarjetas" => usize::from(!self.totals.is_empty()),
+            "Barras" => usize::from(grafico_listo),
+            "Tabla" => usize::from(con_filas),
+            _ => usize::from(!self.totals.is_empty())
+                + usize::from(grafico_listo)
+                + usize::from(con_filas),
+        };
+
         // --- Pestañas de paginas ---
         let tabs = div()
             .flex()
@@ -1584,14 +1772,24 @@ impl Datan {
                     .rounded_md()
                     .bg(theme.muted)
                     .text_size(px(12.0))
-                    .child("Informe"),
+                    .child("Resumen de ventas"),
             )
             .child(div().flex_1())
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(11.0))
                     .text_color(theme.muted_foreground)
-                    .child(self.stats.clone().unwrap_or_default()),
+                    // Cuantos visuales hay de verdad en el lienzo, no los que caben en
+                    // el papel. Con "Tarjetas" seleccionado son dos, aunque el informe tenga
+                    // ocho tipos disponibles.
+                    .child(format!(
+                        "{} visualizacion(es){}",
+                        visuales,
+                        match self.stats.clone() {
+                            Some(stats) => format!("  ·  {stats}"),
+                            None => String::new(),
+                        }
+                    )),
             );
 
         div()
@@ -1612,6 +1810,101 @@ impl Datan {
             )
             .child(tabs)
             .into_any_element()
+    }
+
+    /// El panel de Datos como lo ve el usuario: tablas con su conteo de filas, y dentro
+    /// los campos de cada una.
+    ///
+    /// Una lista plana de columnas obliga a recordar de que tabla era cada una. Con el
+    /// nombre de la tabla al lado, el conteo de filas se lee en el sitio donde se decide si
+    /// esa tabla sirve para algo.
+    fn render_tables(
+        &mut self,
+        tablas: &[&datan_model::Table],
+        dimensions: &[ObjectId],
+        model: &Model,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let mut list = div().flex_col();
+
+        for table in tablas {
+            // Con busqueda, una tabla se abre sola si tiene un campo que coincide: buscar
+            // "region" tiene que mostrar el campo, no una lista de tablas cerradas.
+            let auto = !query.is_empty()
+                && table.columns.iter().any(|c| hit(&c.name, query))
+                || hit(&table.name, query);
+            let open = self.expanded.contains(&table.id) || auto;
+            let count = self.row_counts.get(&table.id).copied();
+            let id = table.id;
+            let mut header = div()
+                .id(ElementId::Name(SharedString::from(format!("tbl-{id:?}"))))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.list_hover))
+                .child(
+                    div()
+                        .w(px(10.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.muted_foreground)
+                        .child(if open { "\u{25be}" } else { "\u{25b8}" }),
+                )
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(12.0))
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(table.name.clone()),
+                );
+            if let Some(count) = count {
+                header = header.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.muted_foreground)
+                        .child(count_text(count)),
+                );
+            }
+            list = list.child(header.on_click(cx.listener(move |view, _event, _window, cx| {
+                match view.expanded.iter().position(|t| *t == id) {
+                    Some(index) => {
+                        view.expanded.remove(index);
+                    }
+                    None => view.expanded.push(id),
+                }
+                cx.notify();
+            })));
+
+            if open {
+                for definition in &table.columns {
+                    let column = definition.id;
+                    let is_measure = false;
+                    let is_on = self.selection.dimensions.contains(&column);
+                    // Con busqueda activa, la tabla abierta solo muestra los campos que
+                    // coinciden: buscar "region" tiene que ENSEÑAR el campo Region.
+                    if !query.is_empty() && !hit(&definition.name, query) {
+                        continue;
+                    }
+                    list = list.child(sidebar_item(
+                        &theme,
+                        definition.name.clone(),
+                        is_on,
+                        column,
+                        is_measure,
+                        cx,
+                    ));
+                }
+            }
+        }
+
+        let _ = (dimensions, model);
+        list
     }
 
     fn render_sidebar_section(

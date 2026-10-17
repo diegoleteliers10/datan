@@ -995,3 +995,30 @@ en vez de un infinito.
 
 Sin rango activo no hay delta: el historico completo contra el historico completo un ano
 antes no es una variacion.
+
+## Fase UI-1 pasos 5 a 7: el panel Datos por tablas, cabecera del lienzo y pie
+
+Siguiendo el mockup de Lumen al detalle:
+
+Panel Datos:
+- Lista de TABLAS con su conteo de filas a la derecha, la de hechos primero. La tabla se
+  abre con el chevron y dentro estan sus campos. Una lista plana obligaba a recordar de que
+  tabla era cada columna.
+- `COUNT(*)` por tabla al conectar, no en cada refresh: el numero cambia muy despacio y el
+  panel se dibuja en cada frame. Una tabla que falla cuenta 0 y no tumba el panel entero.
+- Con busqueda activa una tabla se abre sola si tiene un campo que coincide, y solo se
+  muestran los campos que coinciden: buscar "region" tiene que ENSENAR el campo Region.
+- El modelo no guarda el esquema de la tabla, asi que el SQL del conteo usa la misma forma
+  que el motor: `pg."tabla"`. Sin comillas, una tabla con guion o palabra reservada da un
+  error de sintaxis que parece del motor.
+
+Cabecera del lienzo:
+- Nombre de la base como etiqueta, "Actualizado hace 2 min" al lado, titulo de la pagina en
+  grande y los botones de rango a la derecha. Con la base vacia dice "Contando filas" en vez
+  de una fecha que no existe.
+
+Pie:
+- Pestana con el nombre de la pagina y "N visualizacion(es)" mas las estadisticas del
+  informe. N es lo que se PINTA segun el visual activo, no los tipos disponibles.
+
+179 tests.
