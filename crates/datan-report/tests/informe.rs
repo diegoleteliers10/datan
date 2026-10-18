@@ -8,7 +8,7 @@
 use datan_dax_eval::FilterValue;
 use datan_model::{Measure, ObjectId};
 use datan_report::{Matrix, Report};
-use datan_testkit::{engine, model, Y2024};
+use datan_testkit::{engine, memory_source, model, Y2024};
 
 fn measure(id: &str) -> ObjectId {
     let model = model();
@@ -602,4 +602,107 @@ fn dos_medidas_iguales_dan_el_mismo_numero() {
         assert!(!segunda.is_empty(), "fila {row}: la segunda medida sale en blanco");
         assert_eq!(primera, segunda, "fila {row}: medidas iguales, numeros distintos");
     }
+}
+
+#[test]
+fn una_medida_con_calculate_da_el_total_junto_al_filtrado() {
+    // `Variacion` es `[Qty] - CALCULATE([Qty], ALL('dim_product'))`: el MISMO `SUM(qty)`
+    // dos veces, con distinto CONTEXTO. Es como se escribe una variacion contra el total.
+    //
+    // Fallaba dos veces. Sin forma para el `CALCULATE`, el plan emitia una columna por
+    // atomo y el informe pegaba la primera: la resta daba CERO. Y con la celda guardada en
+    // un mapa por ETIQUETA, las dos hojas se llamaban igual `SUM(qty)` y la segunda pisaba
+    // a la primera: tambien cero, sin error y sin aviso.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), measure("Variacion")]);
+    let source = memory_source();
+    let matrix = report
+        .execute(&engine().expect("motor"), Some(&source))
+        .expect("corre");
+
+    // Este, Norte y Sur, en orden. La segunda columna es la region menos el total 165.
+    let esperado = [
+        ("Este", 57.0, -108.0),
+        ("Norte", 60.0, -105.0),
+        ("Sur", 48.0, -117.0),
+    ];
+    assert_eq!(matrix.row_count(), esperado.len(), "tres regiones");
+    for (row, (region, qty, variacion)) in esperado.iter().enumerate() {
+        assert_eq!(matrix.cell(row, 0), Some(*region));
+        let q: f64 = matrix.cell(row, 1).unwrap().parse().unwrap();
+        let v: f64 = matrix.cell(row, 2).unwrap().parse().unwrap();
+        assert_eq!(q, *qty, "fila {region}: Qty");
+        assert_eq!(v, *variacion, "fila {region}: Variacion contra el total");
+    }
+}
+
+#[test]
+fn el_total_de_una_medida_con_calculate_no_ve_el_valor_de_grupo() {
+    // La tarjeta usa `evaluate_totals`, que es otro camino. Con la region filtrada, `Qty`
+    // da 60 y la variacion contra el total da -105. Si el `ALL` no llega a quitar el
+    // filtro, la resta vuelve a dar cero.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), measure("Variacion")])
+        .filtered_to(ObjectId(21), vec![FilterValue::Text("Norte".to_string())]);
+    let source = memory_source();
+    let totals = report
+        .totals(&engine().expect("motor"), Some(&source))
+        .expect("totales");
+
+    assert_eq!(totals[0], "60");
+    assert_eq!(totals[1], "-105");
+}
+
+#[test]
+fn un_iterador_tiene_forma_propia_y_no_copia_su_hoja() {
+    // `SUMX` cambia el grano y cae al interprete, y aun asi es UNA hoja. Sin forma, el
+    // informe pegaba la hoja en la columna de la medida; da la casualidad de que aqui la
+    // hoja y la medida no coinciden (el doble), asi que el numero delataba el error.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), measure("QtyDoble")]);
+    let source = memory_source();
+    let matrix = report
+        .execute(&engine().expect("motor"), Some(&source))
+        .expect("corre");
+
+    for row in 0..matrix.row_count() {
+        let qty: f64 = matrix.cell(row, 1).unwrap().parse().unwrap();
+        let doble: f64 = matrix.cell(row, 2).unwrap().parse().unwrap();
+        assert_eq!(
+            doble,
+            qty * 2.0,
+            "fila {}: el iterador duplica, no copia",
+            row
+        );
+    }
+}
+
+#[test]
+fn una_medida_sin_forma_da_error_y_no_el_valor_de_su_primera_hoja() {
+    // `ABS` no esta en la lista de escalares que los dos caminos saben calcular: la medida
+    // se queda sin forma. Antes el plan emitia una columna por atomo y `Cruda` mostraba el
+    // valor de `[Qty]`, sin error y sin aviso. Ahora el informe lo dice.
+    let model = model();
+    let report = Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Cruda")]);
+    let error = report
+        .execute(&engine().expect("motor"), None)
+        .expect_err("sin forma es un error");
+    assert!(
+        error.to_string().contains("Cruda"),
+        "el error nombra la medida: {error}"
+    );
+
+    // Y lo mismo para la tarjeta.
+    let totals = Report::new(model)
+        .with_dimensions(vec![])
+        .with_measures(vec![measure("Cruda")]);
+    assert!(totals.totals(&engine().expect("motor"), None).is_err());
 }

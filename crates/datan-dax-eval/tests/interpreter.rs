@@ -68,37 +68,37 @@ fn source() -> MemorySource {
     MemorySource::new()
         .with_column(
             FACT_QTY,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![Some(10), Some(20), None, Some(40)],
-            }),
+            },
         )
         .with_column(
             FACT_AMOUNT,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![Some(1000), Some(2000), None, Some(4000)],
-            }),
+            },
         )
         .with_column(
             FACT_PRODUCT_ID,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![Some(1), Some(2), Some(1), Some(3)],
-            }),
+            },
         )
         .with_column(
             PRODUCT_ID,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![Some(1), Some(2), Some(3)],
-            }),
+            },
         )
         .with_column(
             PRODUCT_REGION,
-            Box::new(TextColumn {
+            TextColumn {
                 values: vec![
                     Some("Norte".to_string()),
                     Some("Sur".to_string()),
                     Some("Norte".to_string()),
                 ],
-            }),
+            },
         )
         .with_table_length(FACT, 4)
         .with_table_length(PRODUCT, 3)
@@ -112,7 +112,12 @@ fn evaluate(expression: &str, filters: &FilterContext, grouping: &[ObjectId]) ->
     let result = interpreter
         .evaluate_cell(&atoms.atoms, filters)
         .expect("interpreta");
-    let mut values: Vec<(String, Scalar)> = result.values.into_iter().collect();
+    let mut values: Vec<(String, Scalar)> = atoms
+        .atoms
+        .iter()
+        .zip(&result.values)
+        .map(|(atom, value)| (atom.label.clone(), value.clone()))
+        .collect();
     values.sort_by(|a, b| a.0.cmp(&b.0));
     values
 }
@@ -164,9 +169,9 @@ fn un_solo_blank_no_cuenta_como_valor_distinto() {
     let source = MemorySource::new()
         .with_column(
             FACT_QTY,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![Some(5), None, None],
-            }),
+            },
         )
         .with_table_length(FACT, 3)
         .with_table_length(PRODUCT, 0);
@@ -181,7 +186,7 @@ fn un_solo_blank_no_cuenta_como_valor_distinto() {
     let result = interpreter
         .evaluate_cell(&atoms.atoms, &FilterContext::empty())
         .expect("interpreta");
-    assert_eq!(result.number("DISTINCTCOUNT(Qty)"), Some(1.0));
+    assert_eq!(result.get(0), Some(&Scalar::Integer(1)));
 }
 
 #[test]
@@ -211,9 +216,9 @@ fn average_sin_valores_es_blank_no_cero() {
     let source = MemorySource::new()
         .with_column(
             FACT_QTY,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![None, None],
-            }),
+            },
         )
         .with_table_length(FACT, 2)
         .with_table_length(PRODUCT, 0);
@@ -228,7 +233,7 @@ fn average_sin_valores_es_blank_no_cero() {
     let result = interpreter
         .evaluate_cell(&atoms.atoms, &FilterContext::empty())
         .expect("interpreta");
-    assert_eq!(result.get("AVERAGE(Qty)"), Some(&Scalar::Blank));
+    assert_eq!(result.get(0), Some(&Scalar::Blank));
 }
 
 #[test]

@@ -91,8 +91,12 @@ pub trait ColumnView: Send + Sync {
 }
 
 /// Un origen de datos: columnas por su id del modelo.
+///
+/// `column` devuelve un `Arc`, no una referencia: un origen sobre DuckDB materializa la
+/// columna la primera vez y la sirve cacheada, y un `Arc` es lo unico que sobrevive al
+/// candado del cache. Para `MemorySource` es un clon de puntero.
 pub trait DataSource {
-    fn column(&self, column: ObjectId) -> Option<&dyn ColumnView>;
+    fn column(&self, column: ObjectId) -> Option<std::sync::Arc<dyn ColumnView>>;
     /// El numero de filas de la tabla a la que pertenece la columna.
     fn table_len(&self, table: ObjectId) -> usize;
 }
@@ -326,18 +330,21 @@ fn binary_numbers(left: &Scalar, right: &Scalar, op: BinaryOp) -> Scalar {
 }
 
 /// El resultado de evaluar un conjunto de atomos en una celda de grupo.
+///
+/// Es una LISTA en el orden de la tanda de atomos, no un mapa por etiqueta. Dos atomos pueden
+/// compartir etiqueta y tener distinto CONTEXTO: `[Qty]` y `CALCULATE([Qty], ALL(...))` son
+/// los dos `SUM(qty)`. Con la clave en la etiqueta el segundo pisaba al primero y la medida
+/// `[Qty] - CALCULATE([Qty], ALL('dim_product'))` daba CERO en vez del total, sin error.
+/// Esa resta es la variacion interanual, que es la medida de negocio mas comun que hay.
 #[derive(Debug, Clone, Default)]
 pub struct CellResult {
-    pub values: HashMap<String, Scalar>,
+    pub values: Vec<Scalar>,
 }
 
 impl CellResult {
-    pub fn get(&self, label: &str) -> Option<&Scalar> {
-        self.values.get(label)
-    }
-
-    pub fn number(&self, label: &str) -> Option<f64> {
-        self.values.get(label).map(Scalar::as_number)
+    /// El valor del atomo que ocupa la posicion `index` de la misma tanda.
+    pub fn get(&self, index: usize) -> Option<&Scalar> {
+        self.values.get(index)
     }
 }
 
@@ -781,7 +788,7 @@ impl<'a> Interpreter<'a> {
             // la celda: un `CALCULATE` con modificadores lo cambia.
             let atom_context = context.clone();
             let value = self.evaluate_atom(atom, &atom_context)?;
-            result.values.insert(atom.label.clone(), value);
+            result.values.push(value);
         }
         Ok(result)
     }
@@ -865,15 +872,11 @@ impl<'a> Interpreter<'a> {
                     // ellos.
                     Some(_) => {
                         for output in outputs {
-                            cells.push(self.eval_shape(&output.shape, atoms, &cell.values));
+                            cells.push(self.eval_shape(&output.shape, &cell.values));
                         }
                     }
-                    // Sin forma: una columna por atomo, que es lo de siempre.
-                    None => {
-                        for atom in atoms {
-                            cells.push(cell.get(&atom.label).cloned().unwrap_or(Scalar::Blank));
-                        }
-                    }
+                    // Sin forma: una columna por atomo. El orden es el de la tanda.
+                    None => cells.extend(cell.values.iter().cloned()),
                 }
                 rows.push(cells);
             }
@@ -895,25 +898,16 @@ impl<'a> Interpreter<'a> {
     ///
     /// Una hoja que no esta en la celda es BLANK, y `BLANK + algo` es BLANK. Es la
     /// propagacion de DAX: una medida que necesita una hoja vacia no vale cero, vale nada.
-    fn eval_shape(
-        &self,
-        shape: &Shape,
-        atoms: &[Atom],
-        values: &std::collections::HashMap<String, Scalar>,
-    ) -> Scalar {
+    fn eval_shape(&self, shape: &Shape, values: &[Scalar]) -> Scalar {
         match shape {
             Shape::Number(value) => number_to_scalar(*value),
-            // La forma guarda el INDICE de la hoja, y el mapa de la celda guarda la
-            // ETIQUETA. Sin el indice no habria forma de WHICH hoja es, y con dos hojas de la
-            // misma etiqueta y distinto contexto se devolveria la equivocada.
-            Shape::Atom(index) => atoms
-                .get(*index)
-                .and_then(|atom| values.get(&atom.label))
-                .cloned()
-                .unwrap_or(Scalar::Blank),
+            // La forma guarda el INDICE de la hoja, y es el indice del atomo en la tanda. La
+            // etiqueta no sirve como clave: dos atomos con la misma etiqueta y distinto
+            // contexto son dos hojas distintas.
+            Shape::Atom(index) => values.get(*index).cloned().unwrap_or(Scalar::Blank),
             Shape::Binary { op, left, right } => {
-                let left = self.eval_shape(left, atoms, values);
-                let right = self.eval_shape(right, atoms, values);
+                let left = self.eval_shape(left, values);
+                let right = self.eval_shape(right, values);
                 if is_boolean_op(*op) {
                     return boolean_values(&left, &right, *op);
                 }
@@ -923,10 +917,7 @@ impl<'a> Interpreter<'a> {
             // toma la rama falsa, y `DIVIDE` con denominador cero da BLANK, igual que la
             // division binaria: los dos caminos tienen que decir lo mismo.
             Shape::Call { name, args } => {
-                let args: Vec<Scalar> = args
-                    .iter()
-                    .map(|arg| self.eval_shape(arg, atoms, values))
-                    .collect();
+                let args: Vec<Scalar> = args.iter().map(|arg| self.eval_shape(arg, values)).collect();
                 call_scalar(name, &args)
             }
         }
@@ -971,24 +962,37 @@ impl<'a> Interpreter<'a> {
     ) -> Result<CellResult, InterpError> {
         // El contexto de celda se propaga UNA vez por celda y se une con el del atomo.
         //
-        // `evaluate_atom` usa el contexto del ATOMO y descarta el de la celda, y esa regla
-        // es correcta para un `CALCULATE` con modificadores: el `ALL` quiere vaciar el
-        // contexto y usar el de la celda lo reintroduce. Para la agrupacion es al reves: el
-        // filtro de grupo es una restriccion que el atomo no puede conocer, asi que se le
-        // SUMA al suyo.
+        // Para un atomo SIN modificadores la union es la regla: el filtro de grupo es una
+        // restriccion que el atomo no puede conocer, asi que se le SUMA al suyo. Sin esta
+        // union, `SUM(Qty)` agrupado por region devuelve el total en cada fila.
         //
-        // Sin esta union, `SUM(Qty)` agrupado por region devuelve el total en cada fila.
+        // Para un atomo CON modificadores la regla es la de `CALCULATE`: se parte del
+        // contexto de celda y los modificadores se aplican ENCIMA. Un `ALL('dim_product')`
+        // tiene que poder QUITAR el valor de grupo de la fila, y la union se lo devolvia.
         let cell = &context.propagate(self.model);
         let mut result = CellResult::default();
         for atom in atoms {
             let merged = Atom {
-                context: atom.context.union(cell),
+                context: self.atom_context(atom, cell)?,
                 ..atom.clone()
             };
             let value = self.evaluate_atom(&merged, cell)?;
-            result.values.insert(atom.label.clone(), value);
+            result.values.push(value);
         }
         Ok(result)
+    }
+
+    /// El contexto con el que se evalua un atomo dentro de una celda.
+    fn atom_context(
+        &self,
+        atom: &Atom,
+        cell: &FilterContext,
+    ) -> Result<FilterContext, InterpError> {
+        if atom.modifiers.is_empty() {
+            return Ok(atom.context.union(cell));
+        }
+        crate::modifiers::apply_modifiers(self.model, cell, &atom.modifiers)
+            .map_err(|error| InterpError::Unsupported(error.to_string()))
     }
 
     /// Los valores distintos de una columna, en un orden estable.
@@ -1035,22 +1039,20 @@ impl<'a> Interpreter<'a> {
         let mut result = CellResult::default();
         for atom in atoms {
             let merged = Atom {
-                context: atom.context.union(&propagated),
+                context: self.atom_context(atom, &propagated)?,
                 ..atom.clone()
             };
             let value = self.evaluate_atom(&merged, &propagated)?;
-            result.values.insert(atom.label.clone(), value);
+            result.values.push(value);
         }
 
         Ok(match outputs.first() {
             Some(_) => outputs
                 .iter()
-                .map(|output| self.eval_shape(&output.shape, atoms, &result.values))
+                .map(|output| self.eval_shape(&output.shape, &result.values))
                 .collect(),
-            None => atoms
-                .iter()
-                .map(|atom| result.get(&atom.label).cloned().unwrap_or(Scalar::Blank))
-                .collect(),
+            // Sin forma: una columna por atomo, en el orden de la tanda.
+            None => result.values.clone(),
         })
     }
 
@@ -1075,7 +1077,7 @@ impl<'a> Interpreter<'a> {
             let Some(view) = self.source.column(column.id) else {
                 continue;
             };
-            rows.retain(|row| filters.iter().all(|filter| self.matches(view, *row, filter)));
+            rows.retain(|row| filters.iter().all(|filter| self.matches(view.as_ref(), *row, filter)));
         }
         rows
     }
@@ -1127,7 +1129,7 @@ impl<'a> Interpreter<'a> {
                         let Some(inner_view) = self.source.column(inner.column) else {
                             return false;
                         };
-                        self.matches(inner_view, candidate_row, inner)
+                        self.matches(inner_view.as_ref(), candidate_row, inner)
                     })
                 })
             }
@@ -1285,7 +1287,7 @@ impl ColumnView for TextColumn {
 
 /// Un origen en memoria. Un `HashMap` de columna a vista.
 pub struct MemorySource {
-    columns: HashMap<ObjectId, Box<dyn ColumnView>>,
+    columns: HashMap<ObjectId, std::sync::Arc<dyn ColumnView>>,
     table_lengths: HashMap<ObjectId, usize>,
 }
 
@@ -1297,8 +1299,8 @@ impl MemorySource {
         }
     }
 
-    pub fn with_column(mut self, id: ObjectId, view: Box<dyn ColumnView>) -> Self {
-        self.columns.insert(id, view);
+    pub fn with_column(mut self, id: ObjectId, view: impl ColumnView + 'static) -> Self {
+        self.columns.insert(id, std::sync::Arc::new(view));
         self
     }
 
@@ -1315,8 +1317,8 @@ impl Default for MemorySource {
 }
 
 impl DataSource for MemorySource {
-    fn column(&self, column: ObjectId) -> Option<&dyn ColumnView> {
-        self.columns.get(&column).map(|view| view.as_ref())
+    fn column(&self, column: ObjectId) -> Option<std::sync::Arc<dyn ColumnView>> {
+        self.columns.get(&column).cloned()
     }
 
     fn table_len(&self, table: ObjectId) -> usize {

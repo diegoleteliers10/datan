@@ -74,27 +74,27 @@ fn source() -> MemorySource {
     MemorySource::new()
         .with_column(
             FACT_QTY,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![
                     Some(10), Some(20), Some(30), Some(40), Some(50), Some(60),
                 ],
-            }),
+            },
         )
         .with_column(
             FACT_PRODUCT_ID,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![Some(1), Some(2), Some(3), Some(4), Some(5), Some(6)],
-            }),
+            },
         )
         .with_column(
             PRODUCT_ID,
-            Box::new(IntColumn {
+            IntColumn {
                 values: vec![Some(1), Some(2), Some(3), Some(4), Some(5), Some(6)],
-            }),
+            },
         )
         .with_column(
             PRODUCT_REGION,
-            Box::new(TextColumn {
+            TextColumn {
                 values: vec![
                     Some("Norte".to_string()),
                     Some("Sur".to_string()),
@@ -103,11 +103,11 @@ fn source() -> MemorySource {
                     Some("Sur".to_string()),
                     Some("Este".to_string()),
                 ],
-            }),
+            },
         )
         .with_column(
             PRODUCT_CATEGORY,
-            Box::new(TextColumn {
+            TextColumn {
                 values: vec![
                     Some("A".to_string()),
                     Some("A".to_string()),
@@ -116,7 +116,7 @@ fn source() -> MemorySource {
                     Some("A".to_string()),
                     Some("B".to_string()),
                 ],
-            }),
+            },
         )
         .with_table_length(FACT, 6)
         .with_table_length(PRODUCT, 6)
@@ -132,7 +132,12 @@ fn run(expression: &str, filters: &FilterContext) -> (Vec<(String, Scalar)>, boo
     let result = interpreter
         .evaluate_cell(&atoms.atoms, filters)
         .expect("interpreta");
-    let mut values: Vec<(String, Scalar)> = result.values.into_iter().collect();
+    let mut values: Vec<(String, Scalar)> = atoms
+        .atoms
+        .iter()
+        .zip(&result.values)
+        .map(|(atom, value)| (atom.label.clone(), value.clone()))
+        .collect();
     values.sort_by(|a, b| a.0.cmp(&b.0));
     (values, needs_interpreter)
 }
@@ -168,6 +173,45 @@ fn all_sin_argumento_quita_todos_los_filtros() {
         .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, _) = run("CALCULATE([Qty], ALL())", &filters);
     assert_eq!(values[0].1, Scalar::Integer(210));
+}
+
+#[test]
+fn all_de_la_dimension_quita_el_valor_de_grupo() {
+    // Agrupado por region, `CALCULATE([Qty], ALL('dim_product'))` vale el TOTAL en cada
+    // fila. El valor de grupo solo vive en el contexto de CELDA, y un atomo con
+    // modificadores parte de la celda y aplica sus modificadores ENCIMA. Uniendo los dos
+    // contextos, la union le devolvia al `ALL` el filtro que acaba de quitar: la fila de
+    // Norte mostraba 40 en vez de 210.
+    let model = model();
+    let atoms = extract_atoms(
+        "CALCULATE([Qty], ALL('dim_product'))",
+        &model,
+        &FilterContext::empty(),
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+    assert!(!atoms.outputs.is_empty(), "un CALCULATE tiene forma");
+
+    let src = source();
+    let interpreter = Interpreter::new(&model, &src);
+    let grouped = interpreter
+        .evaluate_grouped(
+            &atoms.atoms,
+            &atoms.outputs,
+            &FilterContext::empty(),
+            &[PRODUCT_REGION],
+            100,
+        )
+        .expect("agrupa");
+
+    assert_eq!(grouped.rows.len(), 3, "Este, Norte y Sur");
+    for row in &grouped.rows {
+        assert_eq!(
+            row[1],
+            Scalar::Integer(210),
+            "el ALL quita tambien el valor de grupo de la fila"
+        );
+    }
 }
 
 #[test]

@@ -91,6 +91,7 @@ pub fn extract_atoms(
         depth: 0,
         unsupported: Vec::new(),
         measure_hops: 0,
+        pending_modifiers: Vec::new(),
     };
     // Primero se intenta la forma: una medida que es aritmetica entre agregaciones produce
     // una columna de salida, no una lista plana.
@@ -153,6 +154,12 @@ fn shape_label(expr: &CheckedExpr) -> String {
         CheckedExpr::Measure { name, .. } => name.clone(),
         CheckedExpr::Column { name, .. } => name.clone(),
         CheckedExpr::Number { value, .. } => value.to_string(),
+        // Un `CALCULATE` lleva sus modificadores en la etiqueta: dos medidas con el mismo
+        // cuerpo y distinto `ALL` dan numeros distintos y no pueden compartir clave de plan.
+        CheckedExpr::Calculate { args, .. } => {
+            let inner: Vec<String> = args.iter().map(shape_label).collect();
+            format!("CALCULATE({})", inner.join(", "))
+        }
         // La etiqueta de una variable es la de su cuerpo: el nombre local no distingue una
         // medida de otra, y dos medidas con el mismo cuerpo no pueden compartir etiqueta si
         // el cuerpo es distinto.

@@ -173,6 +173,25 @@ pub fn model() -> Model {
             // la medida: el valor de `[Qty]`, sin error y sin aviso.
             Measure::new(ObjectId(104), "Ratio", "DIVIDE([Qty], [Amount])"),
             Measure::new(ObjectId(105), "Condicional", "IF([Qty] > 50, [Qty], 0)"),
+            // Un `CALCULATE` en el nivel superior, junto a la medida pelada. Es la forma
+            // exacta de una variacion contra el total: el mismo `SUM(qty)` dos veces, con
+            // distinto CONTEXTO. Sin forma propia y con la celda indexada por etiqueta, la
+            // segunda hoja pisaba a la primera y la resta daba CERO.
+            Measure::new(
+                ObjectId(106),
+                "Variacion",
+                "[Qty] - CALCULATE([Qty], ALL('dim_product'))",
+            ),
+            // Un iterador en el nivel superior. Cambia el grano y cae al interprete, y aun
+            // asi es UNA hoja: la agregacion sobre la expresion.
+            Measure::new(
+                ObjectId(107),
+                "QtyDoble",
+                "SUMX('fact_sales', 'fact_sales'[qty] * 2)",
+            ),
+            // Una funcion que NINGUNO de los dos caminos sabe calcular. No tiene forma, y
+            // el informe tiene que decirlo en vez de pegar la primera hoja en su columna.
+            Measure::new(ObjectId(108), "Cruda", "ABS([Qty])"),
         ],
         relationships: vec![
             Relationship {
@@ -273,23 +292,23 @@ pub fn memory_source() -> MemorySource {
     }
 
     MemorySource::new()
-        .with_column(FACT_QTY, Box::new(IntColumn { values: qty }))
-        .with_column(FACT_DAY, Box::new(DateColumn { values: day }))
-        .with_column(DATE_DAY, Box::new(DateColumn { values: date_days }))
+        .with_column(FACT_QTY, IntColumn { values: qty })
+        .with_column(FACT_DAY, DateColumn { values: day })
+        .with_column(DATE_DAY, DateColumn { values: date_days })
         .with_column(
             ObjectId(31),
-            Box::new(DateColumn {
+            DateColumn {
                 values: date_weekdays,
-            }),
+            },
         )
-        .with_column(FACT_AMOUNT, Box::new(IntColumn { values: amount }))
+        .with_column(FACT_AMOUNT, IntColumn { values: amount })
         .with_column(
             FACT_PRODUCT_ID,
-            Box::new(IntColumn { values: product_ids }),
+            IntColumn { values: product_ids },
         )
-        .with_column(PRODUCT_ID, Box::new(IntColumn { values: product_id }))
-        .with_column(PRODUCT_REGION, Box::new(TextColumn { values: region }))
-        .with_column(PRODUCT_CATEGORY, Box::new(TextColumn { values: category }))
+        .with_column(PRODUCT_ID, IntColumn { values: product_id })
+        .with_column(PRODUCT_REGION, TextColumn { values: region })
+        .with_column(PRODUCT_CATEGORY, TextColumn { values: category })
         .with_table_length(FACT, 40)
         .with_table_length(PRODUCT, 6)
 }
@@ -395,12 +414,7 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
     let interp_value = interpreter
         .evaluate_cell(&atoms.atoms, &context)
         .ok()
-        .and_then(|result| {
-            atoms
-                .atoms
-                .first()
-                .and_then(|atom| result.get(&atom.label).cloned())
-        });
+        .and_then(|result| result.get(0).cloned());
 
     // El camino SQL devuelve texto, el interprete devuelve `Scalar`. La comparacion
     // numerica sobre el texto parseado evita los falsos negativos de tipo: `SUM` de un

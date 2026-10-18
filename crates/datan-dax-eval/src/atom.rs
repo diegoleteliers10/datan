@@ -15,6 +15,7 @@ use datan_dax_syntax::{BinaryOp, UnaryOp};
 use datan_model::{Model, ObjectId};
 
 use crate::filter::FilterContext;
+use crate::modifiers::Modifier;
 
 /// Como se agrega una columna.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,14 @@ pub struct Atom {
     /// El atomo se genero bajo un `CALCULATE` con modificadores. El conjunto de filtros
     /// cambia de forma no uniforme y no se puede bajar a un agregado de SQL.
     pub requires_interpreter: bool,
+    /// Los modificadores de `CALCULATE` ya resueltos, en orden.
+    ///
+    /// No son decoracion: deciden el CONTEXTO de evaluacion. Un atomo sin modificadores se
+    /// evalua con `contexto del atomo UNIDO al de la celda`; uno con modificadores parte del
+    /// contexto de CELDA y se los aplica encima, que es la regla de DAX. Con la union, un
+    /// `ALL('dim_product')` agrupado por region devolvia el valor de la region y no el total:
+    /// la union le devolvia el filtro que el `ALL` habia quitado.
+    pub modifiers: Vec<Modifier>,
 }
 
 impl Atom {
@@ -215,6 +224,13 @@ pub(crate) struct Extractor<'a> {
     /// medida no cambia el grano, y un `Margin` que referencia `[Revenue]` dos veces ya
     /// gasta dos saltos sin que haya nada anidado.
     pub(crate) measure_hops: usize,
+    /// Modificadores del `CALCULATE` que se esta recorriendo, en orden de aplicacion.
+    ///
+    /// Los estampa `emit` en cada atomo que nace dentro del cuerpo. Es lo que distingue dos
+    /// hojas con la MISMA etiqueta y el MISMO contexto efectivo: en un modelo sin filtros,
+    /// `[Qty]` y `CALCULATE([Qty], ALL('dim_product'))` son los dos `SUM(qty)` con contexto
+    /// vacio, y la deduplicacion los fundia en uno. La resta contra el total daba cero.
+    pub(crate) pending_modifiers: Vec<Modifier>,
 }
 
 
@@ -274,9 +290,16 @@ impl Extractor<'_> {
                     return self.scalar_call(name, args, context);
                 };
                 // Los iteradores cambian de verdad el grano: `SUMX(VALUES(A), ...)`
-                // recalcula por fila. No tienen forma sobre atomos y van al interprete.
+                // recalcula por fila. Igual son UNA hoja: la agregacion sobre la
+                // expresion. Antes no tenian forma, la medida caia al camino viejo y el
+                // informe pegaba la primera hoja en la columna de la medida.
                 if matches!(kind, AtomKind::Expression) {
-                    return None;
+                    let before = self.atoms.len();
+                    self.extract_iterator(name, args, context).ok()?;
+                    if self.atoms.len() == before {
+                        return None;
+                    }
+                    return Some(Shape::Atom(before));
                 }
                 let argument = args.first()?;
                 let before = self.atoms.len();
@@ -288,11 +311,20 @@ impl Extractor<'_> {
                     return Some(Shape::Atom(before));
                 }
                 // No se anadio nada: la hoja ya existia. Se busca por etiqueta y contexto,
-                // porque `SUM(Qty)` con dos filtros distintos son dos hojas.
+                // porque `SUM(Qty)` con dos filtros distintos son dos hojas. Los
+                // modificadores entran en la comparacion por la misma razon.
                 Some(Shape::Atom(self.atoms.iter().position(|atom| {
-                    atom.label == label && atom.context == *context && atom.kind == kind
+                    atom.label == label
+                        && atom.context == *context
+                        && atom.kind == kind
+                        && atom.modifiers == self.pending_modifiers
                 })?))
             }
+
+            // `CALCULATE` no llega como `Call`: el chequeo lo emite como `Calculate`, porque
+            // sus modificadores tienen semantica propia. Su cuerpo bajo el contexto
+            // MODIFICADO si tiene forma.
+            CheckedExpr::Calculate { args, .. } => self.calculate_shape(args, context),
 
             CheckedExpr::Measure { measure, .. } => {
                 let definition = self.model.measures.iter().find(|m| m.id == *measure)?;
@@ -322,6 +354,64 @@ impl Extractor<'_> {
 
             _ => None,
         }
+    }
+
+    /// La forma de un `CALCULATE`: la de su cuerpo bajo el contexto ya modificado.
+    ///
+    /// Es lo que ya hace `extract_calculate`, con una diferencia: devuelve la FORMA en vez de
+    /// dejar la lista plana. `CALCULATE([Qty], ALL('dim_product'))` vale lo que `SUM(qty)` sin
+    /// el filtro de la dimension, y eso es una hoja con su contexto. Sin este caso la medida
+    /// quedaba sin forma y el informe pegaba la primera hoja en su columna.
+    ///
+    /// Un modificador que no se resuelve a un filtro concreto devuelve `None`, y entonces el
+    /// camino es el viejo: `extract` vuelve a correr y reporta el error. No se pierde el
+    /// filtro en silencio.
+    fn calculate_shape(
+        &mut self,
+        args: &[CheckedExpr],
+        context: &FilterContext,
+    ) -> Option<Shape> {
+        let body = args.first()?;
+        let mut effective = context.clone();
+        let mut resolved = Vec::new();
+        for modifier in &args[1..] {
+            let modifier = crate::modifiers::resolve_modifier(modifier).ok()?;
+            effective = crate::modifiers::apply_modifiers(
+                self.model,
+                &effective,
+                std::slice::from_ref(&modifier),
+            )
+            .ok()?;
+            resolved.push(modifier);
+        }
+
+        let before = self.atoms.len();
+        // Los modificadores viajan con el atomo desde que nace, estampados por `emit`.
+        // Se APILAN: un CALCULATE dentro de otro aplica los de fuera y luego los de
+        // dentro, que es el orden con el que `apply_modifiers` los re-aplicara sobre la
+        // celda. Sin el apilado, el cuerpo de un CALCULATE interior perderia los de fuera.
+        let saved = std::mem::take(&mut self.pending_modifiers);
+        self.pending_modifiers = saved
+            .iter()
+            .chain(resolved.iter())
+            .cloned()
+            .collect();
+        let shape = self.shape_of(body, &effective);
+        self.pending_modifiers = saved;
+        let shape = shape?;
+        // Un `CALCULATE` con modificadores no baja a SQL: cambia el filtro de forma no
+        // uniforme. La marca manda la medida al interprete.
+        if !resolved.is_empty() {
+            for atom in &mut self.atoms[before..] {
+                atom.requires_interpreter = true;
+            }
+        }
+        // Los modificadores tambien se recorren, igual que en `extract_calculate`: un
+        // `KEEPFILTERS` lleva una expresion dentro.
+        for modifier in &args[1..] {
+            self.extract(modifier, context).ok()?;
+        }
+        Some(shape)
     }
 
     /// La forma de una funcion escalar sobre las formas de sus argumentos.
@@ -373,7 +463,10 @@ impl Extractor<'_> {
         label: &str,
     ) -> Result<(), crate::EvalError> {
         let exists = self.atoms.iter().any(|atom| {
-            atom.label == *label && atom.context == *context && atom.kind == kind
+            atom.label == *label
+                && atom.context == *context
+                && atom.kind == kind
+                && atom.modifiers == self.pending_modifiers
         });
         if exists {
             return Ok(());
@@ -509,15 +602,19 @@ impl Extractor<'_> {
         args: &[CheckedExpr],
         context: &FilterContext,
     ) -> Result<(), crate::EvalError> {
-        if args.len() < 2 {
+        // El chequeo deja el iterador con UN argumento: el cuerpo, ya en contexto de fila.
+        // La tabla queda en `table_expr`, y el ancla del atomo sale de las columnas del
+        // cuerpo. Antes se esperaban dos argumentos y con uno el atomo no salia NUNCA: una
+        // medida `SUMX` se quedaba sin hojas y sin salida, sin error.
+        let Some(body) = args.first() else {
             return Ok(());
-        }
+        };
         // El atomo es la agregacion sobre la expresion del iterador. Se emite con `depth`
         // incrementado, asi que si el iterador esta dentro de otro atomo, el interno queda
         // marcado como `Finer` y cae al interprete.
         let kind = aggregation_of(name).unwrap_or(AtomKind::Expression);
         self.depth += 1;
-        self.emit(kind, &args[1], context, name)?;
+        self.emit(kind, body, context, name)?;
         self.depth -= 1;
         Ok(())
     }
@@ -560,7 +657,13 @@ impl Extractor<'_> {
         }
 
         let before = self.atoms.len();
+        // Los modificadores viajan con el atomo desde que nace, estampados por `emit`.
+        // Se APILAN, igual que en `calculate_shape`: los de fuera primero, los de dentro
+        // despues.
+        let saved = std::mem::take(&mut self.pending_modifiers);
+        self.pending_modifiers = saved.iter().chain(resolved.iter()).cloned().collect();
         self.extract(&args[0], &effective)?;
+        self.pending_modifiers = saved;
         if !resolved.is_empty() {
             for atom in &mut self.atoms[before..] {
                 atom.requires_interpreter = true;
@@ -571,7 +674,6 @@ impl Extractor<'_> {
         }
         Ok(())
     }
-
 
     fn emit(
         &mut self,
@@ -619,6 +721,7 @@ impl Extractor<'_> {
             granularity,
             label,
             requires_interpreter: false,
+            modifiers: self.pending_modifiers.clone(),
         });
         Ok(())
     }

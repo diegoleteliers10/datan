@@ -46,6 +46,8 @@ pub enum ReportError {
     NoFactTable,
     #[error("`{measure}` necesita el interprete y no hay origen de datos en el informe")]
     NoSource { measure: String },
+    #[error("la medida `{measure}` usa una funcion que el motor no sabe calcular todavia")]
+    NoShape { measure: String },
     #[error("fallo la consulta del informe: {0}")]
     Query(String),
     #[error("el interprete fallo: {0}")]
@@ -206,6 +208,9 @@ impl Report {
 
         let mut out = vec![String::new(); self.measures.len()];
         for (atoms, members) in &plans {
+            if atoms.outputs.is_empty() {
+                return Err(self.no_shape(members));
+            }
             let values: Vec<String> = if atoms.needs_interpreter() {
                 let src = source.ok_or_else(|| ReportError::NoSource {
                     measure: members
@@ -278,6 +283,18 @@ impl Report {
         Ok(self.plans()?.len())
     }
 
+    /// El error de una medida sin forma, con el nombre de la primera del grupo.
+    fn no_shape(&self, members: &[usize]) -> ReportError {
+        ReportError::NoShape {
+            measure: members
+                .first()
+                .and_then(|index| self.measures.get(*index))
+                .and_then(|id| self.measure_name(*id))
+                .unwrap_or("?")
+                .to_string(),
+        }
+    }
+
     /// Agrupa las medidas por consulta.
     ///
     /// Dos medidas comparten consulta solo si comparten las hojas Y la forma de salida. Las
@@ -331,13 +348,17 @@ impl Report {
         let mut rows: Vec<Vec<String>> = Vec::new();
 
         for (atoms, members) in &plans {
+            // Sin forma no hay valor que pegar. El camino viejo emitia una columna por atomo
+            // y pegaba la primera en la columna de la medida: `ABS([Qty])` mostraba el valor
+            // de `SUM(qty)`, sin error y sin aviso. Con forma, `CALCULATE`, los iteradores y
+            // las escalares registradas si tienen la suya; sin ella, el informe dice que no
+            // sabe calcular esa medida.
+            if atoms.outputs.is_empty() {
+                return Err(self.no_shape(members));
+            }
             // Cada plan trae las dimensiones primero y despues SUS PROPIAS medidas. El
             // numero de columnas de medida es el de `members`, que puede ser uno o varios.
-            let measure_columns = if atoms.outputs.is_empty() {
-                atoms.atoms.len()
-            } else {
-                atoms.outputs.len()
-            };
+            let measure_columns = atoms.outputs.len();
             let produced = self.dimensions.len() + measure_columns;
 
             let cells = if atoms.needs_interpreter() {
