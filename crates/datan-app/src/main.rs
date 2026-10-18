@@ -30,7 +30,7 @@ mod tokens;
 
 use components::Peso;
 use config::Connections;
-use datan_report::{Header, Matrix, Report};
+use datan_report::{Header, Matrix, Report, source::DuckSource};
 use datan_storage::Engine;
 
 use gpui_kit::component::input::{Input, InputState};
@@ -957,13 +957,17 @@ fn run_report(
     let engine = open_engine()?;
     attach(&engine, &database)?;
 
-    let matrix = report.execute(&engine, None).map_err(|e| e.to_string())?;
-    let totals = report.totals(&engine, None).map_err(|e| e.to_string())?;
+    // El interprete lee de DuckDB las medidas que no se bajan a SQL. El mapa fisico sale del
+    // modelo con el mismo calificador que el lowering, asi que los dos caminos leen las
+    // mismas tablas.
+    let source = DuckSource::new(&engine, &report.model, &report.qualifier);
+    let matrix = report.execute(&engine, Some(&source)).map_err(|e| e.to_string())?;
+    let totals = report.totals(&engine, Some(&source)).map_err(|e| e.to_string())?;
     // Una pasada extra de totales, sobre la ventana anterior. Las medidas comparten sus
     // grupos de lectura, asi que no son N consultas: son las mismas de `totals` con otro
-    // filtro de fecha.
+    // filtro de fecha. Es el mismo modelo, y el mapa fisico tambien.
     let before = match &previous {
-        Some(report) => Some(report.totals(&engine, None).map_err(|e| e.to_string())?),
+        Some(report) => Some(report.totals(&engine, Some(&source)).map_err(|e| e.to_string())?),
         None => None,
     };
 
@@ -1169,7 +1173,8 @@ fn monthly_series(report: &Report, engine: &Engine, date: ObjectId) -> Result<Se
         .clone()
         .with_dimensions(vec![date])
         .with_measures(measures);
-    let matrix = serie.execute(engine, None).map_err(|error| error.to_string())?;
+    let source = DuckSource::new(engine, &report.model, &report.qualifier);
+    let matrix = serie.execute(engine, Some(&source)).map_err(|error| error.to_string())?;
 
     // La clave es "YYYY-MM" y `BTreeMap` ordena por clave, asi que el orden alfabetico de
     // esas claves ES el orden cronologico. No hace falta convertir el mes a numero.

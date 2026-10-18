@@ -26,6 +26,7 @@
 
 pub mod export;
 pub mod saved;
+pub mod source;
 
 use datan_dax_eval::{AtomSet, Filter, FilterContext, FilterValue, Interpreter, Scalar};
 use datan_dax_sql::{SourceMap, lower, lower_scalar};

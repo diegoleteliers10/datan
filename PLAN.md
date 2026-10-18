@@ -1371,3 +1371,57 @@ El campo `expected` de `Case` no lo comprueba nadie: `expecting(...)` documenta 
 `run_suite` no lo mira. Los casos se validan por la coincidencia entre caminos, que es lo que
 importa, pero un valor escrito a mano que nadie compara es una promesa sin comprobar.
 
+
+## Fase UI-5: una medida interpretada da su valor
+
+Las medidas con `CALCULATE`, iteradores o funciones sin forma caian al camino viejo: el plan
+emertia una columna por atomo y el informe pegaba la primera en la columna de la medida.
+`Variacion = [Qty] - CALCULATE([Qty], ALL('dim_product'))` daba CERO, sin error y sin aviso. Es la
+forma en que se escribe una variacion contra el total, y era el numero mas comun que salia mal.
+
+Cuatro defectos, todos del mismo tipo: una hoja que no es la que toca.
+
+1. `CellResult` era un mapa por ETIQUETA. Las dos hojas de `Variacion` son las dos `SUM(qty)`, con
+   distinto contexto, y la segunda pisaba a la primera. Es una lista en el orden de la tanda de
+   atomos: `eval_shape` lee por INDICE, que es lo que la forma guarda.
+2. `extract_iterator` esperaba dos argumentos y el chequeo deja el iterador con UNO, el cuerpo: un
+   `SUMX` no extraia NINGUN atomo. Nadie lo habia notado porque ningun caso de la suite usa
+   iteradores.
+3. Los modificadores de `CALCULATE` viajan ahora con el atomo y se RE-APLICAN sobre el contexto de
+   cada celda. La union atomo+celda le devolvia al `ALL` el filtro que acababa de quitar: agrupado
+   por region, el total daba el valor de la region. La dedup comparacion incluye los modificadores,
+   porque en un modelo sin filtros las dos hojas de `Variacion` tienen el mismo contexto efectivo.
+4. `Shape::Atom` tambien para CALCULATE e iteradores: su cuerpo bajo el contexto modificado es una
+   hoja. Un CALCULATE dentro de otro apila los modificadores en orden de aplicacion.
+
+Una medida sin forma (`ABS([Qty])`) es un ERROR del informe, `NoShape`, con el nombre de la medida.
+Antes mostraba el valor de `Qty`. Un numero equivocado sin aviso es peor que un error que dice lo
+que falta.
+
+### El origen del interprete
+
+`datan_report::source::DuckSource`: un `DataSource` sobre el motor DuckDB del informe. El mapa
+fisico es el `SourceMap` del modelo con el mismo calificador del lowering, asi que los dos caminos
+leen las mismas tablas. La columna se materializa UNA vez y queda en cache: el interprete la visita
+por cada filtro de cada celda. `table_len` es un `COUNT(*)`. Los tipos: enteros, decimales,
+`DECIMAL(38,s)`, texto, fecha y booleano; lo demas se relee como texto, con la misma limitacion de
+`timestamp` que ya tenia el fast path. `DataSource::column` devuelve `Arc`, que es lo unico que
+sobrevive al candado del cache.
+
+`run_report` y `monthly_series` se lo pasan a `execute` y `totals`: la app corre medidas
+interpretadas contra los datos reales. Sin el, `NoSource`; ese mensaje era el que la app mostraba
+siempre que una medida usaba time intelligence.
+
+### Resultado
+
+Tres medidas nuevas en el modelo de prueba: `Variacion` (CALCULATE junto a la hoja pelada),
+`QtyDoble` (SUMX) y `Cruda` (ABS, sin forma). Cuatro tests de informe, uno de interprete y dos del
+origen. 215 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergencias. La app arranca
+con el origen puesto y su consumo de memoria no cambia.
+
+### Queda abierto
+
+`RANKX` no tiene forma: su valor no sale en la matriz y cae en `NoShape`. El chequeo acepta funciones
+de texto y `ABS`, y todas caen en el mismo error nombrado. Los iteradores dentro de un CALCULATE
+anidado (`SUMX(VALUES(a), CALCULATE(...))`) conservan el camino del interprete, que ya resolvia ese
+grano; no hay caso de conformidad que lo fije.
