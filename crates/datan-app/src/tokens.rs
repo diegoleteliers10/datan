@@ -46,6 +46,11 @@ pub const ANCHO_CELDA: f32 = 240.0;
 pub const ALTO_CONTROL: f32 = 28.0;
 /// El alto de una fila de la barra lateral.
 pub const ALTO_FILA: f32 = 26.0;
+/// El ancho de un mosaico del selector de visuales.
+///
+/// Cuatro por fila en el panel, con la etiqueta mas larga adentro ("Dispersion") sin
+/// recortar: un nombre cortado por el borde se lee como un defecto.
+pub const ANCHO_MOSAICO: f32 = 58.0;
 
 // --- Escala ---------------------------------------------------------------------------------
 

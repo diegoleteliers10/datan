@@ -1148,3 +1148,36 @@ Tres hallazgos de layout, los tres medidos en la ventana:
 - `overflow_hidden` corta, no encoge. El contenido que no cabe no busca su scroll: desaparece.
 
 185 tests.
+
+### Paso 6: el panel de visualizaciones
+
+Los ocho tipos de la referencia, cuatro por fila, cada uno con su icono. El tipo elegido se
+pinta con el fondo del texto principal y el texto del fondo de la pagina: en el panel no hay
+borde de color ni sombra que diga cual esta activo.
+
+`Dispersion` se dibuja apagado y sin clic. No se esconde: un tipo que falta sin decirlo se busca
+en el panel, y no se encuentra. Tampoco se dibuja como los demas, porque un mosaico que se ve
+activo y no responde se lee como un cuelgue.
+
+Hallazgo, y el de mas peso de este paso: la app registraba `assets::Assets`, el juego corto de
+106 iconos del componente. Los siete que usa esta pantalla (`chart-area`, `chart-bar`,
+`chart-column`, `chart-line`, `chart-scatter`, `square-stack`, `table`) no estan ahi: el logo de
+la barra superior, los cuatro tipos de grafico, los mosaicos y la tabla salian como un hueco en
+blanco, y el unico icono que se veia era el del anillo, que si esta en el juego corto. Se
+registra `assets::AllAssets`, el catalogo completo. No es una dependencia nueva: es el mismo
+crate con el otro conjunto de archivos embebidos.
+
+Propiedades pasa a decir lo que se esta mirando: el titulo del visual, su ancho, el eje y los
+valores, todos con los nombres del modelo. Antes decia "Titulo: Informe" y "Ancho: completo" con
+el informe que fuera, dos renglones que no cambiaban nunca. El titulo sale de la MISMA funcion
+que el titulo de la tarjeta del grafico y no de una copia, porque dos cadenas que dicen lo mismo
+se separan el dia que una cambia.
+
+Un visual por pagina: el lienzo compuesto (tarjetas, grafico y tabla) no es uno de los ocho
+tipos. Lo representa el mosaico `Tarjetas`, que es su zona de arriba. Sin eso la grilla se queda
+sin ningun mosaico encendido al abrir la app, que se lee como un error.
+
+`.flex_col()` sin `.flex()` otra vez, ahora en el panel de la derecha, y esta vez el sintoma era
+visible: los hijos apilados sin estiramiento.
+
+185 tests.

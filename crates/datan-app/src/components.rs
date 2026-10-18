@@ -258,6 +258,87 @@ where
     pintado.on_click(on_click).into_any_element()
 }
 
+/// Un mosaico del selector de visuales: un icono y su etiqueta.
+///
+/// La etiqueta va sin relleno lateral a proposito: el mosaico mide 58 px y "Dispersion" no
+/// entra con margen. Un nombre cortado por el borde es peor que un nombre sin aire.
+pub fn mosaico<F>(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    etiqueta: impl Into<SharedString>,
+    glifo: IconName,
+    activo: bool,
+    apagado: bool,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let base = div()
+        .id(ElementId::Name(id.into()))
+        .w(px(tokens::ANCHO_MOSAICO))
+        .h(px(52.0))
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .text_size(px(tokens::LETRA_NOTA));
+
+    // Un tipo que no se puede dibujar se muestra apagado y sin clic. Escondido, el usuario lo
+    // busca donde no esta; pintado como los demas, cree que la app se colgo.
+    if apagado {
+        return base
+            .text_color(theme.muted_foreground)
+            .child(icono(glifo, tokens::LETRA_ICONO, theme.border))
+            .child(etiqueta.into())
+            .into_any_element();
+    }
+
+    let pintado = if activo {
+        base.bg(theme.foreground)
+            .text_color(theme.background)
+            .child(icono(glifo, tokens::LETRA_ICONO, theme.background))
+    } else {
+        base.text_color(theme.foreground)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.list_hover))
+            .child(icono(glifo, tokens::LETRA_ICONO, theme.foreground))
+    };
+    pintado
+        .child(etiqueta.into())
+        .on_click(on_click)
+        .into_any_element()
+}
+
+/// Una fila de propiedades: el rotulo y su valor.
+///
+/// El rotulo lleva un ancho fijo para que los valores de cuatro filas arranquen en la misma
+/// columna: alineados a la izquierda se leen como una tabla, y sin alinear como cuatro notas.
+pub fn fila_propiedad(
+    theme: &Theme,
+    rotulo: impl Into<SharedString>,
+    valor: impl Into<SharedString>,
+) -> AnyElement {
+    div()
+        .flex()
+        .items_start()
+        .gap_2()
+        .text_size(px(tokens::LETRA_ETIQUETA))
+        .child(
+            div()
+                .w(px(58.0))
+                .flex_shrink_0()
+                .text_color(theme.muted_foreground)
+                .child(rotulo.into()),
+        )
+        .child(div().flex_1().overflow_hidden().child(valor.into()))
+        .into_any_element()
+}
+
 /// Una pastilla con una `x`: un filtro activo. Pincharla quita el filtro.
 pub fn pastilla<F>(
     theme: &Theme,

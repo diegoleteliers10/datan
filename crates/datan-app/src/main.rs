@@ -305,6 +305,34 @@ impl Datan {
             .unwrap_or_default()
     }
 
+    fn model_measure_name(&self, measure: ObjectId) -> String {
+        self.report
+            .as_ref()
+            .and_then(|r| r.model.measures.iter().find(|m| m.id == measure))
+            .map(|m| m.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// El titulo del visual que esta en el lienzo, con los nombres del modelo.
+    ///
+    /// Sale de la misma funcion que el titulo de la tarjeta del grafico. Dos cadenas que dicen
+    /// lo mismo se separan el dia que una cambia, y el panel queda describiendo otro visual.
+    fn titulo_visual(&self) -> String {
+        let medida = self
+            .selection
+            .measures
+            .first()
+            .map(|id| self.model_measure_name(*id))
+            .unwrap_or_default();
+        let dimension = self
+            .selection
+            .dimensions
+            .first()
+            .map(|id| self.model_column_name(*id))
+            .unwrap_or_default();
+        titulo_de(&medida, &dimension)
+    }
+
     /// Guarda el informe actual. Sin nombre de archivo elegido a mano: el informe se llama
     /// por la conexion y la primera dimension, que es lo que lo distingue. Un dialogo de
     /// nombre no se puede verificar sin pantalla.
@@ -734,6 +762,18 @@ fn run_report(
 /// La columna de fecha del informe: la del hecho primero, y si no, la primera conectada.
 ///
 /// Va suelta y no como metodo de la vista porque `run_report` corre en el hilo de fondo.
+/// El titulo de un visual: la medida y la dimension que lo arman.
+///
+/// Los nombres son los del modelo y no se traducen. Un titulo que dice "Ventas" cuando la
+/// medida se llama `product_boleta quantity` manda al usuario a buscar un campo que no existe.
+fn titulo_de(medida: &str, dimension: &str) -> String {
+    match (medida.is_empty(), dimension.is_empty()) {
+        (false, false) => format!("{medida} por {dimension}"),
+        (false, true) => medida.to_string(),
+        _ => "sin datos".to_string(),
+    }
+}
+
 fn date_column(report: &Report) -> Option<ObjectId> {
     let model = &report.model;
     let fact = report.fact_table().ok();
@@ -1892,39 +1932,80 @@ impl Datan {
         }
 
         // --- Panel Visualizaciones ---
+        //
+        // Los ocho tipos de la referencia, cuatro por fila. `Dispersion` se dibuja apagado y
+        // no se esconde: un tipo que falta sin decirlo se busca, y no se encuentra.
         let tipos = [
-            ("Tarjetas", "Tarjetas"),
-            ("Barras", "Barras"),
-            ("Tabla", "Tabla"),
+            ("Tarjetas", "Tarjetas", IconName::SquareStack, true),
+            ("Barras", "Barras", IconName::ChartBar, true),
+            ("Columnas", "Columnas", IconName::ChartColumn, true),
+            ("Lineas", "Lineas", IconName::ChartLine, true),
+            ("Area", "Area", IconName::ChartArea, true),
+            ("Anillo", "Anillo", IconName::ChartPie, true),
+            ("Dispersion", "Dispersion", IconName::ChartScatter, false),
+            ("Tabla", "Tabla", IconName::Table, true),
         ];
         let mut viz_buttons = div().flex().flex_wrap().gap_1();
-        for (label, key) in tipos {
-            let active = self.visual == key || (key == "Tarjetas" && self.visual == "Todo");
-            let mut button = div()
-                .id(ElementId::Name(SharedString::from(format!("viz-{key}"))))
-                .w(px(64.0))
-                .h(px(44.0))
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(10.0))
-                .cursor_pointer()
-                .child(label);
-            if active {
-                button = button.bg(theme.foreground).text_color(theme.background);
-            } else {
-                button = button.hover(|style| style.bg(theme.list_hover));
-            }
-            viz_buttons = viz_buttons.child(
-                button.on_click(cx.listener(move |view, _event, _window, cx| {
-                    eprintln!("[datan] visual: {key}");
+        for (key, etiqueta, glifo, habilitado) in tipos {
+            // El lienzo compuesto (tarjetas, grafico y tabla) no es uno de los ocho tipos: lo
+            // representa `Tarjetas`, que es su zona de arriba. Sin esto la grilla se queda sin
+            // ningun mosaico encendido al abrir la app, que se lee como un error.
+            let activo = self.visual == key || (key == "Tarjetas" && self.visual == "Todo");
+            viz_buttons = viz_buttons.child(components::mosaico(
+                &theme,
+                SharedString::from(format!("viz-{key}")),
+                etiqueta,
+                glifo,
+                activo,
+                !habilitado,
+                cx.listener(move |view, _event, _window, cx| {
                     view.visual = key.to_string();
                     cx.notify();
-                })),
-            );
+                }),
+            ));
+        }
+
+        // --- Propiedades del visual elegido ---
+        //
+        // Los valores salen del visual que esta en el lienzo. La version anterior decia
+        // "Titulo: Informe" y "Ancho: completo" con el informe que fuera: dos renglones que no
+        // decian nada de lo que se estaba mirando.
+        let mut propiedades = div().flex().flex_col().gap_2();
+        let eje = self
+            .selection
+            .dimensions
+            .iter()
+            .map(|id| self.model_column_name(*id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let valores = self
+            .selection
+            .measures
+            .iter()
+            .map(|id| self.model_measure_name(*id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (rotulo, valor) in [
+            ("Titulo", self.titulo_visual()),
+            ("Ancho", "completo".to_string()),
+            (
+                "Eje",
+                if eje.is_empty() {
+                    "sin eje".to_string()
+                } else {
+                    eje
+                },
+            ),
+            (
+                "Valores",
+                if valores.is_empty() {
+                    "sin valores".to_string()
+                } else {
+                    valores
+                },
+            ),
+        ] {
+            propiedades = propiedades.child(components::fila_propiedad(&theme, rotulo, valor));
         }
 
         let visualizaciones = div()
@@ -1934,40 +2015,29 @@ impl Datan {
             .bg(theme.background)
             .border_l_1()
             .border_color(theme.sidebar_border)
+            // `.flex()` ademas de `.flex_col()`: sin el, el div queda en modo bloque y los
+            // hijos se apilan sin separacion ni estiramiento. Es el mismo defecto que ya
+            // aparecio en el lienzo y en la tarjeta.
+            .flex()
             .flex_col()
             .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.0))
-                    .child("Visualizaciones"),
+                div().px_3().pt_3().pb_2().child(components::titulo_tarjeta(
+                    &theme,
+                    "Visualizaciones",
+                )),
             )
-            .child(div().px_2().pb_2().child(viz_buttons))
+            .child(div().px_2().pb_3().child(viz_buttons))
             .child(
                 div()
                     .px_3()
-                    .py_2()
+                    .py_3()
                     .border_t_1()
                     .border_color(theme.sidebar_border)
+                    .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .child("Propiedades"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.muted_foreground)
-                            .child("Titulo: Informe"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.muted_foreground)
-                            .child("Ancho: completo"),
-                    ),
+                    .gap_3()
+                    .child(components::titulo_tarjeta(&theme, "Propiedades"))
+                    .child(propiedades),
             );
 
         // --- Barra superior ---
@@ -2533,10 +2603,7 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
         .flex()
         .items_center()
         .gap_2()
-        .child(components::titulo_tarjeta(
-            theme,
-            format!("{medida} por {dimension}"),
-        ))
+        .child(components::titulo_tarjeta(theme, titulo_de(medida, dimension)))
         .child(div().flex_1());
     // Cuantos valores quedaron afuera. Un grafico que dibuja ocho de quinientas filas y no
     // lo dice es un grafico que miente con el eje.
@@ -2841,7 +2908,10 @@ fn cx_hover(color: Hsla, cell: Div) -> Div {
 
 fn main() {
     application()
-        .with_assets(assets::Assets)
+        // `Assets` es el juego corto de 106 iconos del componente, y no tiene los siete que
+        // usa esta pantalla: el logo, los cuatro tipos de grafico, el anillo, los mosaicos y
+        // la tabla quedaban como un hueco en blanco. `AllAssets` es el catalogo completo.
+        .with_assets(assets::AllAssets)
         .run(|cx| {
             init(cx);
             let database = std::env::var("DATAN_AUTOCONNECT").unwrap_or_default();
