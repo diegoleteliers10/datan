@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use datan_connect::{PostgresCatalog, Source, introspect};
+use datan_dax_eval::{AtomKind, BinaryOp, Shape};
 use datan_model::{DataType, Model, ObjectId, TableKind};
 mod components;
 mod config;
@@ -111,7 +112,7 @@ struct Datan {
     grid: Option<Grid>,
     /// El total de cada medida seleccionada, para las tarjetas.
     /// (nombre, total, delta contra el mismo periodo del ano anterior).
-    totals: Vec<(String, String, Option<f64>)>,
+    totals: Vec<Tarjeta>,
     /// La barra de formula DAX.
     ///
     /// Se crea en el primer render porque `InputState::new` pide una `Window`, y `new` de la
@@ -457,27 +458,6 @@ impl Datan {
     /// Recorre el informe con la seleccion actual.
     /// La columna de fecha que gobierna el rango. La de la tabla de hechos si la hay, si no
     /// la primera fecha de una tabla conectada.
-    fn date_column(&self, model: datan_model::Model) -> Option<ObjectId> {
-        let fact = self.report.as_ref().and_then(|r| r.fact_table().ok());
-        let connected = |id: ObjectId| match fact {
-            Some(fact_id) => fact_id == id || model.join_path(fact_id, id).is_some(),
-            None => false,
-        };
-        let dates: Vec<(ObjectId, ObjectId)> = model
-            .tables
-            .iter()
-            .filter(|t| connected(t.id))
-            .flat_map(|t| t.columns.iter().map(move |c| (t.id, c)))
-            .filter(|(_, c)| matches!(c.data_type, DataType::Date))
-            .map(|(table, column)| (table, column.id))
-            .collect();
-        dates
-            .iter()
-            .find(|(table, _)| Some(*table) == fact)
-            .or_else(|| dates.first())
-            .map(|(_, column)| *column)
-    }
-
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(base) = self.report.clone() else {
             return;
@@ -506,7 +486,7 @@ impl Datan {
         // igualdad, antes de imponer el rango. Si se partiera del informe ya acotado, el
         // rango actual y el anterior se intersectarian y el delta compararia una ventana de
         // doce meses contra un solo dia.
-        let previous = match (self.date_months, self.date_column(report.model.clone())) {
+        let previous = match (self.date_months, date_column(&report)) {
             (Some(months), Some(date)) => {
                 let today = today();
                 let ancla = datan_dax_eval::shift(
@@ -525,7 +505,7 @@ impl Datan {
             // completo contra el historico completo un ano antes no es un delta.
             _ => None,
         };
-        if let (Some(months), Some(date)) = (self.date_months, self.date_column(report.model.clone()))
+        if let (Some(months), Some(date)) = (self.date_months, date_column(&report))
         {
             let range = window_of(today(), months);
             report = report.filtered_between(date, range.start, range.end);
@@ -678,8 +658,7 @@ fn run_report(
     report: Report,
     previous: Option<Report>,
     database: String,
-) -> Result<(Matrix, String, Vec<(String, String, Option<f64>)>), String> {
-    let queries = report.query_count().unwrap_or(0);
+) -> Result<(Matrix, String, Vec<Tarjeta>), String> {
     let started = Instant::now();
 
     // El motor se abre aqui y se cae al final: `Engine` es `Send` pero no `Sync`, asi que
@@ -697,6 +676,18 @@ fn run_report(
         Some(report) => Some(report.totals(&engine, None).map_err(|e| e.to_string())?),
         None => None,
     };
+
+    // La linea de la tarjeta. Es UNA consulta extra y no doce: se agrupa por la columna de
+    // fecha y los dias se suman en su mes. Sin columna de fecha no hay serie que dibujar.
+    let date = date_column(&report);
+    let series = match date {
+        Some(date) => monthly_series(&report, &engine, date)?,
+        None => Series {
+            por_medida: vec![None; report.measures.len()],
+            consulto: false,
+        },
+    };
+    let queries = report.query_count().unwrap_or(0) + usize::from(series.consulto);
 
     // Los milisegundos enteros: `241.941792ms` es la duracion de un cronometro, no un dato
     // que alguien lea en la barra de abajo. Y un informe que tarda menos de un milisegundo
@@ -716,7 +707,7 @@ fn run_report(
         .zip(&totals)
         .enumerate()
         .map(|(index, (id, total))| {
-            let name = report.measure_name(*id).unwrap_or("?").to_string();
+            let nombre = report.measure_name(*id).unwrap_or("?").to_string();
             // Un total anterior de cero no da porcentaje: el denominador es cero y el
             // resultado seria infinito. Se dice "nuevo" y no "+inf%".
             let delta = before.as_ref().and_then(|totals| {
@@ -727,11 +718,172 @@ fn run_report(
                 }
                 Some((ahora - antes) / antes.abs())
             });
-            (name, total.clone(), delta)
+            Tarjeta {
+                nombre,
+                total: total.clone(),
+                delta,
+                serie: series.por_medida.get(index).cloned().flatten(),
+            }
         })
         .collect();
 
     Ok((matrix, stats, cards))
+}
+
+/// La columna de fecha del informe: la del hecho primero, y si no, la primera conectada.
+///
+/// Va suelta y no como metodo de la vista porque `run_report` corre en el hilo de fondo.
+fn date_column(report: &Report) -> Option<ObjectId> {
+    let model = &report.model;
+    let fact = report.fact_table().ok();
+    let connected = |id: ObjectId| match fact {
+        Some(fact_id) => fact_id == id || model.join_path(fact_id, id).is_some(),
+        None => false,
+    };
+    let dates: Vec<(ObjectId, ObjectId)> = model
+        .tables
+        .iter()
+        .filter(|t| connected(t.id))
+        .flat_map(|t| t.columns.iter().map(move |c| (t.id, c)))
+        .filter(|(_, c)| matches!(c.data_type, DataType::Date))
+        .map(|(table, column)| (table, column.id))
+        .collect();
+    dates
+        .iter()
+        .find(|(table, _)| Some(*table) == fact)
+        .or_else(|| dates.first())
+        .map(|(_, column)| *column)
+}
+
+/// Si la forma de salida de una medida suma.
+///
+/// Las sumas y las restas de hojas aditivas suman: los meses de `SUM(a) - SUM(b)` se pueden
+/// sumar y dan el total del anio. Una division no: doce cocientes sumados no son el cociente
+/// del anio.
+fn forma_aditiva(shape: &Shape, kinds: &[AtomKind]) -> bool {
+    match shape {
+        Shape::Atom(index) => matches!(
+            kinds.get(*index),
+            Some(AtomKind::Sum | AtomKind::Count | AtomKind::CountRows)
+        ),
+        // Un numero suelto no cambia con los meses.
+        Shape::Number(_) => true,
+        Shape::Binary { op, left, right } => {
+            matches!(op, BinaryOp::Add | BinaryOp::Subtract)
+                && forma_aditiva(left, kinds)
+                && forma_aditiva(right, kinds)
+        }
+    }
+}
+
+/// Si sumar los meses da el total de la medida.
+///
+/// La medida guarda su texto DAX y no su forma. La forma la conoce el extractor de atomos que
+/// arma el plan de consulta, asi que se le pregunta a el. Adivinar por el texto daria por
+/// aditiva a `SUM(a) / SUM(b)`, y esa linea en la tarjeta seria una mentira con forma de dato.
+fn es_aditiva(
+    expression: &str,
+    model: &Model,
+    context: &datan_dax_eval::FilterContext,
+    grouping: &[ObjectId],
+) -> bool {
+    let Ok(atomos) = datan_dax_eval::extract_atoms(expression, model, context, grouping) else {
+        return false;
+    };
+    // Sin `outputs` la medida no es una combinacion de agregaciones: `SUMX` con contexto de
+    // fila, por ejemplo. No se puede saber si sumar los meses da el total, y una linea que no
+    // se sabe si es cierta no se dibuja.
+    if atomos.outputs.is_empty() {
+        return false;
+    }
+    let kinds: Vec<AtomKind> = atomos.atoms.iter().map(|atom| atom.kind).collect();
+    atomos
+        .outputs
+        .iter()
+        .all(|output| forma_aditiva(&output.shape, &kinds))
+}
+
+/// La linea mensual de cada medida y si la consulta que la arma se hizo.
+///
+/// Una ranura por medida y en el orden de `report.measures`: la tarjeta i lee la ranura i. Sin
+/// columna de fecha no hay consulta y todas las ranuras quedan vacias.
+struct Series {
+    por_medida: Vec<Option<Vec<f64>>>,
+    consulto: bool,
+}
+
+/// La serie mensual de cada medida aditiva, para la linea de su tarjeta.
+///
+/// Es UNA consulta extra, agrupada por la columna de fecha: el motor agrupa por dia y los
+/// dias se suman en el mes que les toca. Una consulta por mes serian doce.
+fn monthly_series(report: &Report, engine: &Engine, date: ObjectId) -> Result<Series, String> {
+    let mut series: Vec<Option<Vec<f64>>> = vec![None; report.measures.len()];
+    let indices: Vec<usize> = report
+        .measure_definitions()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .enumerate()
+        .filter(|(_, measure)| {
+            es_aditiva(
+                &measure.expression,
+                &report.model,
+                &report.filters,
+                &report.dimensions,
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if indices.is_empty() {
+        return Ok(Series {
+            por_medida: series,
+            consulto: false,
+        });
+    }
+
+    let measures: Vec<ObjectId> = indices.iter().map(|index| report.measures[*index]).collect();
+    let serie = report
+        .clone()
+        .with_dimensions(vec![date])
+        .with_measures(measures);
+    let matrix = serie.execute(engine, None).map_err(|error| error.to_string())?;
+
+    // La clave es "YYYY-MM" y `BTreeMap` ordena por clave, asi que el orden alfabetico de
+    // esas claves ES el orden cronologico. No hace falta convertir el mes a numero.
+    let mut meses: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+    for fila in 0..matrix.row_count() {
+        let Some(celda) = matrix.cell(fila, 0) else {
+            continue;
+        };
+        // La fecha llega como dia desde 1970 cuando la resuelve el interprete, y como
+        // `YYYY-MM-DD` cuando la resuelve el SQL. Las dos formas se leen igual.
+        let clave = match celda.parse::<i32>() {
+            Ok(dia) => datan_dax_eval::format_date(dia),
+            Err(_) => celda.to_string(),
+        };
+        let mes = clave.get(..7).unwrap_or(&clave).to_string();
+        let bucket = meses
+            .entry(mes)
+            .or_insert_with(|| vec![0.0; indices.len()]);
+        for (hueco, columna) in bucket.iter_mut().zip(1usize..) {
+            if let Some(valor) = matrix.cell(fila, columna).and_then(|v| v.parse::<f64>().ok()) {
+                *hueco += valor;
+            }
+        }
+    }
+
+    let meses: Vec<Vec<f64>> = meses.into_values().collect();
+    for (desplazamiento, index) in indices.iter().enumerate() {
+        series[*index] = Some(
+            meses
+                .iter()
+                .map(|mes| mes.get(desplazamiento).copied().unwrap_or(0.0))
+                .collect(),
+        );
+    }
+    Ok(Series {
+        por_medida: series,
+        consulto: true,
+    })
 }
 
 /// La seleccion por defecto: la primera dimension de texto y las primeras medidas.
@@ -1015,16 +1167,29 @@ fn filter_pill(
 /// El delta se muestra siempre que haya con que comparar, en verde si sube y en rojo si baja.
 /// Sin periodo anterior se dice con esas palabras y no se esconde el hueco: una tarjeta sin
 /// comparacion no dice si el numero esta bien o mal.
-fn tarjeta_kpi(theme: &Theme, nombre: &str, total: &str, delta: Option<f64>) -> AnyElement {
-    let valor = if total.is_empty() {
+/// Una tarjeta KPI: nombre, total, variacion y la linea de los meses.
+///
+/// La `serie` es `None` cuando la medida no es aditiva o no hay columna de fecha. Una
+/// tarjeta sin linea no reserva el alto de una con linea: el hueco al lado del valor dice
+/// mas que una linea plana en cero.
+struct Tarjeta {
+    nombre: String,
+    total: String,
+    delta: Option<f64>,
+    serie: Option<Vec<f64>>,
+}
+
+fn tarjeta_kpi(theme: &Theme, tarjeta: &Tarjeta) -> AnyElement {
+    let valor = if tarjeta.total.is_empty() {
         "-".to_string()
     } else {
-        total
+        tarjeta
+            .total
             .parse::<f64>()
             .map(format_value)
-            .unwrap_or_else(|_| total.to_string())
+            .unwrap_or_else(|_| tarjeta.total.clone())
     };
-    let comparacion: AnyElement = match delta {
+    let comparacion: AnyElement = match tarjeta.delta {
         Some(delta) => {
             // `chart_bullish` y `chart_bearish` son los dos colores con significado del
             // tema: verde y rojo. `danger_foreground` NO sirve para esto: es el color del
@@ -1043,23 +1208,115 @@ fn tarjeta_kpi(theme: &Theme, nombre: &str, total: &str, delta: Option<f64>) -> 
         }
         None => components::nota(theme, "sin periodo anterior").into_any_element(),
     };
-    components::tarjeta(theme)
-        .flex_1()
-        .p_4()
+
+    let columna = div()
+        .flex()
         .flex_col()
         .gap_1()
-        .child(components::nota(theme, nombre.to_string()))
+        .flex_1()
+        // El valor y su variacion se truncan antes que la linea: la linea sola, sin el numero
+        // al lado, no dice nada.
+        .overflow_hidden()
         .child(
             div()
                 .text_size(px(tokens::LETRA_VALOR))
                 .font_semibold()
+                .truncate()
                 .child(valor),
         )
-        .child(comparacion)
+        .child(comparacion);
+
+    let mut cuerpo = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(components::nota(theme, tarjeta.nombre.clone()))
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .gap_3()
+                .child(columna),
+        );
+
+    if let Some(serie) = tarjeta.serie.as_deref().filter(|serie| serie.len() > 1) {
+        cuerpo = cuerpo.child(div().flex().justify_end().child(sparkline(serie)));
+    }
+
+    components::tarjeta(theme)
+        .flex()
+        .flex_1()
+        .p_4()
+        .flex_col()
+        .child(cuerpo)
         .into_any_element()
 }
 
-/// Una fila de la barra lateral.
+/// La linea de la tarjeta: los meses de la medida, sin ejes ni etiquetas.
+///
+/// A 96 x 28 px no cabe un grafico: la rejilla, los ejes y la leyenda miden mas que el dato.
+/// La forma de la linea es lo unico que se mira en una tarjeta, y para la forma alcanza un
+/// `canvas` con dos trazos.
+fn sparkline(serie: &[f64]) -> AnyElement {
+    let datos: Vec<f64> = serie.to_vec();
+    let linea = tokens::serie(0);
+    let relleno = linea.opacity(0.12);
+    // El tamano va EN el canvas y no en un div de afuera: un canvas se mide por su
+    // contenido, que no tiene, asi que hereda un alto de cero y todos los puntos caen en la
+    // misma `y`. La linea sale recta y perfecta, que es la peor clase de defecto.
+    canvas(
+        move |_bounds, _window, _cx| (),
+        move |bounds, (), window, _cx| {
+            let Some((min, max)) = datos.iter().fold(None::<(f64, f64)>, |acc, value| {
+                Some(match acc {
+                    None => (*value, *value),
+                    Some((lo, hi)) => (lo.min(*value), hi.max(*value)),
+                })
+            }) else {
+                return;
+            };
+            // Una medida constante da una division por cero. La linea queda al medio,
+            // que es lo que dice un valor que no cambia.
+            let rango = if max > min { max - min } else { 1.0 };
+            let ultimo = datos.len().saturating_sub(1).max(1);
+            let punto = |indice: usize, valor: f64| {
+                let x = indice as f32 / ultimo as f32;
+                let y = 1.0 - ((valor - min) / rango) as f32;
+                point(
+                    bounds.origin.x + bounds.size.width * x,
+                    bounds.origin.y + bounds.size.height * y,
+                )
+            };
+
+            // El area primero y la linea encima: al reves la linea queda tapada por el
+            // relleno.
+            let mut area = PathBuilder::fill();
+            area.move_to(punto(0, datos[0]));
+            for (indice, valor) in datos.iter().enumerate().skip(1) {
+                area.line_to(punto(indice, *valor));
+            }
+            area.line_to(punto(datos.len() - 1, min));
+            area.close();
+            if let Ok(path) = area.build() {
+                window.paint_path(path, relleno);
+            }
+
+            let mut trazo = PathBuilder::stroke(px(1.5));
+            trazo.move_to(punto(0, datos[0]));
+            for (indice, valor) in datos.iter().enumerate().skip(1) {
+                trazo.line_to(punto(indice, *valor));
+            }
+            if let Ok(path) = trazo.build() {
+                window.paint_path(path, linea);
+            }
+        },
+    )
+    .w(px(96.0))
+    .h(px(28.0))
+    .flex_shrink_0()
+    .into_any_element()
+}
+
 fn sidebar_item(
     theme: &Theme,
     label: String,
@@ -1299,92 +1556,90 @@ impl Datan {
                     )),
             );
 
-        // --- Rango de fechas ---
-        let mut date_bar = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_4()
-            .pt_4()
-            .pb_2();
-        // El titulo de la pagina va arriba, con el nombre de la base como etiqueta y la
-        // ultima actualizacion al lado: uno tiene que saber que informe mira y de cuando
-        // son los numeros sin leer nada mas.
-        let mut page_header = div().flex().items_center().gap_2().flex_1();
-        page_header = page_header.child(
+        // --- Cabecera del lienzo ---
+        //
+        // Arriba, de que informe son estos numeros: la base, cuando se contaron las filas y
+        // sobre que columna filtra el periodo. Abajo, el titulo, y solo el titulo. Compartir
+        // fila con las etiquetas convertia el titulo en una etiqueta mas: centrado entre dos
+        // bloques de texto gris, se lee como el encabezado de la nada.
+        let mut fila_etiquetas = div().flex().items_center().gap_2().w_full();
+        fila_etiquetas = fila_etiquetas.child(
             div()
                 .px_2()
                 .py_1()
                 .rounded_md()
                 .bg(theme.muted)
-                .text_size(px(12.0))
+                .text_size(px(tokens::LETRA_ETIQUETA))
                 .child(
                     self.database
                         .clone()
                         .unwrap_or_else(|| "sin base".to_string()),
                 ),
         );
-        page_header = page_header.child(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme.muted_foreground)
-                .child(match self.counted_at {
-                    Some(at) => format!("Actualizado {}", ago_text(epoch_now() - at)),
-                    None => "Contando filas".to_string(),
-                }),
-        );
-        date_bar = date_bar.child(page_header);
-        date_bar = date_bar.child(div().w(px(16.0)));
-        date_bar = date_bar.child(
-            div()
-                .text_size(px(tokens::LETRA_H1))
-                .font_semibold()
-                .child("Resumen de ventas"),
-        );
-        date_bar = date_bar.child(div().flex_1());
-        // Los rangos van en un control segmentado porque son excluyentes: elegir 3M apaga
-        // 6M. Una fila de botones con borde se lee como cuatro acciones sueltas, y no dice
-        // cual esta elegida.
-        let mut rangos = components::caja_segmentada(&theme);
-        for months in [3u8, 6, 12] {
-            let label = format!("{months}M");
+        fila_etiquetas = fila_etiquetas.child(components::nota(
+            &theme,
+            match self.counted_at {
+                Some(at) => format!("Actualizado {}", ago_text(epoch_now() - at)),
+                None => "Contando filas".to_string(),
+            },
+        ));
+        fila_etiquetas = fila_etiquetas.child(div().flex_1());
+
+        // Un rango de fechas que no filtra nada y no lo dice es la falla silenciosa de
+        // siempre. Sin columna de fecha conectada no hay control de periodo.
+        if let Some((_, columna)) = date_column(&report).and_then(|date| model.column(date)) {
+            fila_etiquetas = fila_etiquetas.child(components::nota(
+                &theme,
+                format!("sobre {}", columna.name),
+            ));
+            // Los rangos van en un control segmentado porque son excluyentes: elegir 3M
+            // apaga 6M. Una fila de botones con borde se lee como cuatro acciones sueltas, y
+            // no dice cual esta elegida.
+            let mut rangos = components::caja_segmentada(&theme);
+            for months in [3u8, 6, 12] {
+                let label = format!("{months}M");
+                rangos = rangos.child(range_button(
+                    &theme,
+                    &label,
+                    self.date_months == Some(months),
+                    months,
+                    cx,
+                ));
+            }
             rangos = rangos.child(range_button(
                 &theme,
-                &label,
-                self.date_months == Some(months),
-                months,
+                "Todo",
+                self.date_months.is_none(),
+                0,
                 cx,
             ));
+            fila_etiquetas = fila_etiquetas.child(rangos);
         }
-        rangos = rangos.child(range_button(
-            &theme,
-            "Todo",
-            self.date_months.is_none(),
-            0,
-            cx,
-        ));
-        date_bar = date_bar.child(rangos);
+
         // Actualizar vive al lado del periodo: las dos cosas cambian QUE datos se ven, y
         // estaban en dos extremos de la ventana.
-        date_bar = date_bar.child(components::boton_icono(
+        fila_etiquetas = fila_etiquetas.child(components::boton_icono(
             &theme,
             "refresh",
             IconName::RefreshCw,
             cx.listener(|view, _event, _window, cx| view.refresh(cx)),
         ));
-        // Sin columna de fecha conectada NO se muestran los botones: un rango que no
-        // filtra nada y no lo dice es la falla silenciosa de siempre.
-        if let Some((_, column)) = self
-            .date_column(model.clone())
-            .and_then(|date| model.column(date))
-        {
-            date_bar = date_bar.child(
+
+        let cabecera = div()
+            .flex()
+            .flex_shrink_0()
+            .flex_col()
+            .gap_2()
+            .px_4()
+            .pt_4()
+            .pb_2()
+            .child(fila_etiquetas)
+            .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(theme.muted_foreground)
-                    .child(format!("sobre {}", column.name)),
+                    .text_size(px(tokens::LETRA_H1))
+                    .font_semibold()
+                    .child("Resumen de ventas"),
             );
-        }
 
         // --- Filtros activos ---
         let mut filter_bar = div()
@@ -1471,7 +1726,7 @@ impl Datan {
             let cards: Vec<AnyElement> = self
                 .totals
                 .iter()
-                .map(|(name, total, delta)| tarjeta_kpi(&theme, name, total, *delta))
+                .map(|tarjeta| tarjeta_kpi(&theme, tarjeta))
                 .collect();
             canvas = canvas.child(
                 div()
@@ -1645,7 +1900,7 @@ impl Datan {
                 _ => div()
                     .flex_1()
                     .flex_col()
-                    .child(date_bar)
+                    .child(cabecera)
                     .child(canvas)
                     .into_any_element(),
             })
@@ -2288,7 +2543,7 @@ fn main() {
 }
 #[cfg(test)]
 mod tests {
-    use super::hit;
+    use super::{AtomKind, BinaryOp, Shape, forma_aditiva, hit};
 
     #[test]
     fn sin_busqueda_no_hay_coincidencia() {
@@ -2298,6 +2553,48 @@ mod tests {
         // caber y no se ve lo que hay.
         assert!(!hit("region", ""));
         assert!(!hit("catalogo_productos", ""));
+    }
+
+    fn hoja(op: BinaryOp, left: Shape, right: Shape) -> Shape {
+        Shape::Binary {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    #[test]
+    fn la_linea_de_una_tarjeta_solo_suma_formas_que_suman() {
+        // Sumar doce meses vale para las medidas que suman filas. Un promedio de promedios y
+        // un `DISTINCTCOUNT` de meses no son el total del anio, y una division tampoco.
+        let kinds = [
+            AtomKind::Sum,
+            AtomKind::Count,
+            AtomKind::Average,
+            AtomKind::DistinctCount,
+        ];
+        let suma = Shape::Atom(0);
+        let cuenta = Shape::Atom(1);
+        let promedio = Shape::Atom(2);
+        let distintos = Shape::Atom(3);
+
+        assert!(forma_aditiva(&suma, &kinds));
+        assert!(forma_aditiva(&cuenta, &kinds));
+        assert!(forma_aditiva(&Shape::Number(1.0), &kinds));
+        assert!(forma_aditiva(
+            &hoja(BinaryOp::Subtract, suma.clone(), Shape::Atom(0)),
+            &kinds
+        ));
+        assert!(!forma_aditiva(&promedio, &kinds));
+        assert!(!forma_aditiva(&distintos, &kinds));
+        assert!(!forma_aditiva(
+            &hoja(BinaryOp::Divide, suma.clone(), Shape::Atom(0)),
+            &kinds
+        ));
+        assert!(!forma_aditiva(
+            &hoja(BinaryOp::Multiply, suma.clone(), Shape::Number(2.0)),
+            &kinds
+        ));
     }
 
     #[test]

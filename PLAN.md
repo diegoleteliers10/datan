@@ -1072,3 +1072,42 @@ Tres defectos de presentacion que salieron al mirar la ventana:
   scroll en el de adentro.
 
 184 tests.
+
+### Paso 4: cabecera del lienzo y tarjetas KPI
+
+La cabecera se parte en dos filas. Arriba, de que informe son estos numeros: la base, cuando se
+contaron las filas, sobre que columna filtra el periodo, el control de rango y actualizar. Abajo,
+el titulo y solo el titulo: compartir fila con las etiquetas lo convertia en una etiqueta mas. El
+control de rango y "sobre <columna>" solo existen si hay columna de fecha conectada, porque un
+rango que no filtra nada y no lo dice es la falla silenciosa de siempre. Actualizar se mueve al
+lado del periodo: las dos cosas cambian QUE datos se ven.
+
+La tarjeta KPI lleva el nombre de la medida, el total, el delta contra el periodo anterior y una
+linea mensual. La linea es una consulta extra y no doce: se agrupa por la columna de fecha y los
+dias se suman en el mes que les toca.
+
+La linea se dibuja solo si sumar los meses da el total, y eso lo decide la FORMA de salida de la
+medida (`extract_atoms`), no su texto. `AVERAGE`, `DISTINCTCOUNT` y `SUM(a)/SUM(b)` no llevan
+linea: en las tres, la linea serie una mentira con forma de dato. Sin `outputs` (un `SUMX` con
+contexto de fila) tampoco, porque no se puede saber.
+
+Dos defectos de presentacion que salieron al mirar la ventana:
+
+- Un `canvas` se mide por su contenido. El div de afuera tenia 96 x 28 px y el canvas heredaba un
+  alto de CERO, asi que los catorce puntos caian en la misma `y` y la linea salia recta y
+  perfecta. El tamano va en el propio canvas.
+- `.flex_col()` sin `.flex()` otra vez, esta vez en la tarjeta, con el mismo sintoma: los hijos
+  apilados y el `flex_1` sin crecer.
+
+Hallazgo fuera de alcance: `Report::totals` pega sus resultados por POSICION mientras `execute`
+los pega por conjunto de atomos. Con dos medidas que comparten atomos, la segunda tarjeta muestra
+"-" y el grid muestra el numero. No se toca: es el motor.
+
+Hallazgo fuera de alcance, y el de mas peso: un esquema con fechas guardadas en `timestamp` no
+tiene control de periodo ni time intelligence. `datan-connect` mapea `timestamp*` a
+`DataType::DateTime`, y las dos busquedas de columna de fecha (la de la app y la de
+`datan-dax-eval::time`) piden `DataType::Date`. `datan_bench` cae justo en ese caso, asi que para
+mirar la linea se le agrego una columna `fecha date` con DDL sobre el banco de pruebas. La columna
+es dato de prueba, no codigo.
+
+185 tests.
