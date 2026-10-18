@@ -1517,3 +1517,18 @@ Verificado con `file(1)`: `CSV text`, `Microsoft Excel 2007+`, `PDF document, ve
 
 220 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergen. Solo `arrow v58.4.0`;
 `rust_xlsxwriter` es el segundo crate nuevo del arbol y no arrastra ningun otro del workspace.
+
+## La columna de periodo cuando la tabla trae timestamp y fecha
+
+`boleta` trae las dos: `created_at` (timestamp de insercion, todo el mismo dia) y `fecha` (la
+fecha de negocio, doce meses). `date_column` tomaba la PRIMERA columna de fecha declarada, y la
+introspeccion entrega las columnas por orden de declaracion: el periodo caia en el timestamp y la
+ventana de doce meses daba un solo dia.
+
+Ahora la columna de la tabla de hechos va primero, y dentro de cada tabla una `Date` pura antes
+que un `DateTime`. El timestamp de auditoria sigue sirviendo cuando es lo unico que hay.
+
+Y la decision pendiente de la base: `fecha` SE QUEDA. Es la fecha de negocio, llena al cien por
+ciento (cero nulos sobre cien mil filas), repartida entre 2025-09 y 2026-10. Borrarla dejaria el
+periodo en manos de `created_at`, que es un solo dia. `ALTER TABLE boleta DROP COLUMN fecha` no se
+corre.

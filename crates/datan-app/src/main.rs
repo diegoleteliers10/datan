@@ -1116,19 +1116,24 @@ fn date_column(report: &Report) -> Option<ObjectId> {
         Some(fact_id) => fact_id == id || model.join_path(fact_id, id).is_some(),
         None => false,
     };
-    let dates: Vec<(ObjectId, ObjectId)> = model
+    let mut dates: Vec<(ObjectId, ObjectId, bool)> = model
         .tables
         .iter()
         .filter(|t| connected(t.id))
         .flat_map(|t| t.columns.iter().map(move |c| (t.id, c)))
         .filter(|(_, c)| matches!(c.data_type, DataType::Date | DataType::DateTime))
-        .map(|(table, column)| (table, column.id))
+        // El tercer valor marca `Date` puro. `created_at` es un timestamp de insercion que
+        // vale como fecha para el motor, pero cuando la misma tabla trae la fecha de
+        // NEGOCIO (`boleta.fecha`), esa gana: un timestamp de auditoria concentra todo en
+        // el dia en que se cargo la tabla.
+        .map(|(table, column)| (table, column.id, matches!(column.data_type, DataType::Date)))
         .collect();
-    dates
-        .iter()
-        .find(|(table, _)| Some(*table) == fact)
-        .or_else(|| dates.first())
-        .map(|(_, column)| *column)
+    // La de la tabla de hechos primero, y dentro de cada tabla la `Date` pura antes que el
+    // timestamp. La introspeccion entrega las columnas por orden de declaracion, y `fecha`
+    // venia despues de `created_at`: sin este orden, el periodo caia siempre en el
+    // timestamp y toda la ventana de doce meses daba un solo dia.
+    dates.sort_by_key(|(table, _, es_date)| (Some(*table) != fact, !*es_date));
+    dates.first().map(|(_, column, _)| *column)
 }
 
 /// Si la forma de salida de una medida suma.
@@ -3428,5 +3433,67 @@ mod tests {
         assert!(hit("catalogo_productos", "catalogo"));
         assert!(hit("precio_unitario", "unitario"));
         assert!(!hit("catalogo_productos", "region"));
+    }
+}
+
+#[cfg(test)]
+mod fecha_tests {
+    use super::date_column;
+    use datan_model::{
+        Cardinality, Column, DataType, Model, ObjectId, Relationship, RelationshipRole, Table,
+        TableKind,
+    };
+    use datan_report::Report;
+
+    /// Una tabla de hechos con timestamp de insercion Y fecha de negocio. El periodo tiene
+    /// que caer en la fecha de negocio: el timestamp concentra todo en el dia en que se
+    /// cargo la tabla, y una ventana de doce meses sobre un solo dia no compara nada.
+    #[test]
+    fn la_fecha_de_negocio_gana_al_timestamp_de_insercion() {
+        let model = Model {
+            tables: vec![
+                Table {
+                    id: ObjectId(1),
+                    name: "boleta".to_string(),
+                    kind: TableKind::Facts,
+                    columns: vec![
+                        Column::new(ObjectId(10), "product_id", DataType::Integer),
+                        Column::new(ObjectId(11), "bruto", DataType::Integer),
+                        // Orden de declaracion: el timestamp ANTES que la fecha.
+                        Column::new(ObjectId(12), "created_at", DataType::DateTime),
+                        Column::new(ObjectId(13), "fecha", DataType::Date),
+                    ],
+                    key_columns: vec![],
+                    is_date_table: false,
+                },
+                Table {
+                    id: ObjectId(2),
+                    name: "dim_producto".to_string(),
+                    kind: TableKind::Dimension,
+                    columns: vec![
+                        Column::new(ObjectId(21), "product_id", DataType::Integer),
+                        Column::new(ObjectId(22), "nombre", DataType::Text),
+                    ],
+                    key_columns: vec![ObjectId(21)],
+                    is_date_table: false,
+                },
+            ],
+            measures: vec![datan_model::Measure::new(
+                ObjectId(100),
+                "Bruto",
+                "SUM('boleta'[bruto])",
+            )],
+            relationships: vec![Relationship {
+                from_column: ObjectId(21),
+                to_column: ObjectId(10),
+                cardinality: Cardinality::OneToMany,
+                direction: datan_model::FilterDirection::Single,
+                role: RelationshipRole::Active,
+                assume_referential_integrity: false,
+            }],
+        };
+        let report = Report::new(model);
+        // 13 es `fecha`, no 12 (`created_at`).
+        assert_eq!(date_column(&report), Some(ObjectId(13)));
     }
 }
