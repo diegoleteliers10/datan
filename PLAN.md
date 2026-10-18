@@ -1486,3 +1486,34 @@ etapa de panel de propiedades.
 
 221 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergen. Solo `arrow v58.4.0`. La app
 arranca y su consumo de memoria no cambia.
+
+## Exportar a CSV, Excel y PDF
+
+El CSV existia (`1bd01af`): coma, `\\n`, sin BOM, escape RFC 4180, y un boton que escribia
+`~/Desktop/datan.csv`, siempre el mismo nombre. Se conservan las decisiones del archivo y se
+agregan los dos formatos que faltaban.
+
+- Excel via `rust_xlsxwriter`, la UNICA dependencia nueva (el usuario la pidio al pedir el
+  formato). Numeros como NUMEROS: un "74000" de texto no suma ni ordena en el Excel y queda
+  marcado con el triangulo verde. Cabecera en negrita, fila congelada, ancho por columna con
+  techo. El nombre de hoja se recorta a 31 y suelta `[ ] : * ? / \\`.
+- PDF escrito a mano con las fuentes base del formato (Courier y Helvetica, cero embebido y
+  cero dependencia): una tabla de informe es texto en columnas. Horizontal a partir de siete
+  columnas, paginado con la cabecera repetida, lineas bajo cada renglon, texto recortado al
+  ancho de su columna y escape WinAnsi (el euro incluido; lo que no tiene byte cae en `?`).
+  El test valida la estructura completa: `%PDF`, `startxref` apuntando de verdad a la tabla
+  xref y conteo de paginas.
+- El boton unico "CSV" pasa a tres: CSV, Excel y PDF. El archivo se llama
+  `<titulo>-<dia>.<ext>` y va a `~/Desktop`; dos exportaciones del mismo dia ya no se pisan, y
+  la barra de estado dice donde quedo. El dia sale del reloj convertido con el calendario del
+  motor (`format_date`): sin dependencia de tiempo nueva.
+
+Los tres salen de la MISMA matriz: es el DATO de la consulta, no el formato de pantalla. Un
+`format_string` de moneda no viaja en el archivo; el que abre el Excel quiere el numero.
+
+Verificado con `file(1)`: `CSV text`, `Microsoft Excel 2007+`, `PDF document, version 1.4`.
+
+### Resultado
+
+220 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergen. Solo `arrow v58.4.0`;
+`rust_xlsxwriter` es el segundo crate nuevo del arbol y no arrastra ningun otro del workspace.

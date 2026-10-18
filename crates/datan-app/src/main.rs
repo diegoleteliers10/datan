@@ -612,16 +612,51 @@ impl Datan {
 
     /// Exporta la matriz a CSV junto a la carpeta del usuario.
     fn export_csv(&mut self, cx: &mut Context<Self>) {
+        self.exportar(Archivo::Csv, cx);
+    }
+
+    fn export_excel(&mut self, cx: &mut Context<Self>) {
+        self.exportar(Archivo::Excel, cx);
+    }
+
+    fn export_pdf(&mut self, cx: &mut Context<Self>) {
+        self.exportar(Archivo::Pdf, cx);
+    }
+
+    /// Escribe la matriz a `~/Desktop/<titulo>-<dia>.<ext>`.
+    ///
+    /// El nombre sale del titulo del informe y del dia: dos exportaciones del mismo informe
+    /// el mismo dia se pisan, y "informe (1).csv" es lo que el navegador hace peor. La barra
+    /// de estado dice donde quedo, porque un archivo exportado sin saber donde no sirve.
+    fn exportar(&mut self, archivo: Archivo, cx: &mut Context<Self>) {
         let Some(matrix) = self.matrix.clone() else {
             return;
         };
-        let path = std::env::var("HOME")
-            .map(|home| std::path::PathBuf::from(home).join("Desktop").join("datan.csv"))
-            .unwrap_or_else(|_| std::path::PathBuf::from("datan.csv"));
+        let titulo = self.report_title();
+        // El dia viene del reloj, convertido con el calendario del motor: no hay ninguna
+        // dependencia de tiempo en el arbol y no la va a haber por un nombre de archivo.
+        let dia = datan_dax_eval::format_date((epoch_now() / 86_400) as i32);
+        let (bytes, extension) = match archivo {
+            Archivo::Csv => (datan_report::export::csv(&matrix).into_bytes(), "csv"),
+            Archivo::Excel => match datan_report::export::xlsx(&matrix, &titulo) {
+                Ok(bytes) => (bytes, "xlsx"),
+                Err(error) => {
+                    self.stats = Some(format!("no se pudo exportar: {error}"));
+                    cx.notify();
+                    return;
+                }
+            },
+            Archivo::Pdf => (datan_report::export::pdf(&matrix, &titulo), "pdf"),
+        };
 
-        match datan_report::export::write_csv(&matrix, &path) {
+        let base = std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(home).join("Desktop"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let ruta = datan_report::export::ruta_de_export(&base, &titulo, &dia, extension);
+
+        match std::fs::write(&ruta, bytes) {
             Ok(()) => {
-                self.stats = Some(format!("exportado a {}", path.display()));
+                self.stats = Some(format!("exportado a {}", ruta.display()));
                 cx.notify();
             }
             Err(error) => {
@@ -2910,10 +2945,30 @@ fn save_button(theme: &Theme, lectura: bool, cx: &mut Context<Datan>) -> AnyElem
     ))
 }
 
+/// El formato de archivo de una exportacion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Archivo {
+    Csv,
+    Excel,
+    Pdf,
+}
+
+/// Los tres formatos, uno al lado del otro. Un menu que no se abre no ensena sus opciones,
+/// y son tres: caben.
 fn export_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
-    clickable(theme, "export".into(), "CSV".to_string(), cx.listener(
-        |view, _event, _window, cx| view.export_csv(cx),
-    ))
+    div()
+        .flex()
+        .gap_1()
+        .child(clickable(theme, "export-csv".into(), "CSV".to_string(), cx.listener(
+            |view, _event, _window, cx| view.export_csv(cx),
+        )))
+        .child(clickable(theme, "export-xlsx".into(), "Excel".to_string(), cx.listener(
+            |view, _event, _window, cx| view.export_excel(cx),
+        )))
+        .child(clickable(theme, "export-pdf".into(), "PDF".to_string(), cx.listener(
+            |view, _event, _window, cx| view.export_pdf(cx),
+        )))
+        .into_any_element()
 }
 
 /// "Abrir" lleva a la lista de informes guardados. No abre el ultimo informe por su cuenta:
