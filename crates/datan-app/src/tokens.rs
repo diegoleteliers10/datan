@@ -26,9 +26,17 @@ pub const PANEL_VISUALES: f32 = 264.0;
 pub const ALTO_PESTANAS: f32 = 40.0;
 /// El alto del grid.
 ///
-/// La lista de filas mide su alto contra el de su caja: necesita un alto definido arriba, o
-/// el alto disponible es "lo que sobre" y no pide ninguna fila.
-pub const ALTO_GRID: f32 = 420.0;
+/// La lista de filas mide su alto contra el de su caja: necesita un alto DEFINIDO arriba, o
+/// el alto disponible es "lo que sobre" y no pide ninguna fila. `flex_1` y `min_h` no
+/// alcanzan: con la lista adentro, la caja mide su contenido. Son seis filas, y las que
+/// faltan se alcanzan con el scroll de la propia tabla.
+pub const ALTO_GRID: f32 = 210.0;
+/// El alto de la tarjeta del grafico, titulo incluido.
+///
+/// Un alto fijo y no "lo que sobre": con el alto repartido por flex y el lienzo sin alto
+/// definido, el dibujo se queda en cero pixeles y no pinta nada. Los 156 del dibujo son una
+/// rejilla de cuatro lineas, el eje de categorias y las columnas.
+pub const ALTO_GRAFICO: f32 = 220.0;
 /// El ancho de una columna del grid.
 ///
 /// Una columna mide lo que la cabecera mas larga: `catalogo_productos[nombre]` con su flecha.

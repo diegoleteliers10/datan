@@ -34,6 +34,7 @@ use datan_storage::Engine;
 
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::chart::{AreaChart, BarChart, LineChart, PieChart};
 use gpui_kit::*;
 // `Div::on_click` vive en este trait y `gpui-kit` reexporta `gpui::*`, asi que entra aqui.
 use gpui_kit::component::Theme;
@@ -1739,101 +1740,67 @@ impl Datan {
             );
         }
 
-        // --- Grafico de barras: la primera dimension contra la primera medida ---
-        if let Some(matrix) = self.matrix.as_ref()
+        // --- El grafico del lienzo ---
+        //
+        // Que se dibuja lo decide el visual elegido. Hasta ahora el tipo elegido cambiaba el
+        // color de un boton y nada mas: tres botones que pintaban lo mismo.
+        let grafico = matches!(
+            self.visual.as_str(),
+            "Todo" | "Barras" | "Columnas" | "Lineas" | "Area" | "Anillo"
+        );
+        // La tabla vive con los dos visuales que la incluyen. En los demas el lienzo es el
+        // grafico y nada mas.
+        let tabla = matches!(self.visual.as_str(), "Todo" | "Tabla");
+
+        if grafico
+            && let Some(matrix) = self.matrix.as_ref()
             && matrix.row_count() > 0
-            && self.selection.dimensions.len() > 0
-            && self.selection.measures.len() > 0
+            && !self.selection.dimensions.is_empty()
+            && !self.selection.measures.is_empty()
         {
             let dim_count = self.selection.dimensions.len();
-            let top = matrix.top(0, dim_count, 8);
-            let max = top.iter().map(|(_, v)| *v).fold(0.0f64, f64::max);
-            if max > 0.0 && top.len() > 1 {
-                let measure_name = matrix
+            let puntos: Vec<Punto> = matrix
+                .top(0, dim_count, TOPE)
+                .into_iter()
+                .enumerate()
+                .map(|(indice, (etiqueta, valor))| Punto {
+                    indice,
+                    etiqueta,
+                    valor,
+                })
+                .collect();
+            // Un punto no es un grafico: una sola barra al borde de un eje vacio dice menos
+            // que el numero que ya esta en la tarjeta.
+            if puntos.len() > 1 {
+                let medida = matrix
                     .header(dim_count)
                     .map(|h| h.label.clone())
                     .unwrap_or_default();
-
-                let bar_dimension = self.selection.dimensions[0];
-                let bars: Vec<AnyElement> = top
-                    .iter()
-                    .map(|(label, value)| {
-                        let fraction = (value / max).clamp(0.02, 1.0);
-                        let value_label = label.clone();
-                        let dimension_column = bar_dimension;
-                        let bar_row = div()
-                            .id(ElementId::Name(SharedString::from(format!(
-                                "bar-{}",
-                                value_label
-                            ))))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.list_hover))
-                            .child(
-                                div()
-                                    .w(px(150.0))
-                                    .flex_shrink_0()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.muted_foreground)
-                                    .overflow_hidden()
-                                    .child(label.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_1()
-                                    .h(px(18.0))
-                                    .rounded_md()
-                                    .child(
-                                        div()
-                                            .flex_grow(fraction as f32 * 1000.0)
-                                            .h_full()
-                                            .rounded_md()
-                                            .bg(tokens::serie_unica()),
-                                    )
-                                    .child(div().flex_grow((1.0 - fraction) as f32 * 1000.0)),
-                            )
-                            .child(
-                                div()
-                                    .w(px(90.0))
-                                    .flex_shrink_0()
-                                    .text_size(px(12.0))
-                                    .text_align(TextAlign::Right)
-                                    .child(format_value(*value)),
-                            );
-                        bar_row
-                            .on_click(cx.listener(move |view, _event, _window, cx| {
-                                view.filter_by_label(dimension_column, &value_label, cx);
-                            }))
-                            .into_any_element()
-                    })
-                    .collect();
-
-                canvas = canvas.child(
-                    components::tarjeta(&theme)
-                        .mx_3()
-                        .mt_3()
-                        .p_4()
-                        .flex_col()
-                        .gap_2()
-                        .child(components::titulo_tarjeta(
-                            &theme,
-                            format!(
-                                "{} por {}",
-                                measure_name,
-                                self.report
-                                    .as_ref()
-                                    .and_then(|r| r
-                                        .model
-                                        .column(self.selection.dimensions[0])
-                                        .map(|(_, c)| c.name.clone()))
-                                    .unwrap_or_default()
-                            ),
-                        ))
-                        .child(div().flex_col().gap_1().children(bars)),
-                );
+                let dimension = self
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.model.column(self.selection.dimensions[0]))
+                    .map(|(_, column)| column.name.clone())
+                    .unwrap_or_default();
+                canvas = canvas.child(card_grafico(
+                    &theme,
+                    &Grafico {
+                        tipo: &self.visual,
+                        puntos: &puntos,
+                        medida: &medida,
+                        dimension: &dimension,
+                        dimension_id: self.selection.dimensions[0],
+                        filas: matrix.row_count(),
+                        // Cuando la tabla no se pinta, el grafico se queda con su alto: un
+                        // grafico chico arriba de media pantalla vacia no es una pagina.
+                        alto: if tabla {
+                            tokens::ALTO_GRAFICO
+                        } else {
+                            tokens::ALTO_GRAFICO + tokens::ALTO_GRID
+                        },
+                    },
+                    cx,
+                ));
             }
         }
 
@@ -1873,7 +1840,15 @@ impl Datan {
 
         // --- El grid ---
         let body: AnyElement = if self.grid.is_some() {
-            self.render_grid(cx).into_any_element()
+            self.render_grid(
+                if grafico {
+                    tokens::ALTO_GRID
+                } else {
+                    tokens::ALTO_GRID + tokens::ALTO_GRAFICO
+                },
+                cx,
+            )
+            .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -1889,26 +1864,32 @@ impl Datan {
 
         // El lienzo segun el visual activo. La barra de formula vive dentro de `canvas`
         // porque es la entrada de medidas: se ve en todos los modos menos Tabla.
-        let canvas_column = div()
+        let mut canvas_column = div()
             .flex()
             .flex_1()
             .flex_col()
             .overflow_hidden()
-            .child(filter_bar)
-            .child(match self.visual.as_str() {
-                "Tabla" => div().into_any_element(),
-                _ => div()
-                    .flex_1()
+            .child(filter_bar);
+        if self.visual != "Tabla" {
+            // Sin `flex_1`: el lienzo mide lo que mide su contenido (la barra DAX, las
+            // tarjetas y el grafico, todos de alto fijo) y la tabla se queda con lo que
+            // sobra. Al reves, el contenido del lienzo no cabe y se come la tabla.
+            canvas_column = canvas_column.child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
                     .flex_col()
                     .child(cabecera)
                     .child(canvas)
                     .into_any_element(),
-            })
-            .child(match (self.visual.as_str(), empty_state) {
-                ("Tabla", _) => div().into_any_element(),
-                (_, Some(empty)) => empty,
-                (_, None) => body,
+            );
+        }
+        if tabla {
+            canvas_column = canvas_column.child(match empty_state {
+                Some(empty) => empty,
+                None => body,
             });
+        }
 
         // --- Panel Visualizaciones ---
         let tipos = [
@@ -2070,11 +2051,13 @@ impl Datan {
             && !self.selection.measures.is_empty();
         let visuales = match self.visual.as_str() {
             "Tarjetas" => usize::from(!self.totals.is_empty()),
-            "Barras" => usize::from(grafico_listo),
             "Tabla" => usize::from(con_filas),
-            _ => usize::from(!self.totals.is_empty())
-                + usize::from(grafico_listo)
-                + usize::from(con_filas),
+            "Todo" => {
+                usize::from(!self.totals.is_empty())
+                    + usize::from(grafico_listo)
+                    + usize::from(con_filas)
+            }
+            _ => usize::from(!self.totals.is_empty()) + usize::from(grafico_listo),
         };
 
         // --- Pestañas de paginas ---
@@ -2302,7 +2285,7 @@ impl Datan {
     /// `uniform_list` y no el componente `Table` de gpui-kit: el primero es el que la
     /// Fase 0 midio a 23 microsegundos por frame con un millon de filas, y el segundo trae
     /// su propia virtualizacion sin medir. gpui-kit se usa para el tema y los estilos.
-    fn render_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_grid(&mut self, alto: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         if let Some(matrix) = self.matrix.as_mut()
             && let Some((column, descending)) = self.sort
@@ -2342,19 +2325,17 @@ impl Datan {
         let header = div()
             .flex()
             .flex_shrink_0()
+            .rounded_md()
             .bg(theme.muted)
             .children(columns.iter().enumerate().map(|(index, column)| {
-                let arrow = if index < dimension_count {
-                    "  \u{25be}"
-                } else {
-                    match self.sort {
-                        Some((sorted_column, false)) if sorted_column == index => "  \u{2191}",
-                        Some((sorted_column, true)) if sorted_column == index => "  \u{2193}",
-                        _ => "  \u{21c5}",
-                    }
+                // Solo las MEDIDAS ordenan. Una dimension ya define las filas; una flecha
+                // sobre una columna que no ordena es una promesa que el clic no cumple.
+                let arrow = match self.sort {
+                    Some((sorted_column, false)) if sorted_column == index => "  \u{2191}",
+                    Some((sorted_column, true)) if sorted_column == index => "  \u{2193}",
+                    _ if index >= dimension_count => "  \u{21c5}",
+                    _ => "",
                 };
-                // Solo las MEDIDAS ordenan. Una dimension ya define las filas; ordenar por
-                // ella es el orden del GROUP BY, que ya esta aplicado.
                 let base = div()
                     .w(px(tokens::ANCHO_CELDA))
                     .flex_shrink_0()
@@ -2457,8 +2438,13 @@ impl Datan {
         // a quien pedirle que suba.
         .track_scroll(&scroll);
 
-        div()
-            .h(px(tokens::ALTO_GRID))
+        // La tabla vive en una tarjeta como el grafico: las dos son superficies del mismo
+        // lienzo, y una tabla suelta sobre el gris se lee como un volcado de datos.
+        components::tarjeta(cx.theme())
+            .mx_3()
+            .mb_3()
+            .p_2()
+            .h(px(alto))
             .flex_shrink_0()
             .flex_col()
             .overflow_hidden()
@@ -2493,6 +2479,337 @@ fn export_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
     clickable(theme, "export".into(), "CSV".to_string(), cx.listener(
         |view, _event, _window, cx| view.export_csv(cx),
     ))
+}
+
+/// Un punto de un grafico: la categoria y el valor de la primera medida.
+#[derive(Clone)]
+struct Punto {
+    /// El lugar que ocupa en la serie. Es el indice de la paleta: sin el, el color de una
+    /// porcion se elige desde afuera del dato.
+    indice: usize,
+    etiqueta: String,
+    valor: f64,
+}
+
+/// Cuantos valores entran en un grafico.
+///
+/// Ocho barras se leen de un golpe. Veinte no: el eje de categorias se convierte en una
+/// lista de nombres imposible de seguir.
+const TOPE: usize = 8;
+
+/// Lo que hace falta para armar la tarjeta de un grafico.
+#[derive(Clone, Copy)]
+struct Grafico<'a> {
+    /// La clave del tipo elegido.
+    tipo: &'a str,
+    puntos: &'a [Punto],
+    /// El nombre de la medida, para el titulo.
+    medida: &'a str,
+    /// El nombre de la dimension, para el titulo.
+    dimension: &'a str,
+    /// La columna que se filtra al tocar una categoria.
+    dimension_id: ObjectId,
+    /// Cuantas filas tiene la matriz: el titulo dice cuantas quedaron afuera.
+    filas: usize,
+    alto: f32,
+}
+
+/// La tarjeta de un grafico: el titulo, el dibujo y, en el anillo, la leyenda.
+///
+/// El titulo se arma con el nombre de la medida y el de la dimension. Son los nombres del
+/// modelo y no se traducen: un grafico que dice "Ventas" cuando la medida se llama
+/// `product_boleta quantity` manda al usuario a buscar un campo que no existe.
+fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> AnyElement {
+    let Grafico {
+        tipo,
+        puntos,
+        medida,
+        dimension,
+        dimension_id,
+        filas,
+        alto,
+    } = *grafico;
+    let mut fila = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(components::titulo_tarjeta(
+            theme,
+            format!("{medida} por {dimension}"),
+        ))
+        .child(div().flex_1());
+    // Cuantos valores quedaron afuera. Un grafico que dibuja ocho de quinientas filas y no
+    // lo dice es un grafico que miente con el eje.
+    if filas > puntos.len() {
+        fila = fila.child(components::nota(
+            theme,
+            format!("los {} valores mas altos", puntos.len()),
+        ));
+    }
+
+    let cuerpo: AnyElement = match tipo {
+        // El anillo no lleva etiquetas sobre las porciones: ocho lineas de guia alrededor de
+        // un circulo se pisan entre ellas. La leyenda dice lo mismo, en una columna, y cada
+        // fila filtra.
+        "Anillo" => div()
+            .flex()
+            .flex_1()
+            .gap_4()
+            .child(div().flex_1().child(dibujo(tipo, puntos, medida)))
+            .child(leyenda(theme, puntos, dimension_id, cx))
+            .into_any_element(),
+        // Las barras horizontales se dibujan a mano porque son el clic: un grafico del
+        // sistema no avisa que barra se toco, y filtrar por categoria desde el grafico es una
+        // funcion que ya existe.
+        "Barras" | "Todo" => barras(theme, puntos, dimension_id, cx),
+        _ => div()
+            .flex()
+            .flex_1()
+            .child(dibujo(tipo, puntos, medida))
+            .into_any_element(),
+    };
+
+    components::tarjeta(theme)
+        .mx_3()
+        .mt_3()
+        .p_4()
+        .h(px(alto))
+        .flex()
+        .flex_shrink_0()
+        .flex_col()
+        .overflow_hidden()
+        .gap_3()
+        .child(fila)
+        .child(cuerpo)
+        .into_any_element()
+}
+
+/// El dibujo de un grafico del sistema, segun el tipo elegido.
+fn dibujo(tipo: &str, puntos: &[Punto], medida: &str) -> AnyElement {
+    let datos = puntos.to_vec();
+    let nombre = SharedString::from(medida.to_string());
+    // Una sola medida: un solo color. El color por categoria es para el anillo, donde cada
+    // porcion ES una categoria.
+    let color = tokens::serie_unica();
+    let id = ElementId::Name(SharedString::from(format!("grafico-{tipo}")));
+
+    match tipo {
+        "Lineas" => LineChart::new(datos)
+            .id(id)
+            .x(|punto: &Punto| punto.etiqueta.clone())
+            .y(|punto: &Punto| punto.valor)
+            .stroke(color)
+            .name(nombre)
+            .tooltip_title(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
+            .tooltip_value(|_, valor| SharedString::from(format_value(valor)))
+            .linear()
+            .y_axis(true)
+            .y_tick_count(4)
+            .y_tick_format(format_value)
+            .grid(true)
+            .grid_dashed(false)
+            .into_any_element(),
+        "Area" => AreaChart::new(datos)
+            .id(id)
+            .x(|punto: &Punto| punto.etiqueta.clone())
+            .y(|punto: &Punto| punto.valor)
+            .stroke(color)
+            .fill(color.opacity(0.18))
+            .name(nombre)
+            .tooltip_title(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
+            .tooltip_value(|_, _, valor| SharedString::from(format_value(valor)))
+            .linear()
+            .y_axis(true)
+            .y_tick_count(4)
+            .y_tick_format(format_value)
+            .grid(true)
+            .grid_dashed(false)
+            .into_any_element(),
+        // `inner_radius` esta en pixeles, como el radio exterior, que sale del alto de la
+        // caja.
+        "Anillo" => PieChart::new(datos)
+            .id(id)
+            .value(|punto: &Punto| punto.valor as f32)
+            .color(|punto: &Punto| tokens::serie(punto.indice))
+            .inner_radius(64.0)
+            .name(nombre)
+            .tooltip_name(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
+            .into_any_element(),
+        _ => BarChart::new(datos)
+            .id(id)
+            .band(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
+            .value(|punto: &Punto| punto.valor)
+            .fill(move |_, _, _, _| color)
+            .name(nombre)
+            .tooltip_title(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
+            .tooltip_value(|_, valor| SharedString::from(format_value(valor)))
+            .value_axis(true)
+            .value_tick_count(4)
+            .value_tick_format(format_value)
+            .grid(true)
+            .grid_dashed(false)
+            .corner_radii(Corners::all(px(4.)))
+            .into_any_element(),
+    }
+}
+
+/// La leyenda del anillo: el color, la categoria y su valor, y cada fila filtra.
+///
+/// Dos columnas y no `flex_wrap`: el envoltorio reparte las lineas por el alto que sobre, y
+/// ocho filas que se separan solas se leen como ocho bloques sueltos.
+fn leyenda(
+    theme: &Theme,
+    puntos: &[Punto],
+    dimension_id: ObjectId,
+    cx: &mut Context<Datan>,
+) -> AnyElement {
+    let mitad = puntos.len().div_ceil(2).max(1);
+    let (izquierda, derecha) = puntos.split_at(mitad.min(puntos.len()));
+    div()
+        .w(px(360.0))
+        .flex_shrink_0()
+        .flex()
+        .gap_x_2()
+        .child(leyenda_columna(theme, izquierda, dimension_id, cx))
+        .child(leyenda_columna(theme, derecha, dimension_id, cx))
+        .into_any_element()
+}
+
+/// Una columna de la leyenda: una fila por categoria.
+fn leyenda_columna(
+    theme: &Theme,
+    puntos: &[Punto],
+    dimension_id: ObjectId,
+    cx: &mut Context<Datan>,
+) -> AnyElement {
+    let mut columna = div().flex_1().flex_col().gap_1();
+    for punto in puntos {
+        let etiqueta = punto.etiqueta.clone();
+        columna = columna.child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "leyenda-{}",
+                    punto.indice
+                ))))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.list_hover))
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(tokens::serie(punto.indice)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_size(px(tokens::LETRA_ETIQUETA))
+                        .child(punto.etiqueta.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(tokens::LETRA_ETIQUETA))
+                        .text_color(theme.muted_foreground)
+                        .child(format_value(punto.valor)),
+                )
+                .on_click(cx.listener(move |view, _event, _window, cx| {
+                    view.filter_by_label(dimension_id, &etiqueta, cx);
+                })),
+        );
+    }
+    columna.into_any_element()
+}
+
+/// Las barras horizontales de una medida, una por categoria, y cada barra filtra.
+///
+/// Se dibujan con divs y no con un grafico del sistema porque el clic tiene que saber QUE
+/// barra se toco, y los graficos no lo dicen.
+fn barras(
+    theme: &Theme,
+    puntos: &[Punto],
+    dimension_id: ObjectId,
+    cx: &mut Context<Datan>,
+) -> AnyElement {
+    let max = puntos
+        .iter()
+        .map(|punto| punto.valor)
+        .fold(0.0f64, f64::max)
+        .max(f64::MIN_POSITIVE);
+
+    let filas: Vec<AnyElement> = puntos
+        .iter()
+        .map(|punto| {
+            let fraccion = (punto.valor / max).clamp(0.02, 1.0);
+            let etiqueta = punto.etiqueta.clone();
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "barra-{}",
+                    punto.etiqueta
+                ))))
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.list_hover))
+                .child(
+                    div()
+                        .w(px(150.0))
+                        .flex_shrink_0()
+                        .text_size(px(tokens::LETRA_ETIQUETA))
+                        .text_color(theme.muted_foreground)
+                        .overflow_hidden()
+                        .truncate()
+                        .child(punto.etiqueta.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .h(px(18.0))
+                        .rounded_md()
+                        .child(
+                            div()
+                                .flex_grow(fraccion as f32 * 1000.0)
+                                .h_full()
+                                .rounded_md()
+                                .bg(tokens::serie_unica()),
+                        )
+                        .child(div().flex_grow((1.0 - fraccion) as f32 * 1000.0)),
+                )
+                .child(
+                    div()
+                        .w(px(80.0))
+                        .flex_shrink_0()
+                        .text_size(px(tokens::LETRA_ETIQUETA))
+                        .text_align(TextAlign::Right)
+                        .child(format_value(punto.valor)),
+                )
+                .on_click(cx.listener(move |view, _event, _window, cx| {
+                    view.filter_by_label(dimension_id, &etiqueta, cx);
+                }))
+                .into_any_element()
+        })
+        .collect();
+
+    div()
+        .flex()
+        .flex_1()
+        .flex_col()
+        .gap_1()
+        .justify_center()
+        .children(filas)
+        .into_any_element()
 }
 
 /// Un numero para una tarjeta o un eje: sin decimales inutiles.

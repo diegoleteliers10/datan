@@ -1111,3 +1111,40 @@ mirar la linea se le agrego una columna `fecha date` con DDL sobre el banco de p
 es dato de prueba, no codigo.
 
 185 tests.
+
+### Paso 5: los graficos y la tabla
+
+Hasta este paso el visual elegido cambiaba el color de un boton y nada mas: los tres tipos
+pintaban el mismo lienzo. Ahora el tipo decide QUE se dibuja, y el lienzo tiene tres zonas: las
+tarjetas, el grafico y la tabla.
+
+Los graficos salen de `gpui_kit::component::chart` y no de una dependencia nueva. Columnas es
+`BarChart`, Lineas es `LineChart`, Area es `AreaChart` y Anillo es `PieChart` con
+`inner_radius`. El eje de valores reserva su caja a partir del ancho de sus propias etiquetas,
+que es lo que el mockup de referencia no hace: ahi "0 mil EUR" sale cortado por el borde. Los
+tics pasan por `format_value`, la rejilla va solida y el tooltip dice el valor como se lee.
+
+Decision: las Barras siguen dibujandose con divs. Un grafico del sistema no avisa QUE barra se
+toco, y tocar una barra pone un filtro, que es una funcion que ya existia. Columnas es el
+`BarChart` real, asi que el componente se ejercita igual. El anillo paga el mismo precio al
+reves: sin etiquetas sobre las porciones (ocho lineas de guia alrededor de un circulo se pisan),
+con una leyenda de dos columnas que dice lo mismo y donde cada fila filtra.
+
+El titulo es el nombre de la medida y el de la dimension, sin traducir, y al lado dice cuantos
+valores quedaron afuera cuando la matriz tiene mas filas que los ocho que se dibujan.
+
+La tabla pasa a una tarjeta blanca con la cabecera redondeada, y la flecha de orden aparece solo
+en las columnas de medidas: sobre una dimension no ordenaba nada, y una flecha que promete algo
+que el clic no cumple es peor que ninguna.
+
+Tres hallazgos de layout, los tres medidos en la ventana:
+
+- `flex_1` y `min_h` no alcanzan para darle alto a una caja con `uniform_list` adentro: la caja
+  mide su contenido. El alto de la tabla y el del grafico van explicitos, y se reparten por tipo
+  de visual (con la tabla, el grafico mide 220; sin la tabla, 430; con la tabla sola, la tabla
+  mide 430).
+- `.flex_col()` sin `.flex()` otra vez, ahora en el div del lienzo: sin `flex` el lienzo crecia
+  con su contenido y empujaba la tabla fuera de la ventana.
+- `overflow_hidden` corta, no encoge. El contenido que no cabe no busca su scroll: desaparece.
+
+185 tests.
