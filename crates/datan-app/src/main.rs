@@ -187,7 +187,7 @@ impl Datan {
                     .justify_between()
                     .px_4()
                     .py_3()
-                    .rounded_md()
+                    .rounded_xl()
                     .border_1()
                     .border_color(theme.border)
                     .cursor_pointer()
@@ -199,13 +199,12 @@ impl Datan {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(tokens::LETRA_ETIQUETA))
                             .text_color(theme.muted_foreground)
                             .child(connection.database.clone()),
                     )
                     .on_click(cx.listener({
                         move |view, _event, _window, cx| {
-                            eprintln!("[datan] click en conexion: {database}");
                             view.connect(&database, cx)
                         }
                     })),
@@ -274,7 +273,6 @@ impl Datan {
                 .with_measures(self.selection.measures.clone()),
         );
         self.toggle(id, true, cx);
-        eprintln!("[datan] medida creada: {name} = {expression}");
     }
 
     /// Filtra por el valor de texto de una dimension, como pinchar una barra.
@@ -1160,7 +1158,6 @@ fn range_button(
         label.to_string(),
         active,
         cx.listener(move |view, _event, _window, cx| {
-            eprintln!("[datan] rango: {months}M");
             view.date_months = (months != 0).then_some(months);
             view.refresh(cx);
         }),
@@ -1394,13 +1391,13 @@ impl Render for Datan {
                 .gap_4()
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(20.0))
+                        .font_semibold()
+                        .text_size(px(tokens::LETRA_H1))
                         .child("Datan"),
                 )
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(px(tokens::LETRA_CUERPO))
                         .text_color(theme.muted_foreground)
                         .child("Elige una conexion"),
                 )
@@ -1507,10 +1504,11 @@ impl Datan {
             .map(|m| m.id)
             .collect();
 
-        // El alto del panel sale de la ventana: `h_full` (100 %) no se resuelve contra un
-        // contenedor con `flex_1`, y un panel sin alto definido mide lo que mide su
-        // contenido. Con el contenido corto, el pie queda flotando a media altura y el
-        // espacio libre se ve como un hueco al final de la lista.
+        // El alto de la zona de trabajo sale de la ventana: `h_full` (100 %) no se resuelve
+        // contra un contenedor con `flex_1`, y una columna sin alto definido mide lo que mide
+        // su contenido. En el panel eso deja el pie flotando a media altura. En el lienzo es
+        // peor: la tabla, que mide 210 px, se sale de la ventana y se dibuja DEBAJO de la
+        // barra de pestanas.
         let alto_panel =
             window.viewport_size().height - px(tokens::BARRA_SUPERIOR) - px(tokens::ALTO_PESTANAS);
         let sidebar = div()
@@ -1528,7 +1526,7 @@ impl Datan {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .h(px(40.0))
+                    .h(px(tokens::ALTO_CABECERA))
                     .border_b_1()
                     .border_color(theme.border)
                     .child(components::titulo_tarjeta(&theme, "Datos"))
@@ -1542,7 +1540,7 @@ impl Datan {
                 // La lupa va DENTRO del campo y el campo dibuja su propio borde: un icono
                 // afuera y una caja alrededor hacen dos marcos para un solo control.
                 Input::new(self.search.as_ref().expect("recien creada"))
-                    .h(px(32.0))
+                    .h(px(tokens::ALTO_CONTROL))
                     .cleanable(true)
                     .prefix(components::icono(
                         IconName::Search,
@@ -1608,7 +1606,7 @@ impl Datan {
             div()
                 .px_2()
                 .py_1()
-                .rounded_md()
+                .rounded_xl()
                 .bg(theme.muted)
                 .text_size(px(tokens::LETRA_ETIQUETA))
                 .child(
@@ -1695,7 +1693,7 @@ impl Datan {
         if self.filters.is_empty() {
             filter_bar = filter_bar.child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(tokens::LETRA_ETIQUETA))
                     .text_color(theme.muted_foreground)
                     .child("Sin filtros. Pincha una celda de una dimension."),
             );
@@ -1733,13 +1731,13 @@ impl Datan {
                 .flex()
                 .items_center()
                 .gap_2()
-                .px_2()
+                .px_3()
                 .py_2()
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(tokens::LETRA_NOTA))
                         .text_color(theme.muted_foreground)
                         .flex_shrink_0()
                         .child("DAX"),
@@ -1831,13 +1829,10 @@ impl Datan {
                         dimension: &dimension,
                         dimension_id: self.selection.dimensions[0],
                         filas: matrix.row_count(),
-                        // Cuando la tabla no se pinta, el grafico se queda con su alto: un
-                        // grafico chico arriba de media pantalla vacia no es una pagina.
-                        alto: if tabla {
-                            tokens::ALTO_GRAFICO
-                        } else {
-                            tokens::ALTO_GRAFICO + tokens::ALTO_GRID
-                        },
+                        // Cuando la tabla no se pinta, el grafico se queda con el alto de la
+                        // pagina: un grafico chico arriba de media pantalla vacia no es una
+                        // pagina.
+                        alto: tabla.then_some(tokens::ALTO_GRAFICO),
                     },
                     cx,
                 ));
@@ -1853,11 +1848,15 @@ impl Datan {
             .filter(|grid| grid.row_count == 0)
             .map(|_| {
                 div()
+                    // `.flex()` ademas de `.flex_1()`: sin el, el estado vacio no era una
+                    // caja flexible y `items_center`/`justify_center` no centraban nada.
+                    .flex()
                     .flex_1()
                     .items_center()
                     .justify_center()
                     .child(
                         div()
+                            .flex()
                             .flex_col()
                             .items_center()
                             .gap_2()
@@ -1868,27 +1867,32 @@ impl Datan {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_size(px(tokens::LETRA_ETIQUETA))
                                     .text_color(theme.muted_foreground)
-                                    .child(
-                                        "Revisa los filtros, o prueba la base de pruebas                                          desde la pantalla de conexion.",
-                                    ),
+                                    .child("Revisa los filtros, o prueba otra base desde la pantalla de conexion."),
                             ),
                     )
                     .into_any_element()
             });
 
         // --- El grid ---
+        //
+        // La tabla se queda con el alto que sobra en lugar de medir un alto fijo: el grafico
+        // y las tarjetas ya tienen el suyo, y lo que resta es distinto en cada ventana. Con
+        // un alto fijo, en una pantalla mas baja que la de referencia el sobrante se dibuja
+        // fuera de la ventana.
         let body: AnyElement = if self.grid.is_some() {
-            self.render_grid(
-                if grafico {
-                    tokens::ALTO_GRID
-                } else {
-                    tokens::ALTO_GRID + tokens::ALTO_GRAFICO
-                },
-                cx,
-            )
-            .into_any_element()
+            // El margen va en la caja que reparte el alto, no en la tarjeta: un margen
+            // dentro de una tarjeta con `h_full` empuja la tarjeta fuera de su caja, y el
+            // borde de abajo vuelve a caer detras de la barra de pestanas.
+            div()
+                .flex()
+                .flex_1()
+                .mx_3()
+                .mb_3()
+                .overflow_hidden()
+                .child(self.render_grid(cx))
+                .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -1907,21 +1911,24 @@ impl Datan {
         let mut canvas_column = div()
             .flex()
             .flex_1()
+            .h(alto_panel)
             .flex_col()
             .overflow_hidden()
             .child(filter_bar);
         if self.visual != "Tabla" {
-            // Sin `flex_1`: el lienzo mide lo que mide su contenido (la barra DAX, las
-            // tarjetas y el grafico, todos de alto fijo) y la tabla se queda con lo que
-            // sobra. Al reves, el contenido del lienzo no cabe y se come la tabla.
+            // El lienzo se reparte segun quien mas comparta la pagina. Con la tabla abajo,
+            // el grafico mide lo suyo y la tabla se queda con el resto. Sin tabla, el
+            // grafico se queda con el resto: un grafico chico arriba de media pantalla
+            // vacia no es una pagina. Dos `flex_1` hermanos se reparten el alto a la mitad,
+            // y ahi el grafico se queda sin su dibujo.
+            let mut lienzo = div().flex().flex_col().overflow_hidden();
+            lienzo = if tabla {
+                lienzo.flex_shrink_0()
+            } else {
+                lienzo.flex_1()
+            };
             canvas_column = canvas_column.child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .flex_col()
-                    .child(cabecera)
-                    .child(canvas)
-                    .into_any_element(),
+                lienzo.child(cabecera).child(canvas).into_any_element(),
             );
         }
         if tabla {
@@ -2021,10 +2028,17 @@ impl Datan {
             .flex()
             .flex_col()
             .child(
-                div().px_3().pt_3().pb_2().child(components::titulo_tarjeta(
-                    &theme,
-                    "Visualizaciones",
-                )),
+                // La misma cabecera que la del panel de Datos: alto, relleno y linea. Dos
+                // paneles hermanos con la cabecera a distinta altura se leen como dos
+                // pantallas pegadas.
+                div()
+                    .flex()
+                    .items_center()
+                    .px_3()
+                    .h(px(tokens::ALTO_CABECERA))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(components::titulo_tarjeta(&theme, "Visualizaciones")),
             )
             .child(div().px_2().pb_3().child(viz_buttons))
             .child(
@@ -2086,7 +2100,7 @@ impl Datan {
                 div()
                     .w(px(26.0))
                     .h(px(26.0))
-                    .rounded_lg()
+                    .rounded_xl()
                     .bg(theme.primary)
                     .flex()
                     .items_center()
@@ -2097,7 +2111,12 @@ impl Datan {
                         theme.primary_foreground,
                     )),
             )
-            .child(div().font_semibold().text_size(px(13.0)).child("Datan"))
+            .child(
+                div()
+                    .font_semibold()
+                    .text_size(px(tokens::LETRA_CUERPO))
+                    .child("Datan"),
+            )
             .child(components::nota(
                 &theme,
                 format!(
@@ -2145,9 +2164,9 @@ impl Datan {
             .border_color(theme.border)
             .child(
                 div()
-                    .h(px(24.0))
+                    .h(px(tokens::ALTO_PASTILLA))
                     .px_3()
-                    .rounded_md()
+                    .rounded_xl()
                     .bg(theme.muted)
                     .flex()
                     .items_center()
@@ -2228,7 +2247,7 @@ impl Datan {
                 .gap_2()
                 .px_2()
                 .h(px(tokens::ALTO_FILA))
-                .rounded_md()
+                .rounded_xl()
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.list_hover))
                 .child(components::icono(
@@ -2355,7 +2374,7 @@ impl Datan {
     /// `uniform_list` y no el componente `Table` de gpui-kit: el primero es el que la
     /// Fase 0 midio a 23 microsegundos por frame con un millon de filas, y el segundo trae
     /// su propia virtualizacion sin medir. gpui-kit se usa para el tema y los estilos.
-    fn render_grid(&mut self, alto: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         if let Some(matrix) = self.matrix.as_mut()
             && let Some((column, descending)) = self.sort
@@ -2395,7 +2414,7 @@ impl Datan {
         let header = div()
             .flex()
             .flex_shrink_0()
-            .rounded_md()
+            .rounded_xl()
             .bg(theme.muted)
             .children(columns.iter().enumerate().map(|(index, column)| {
                 // Solo las MEDIDAS ordenan. Una dimension ya define las filas; una flecha
@@ -2413,7 +2432,7 @@ impl Datan {
                     .py_2()
                     .overflow_hidden()
                     .truncate()
-                    .text_size(px(12.0))
+                    .text_size(px(tokens::LETRA_ETIQUETA))
                     .text_color(theme.muted_foreground)
                     .child(format!("{}{arrow}", column.header));
 
@@ -2454,7 +2473,7 @@ impl Datan {
                                 .flex_shrink_0()
                                 .px_3()
                                 .py_1()
-                                .text_size(px(13.0))
+                                .text_size(px(tokens::LETRA_CUERPO))
                                 .child(
                                     column
                                         .values
@@ -2480,9 +2499,6 @@ impl Datan {
                                 .cursor_pointer()
                                 .id(id)
                                 .on_click(move |_event, _window, app| {
-                                    eprintln!(
-                                        "[datan] click en celda ({row_index}, {column_index})"
-                                    );
                                     view.update(app, |view, cx| {
                                         view.drill(row_index, column_index, cx);
                                     });
@@ -2511,10 +2527,11 @@ impl Datan {
         // La tabla vive en una tarjeta como el grafico: las dos son superficies del mismo
         // lienzo, y una tabla suelta sobre el gris se lee como un volcado de datos.
         components::tarjeta(cx.theme())
-            .mx_3()
-            .mb_3()
             .p_2()
-            .h(px(alto))
+            // `h_full` y no un alto propio: la caja ya tiene el suyo (el que sobra en la
+            // ventana) y la lista de filas se mide contra el. Un alto fijo aca adentro
+            // vuelve a sacar la tabla de la ventana.
+            .h_full()
             .flex_shrink_0()
             .flex_col()
             .overflow_hidden()
@@ -2581,7 +2598,9 @@ struct Grafico<'a> {
     dimension_id: ObjectId,
     /// Cuantas filas tiene la matriz: el titulo dice cuantas quedaron afuera.
     filas: usize,
-    alto: f32,
+    /// El alto del dibujo. `None` cuando el grafico es lo unico del lienzo: ahi ocupa lo
+    /// que sobra en la ventana, que es lo que hace la referencia.
+    alto: Option<f32>,
 }
 
 /// La tarjeta de un grafico: el titulo, el dibujo y, en el anillo, la leyenda.
@@ -2636,19 +2655,21 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
             .into_any_element(),
     };
 
-    components::tarjeta(theme)
+    let mut tarjeta = components::tarjeta(theme)
         .mx_3()
         .mt_3()
         .p_4()
-        .h(px(alto))
         .flex()
-        .flex_shrink_0()
         .flex_col()
         .overflow_hidden()
         .gap_3()
         .child(fila)
-        .child(cuerpo)
-        .into_any_element()
+        .child(cuerpo);
+    tarjeta = match alto {
+        Some(alto) => tarjeta.h(px(alto)).flex_shrink_0(),
+        None => tarjeta.flex_1(),
+    };
+    tarjeta.into_any_element()
 }
 
 /// El dibujo de un grafico del sistema, segun el tipo elegido.
@@ -2763,7 +2784,7 @@ fn leyenda_columna(
                 .gap_2()
                 .px_2()
                 .py_1()
-                .rounded_md()
+                .rounded_xl()
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.list_hover))
                 .child(
@@ -2843,13 +2864,15 @@ fn barras(
                     div()
                         .flex()
                         .flex_1()
+                        // La esquina de una marca de dato, no la de un control: la misma
+                        // que la columna del grafico de columnas.
                         .h(px(18.0))
-                        .rounded_md()
+                        .rounded_sm()
                         .child(
                             div()
                                 .flex_grow(fraccion as f32 * 1000.0)
                                 .h_full()
-                                .rounded_md()
+                                .rounded_sm()
                                 .bg(tokens::serie_unica()),
                         )
                         .child(div().flex_grow((1.0 - fraccion) as f32 * 1000.0)),

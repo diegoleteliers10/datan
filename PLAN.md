@@ -1181,3 +1181,38 @@ sin ningun mosaico encendido al abrir la app, que se lee como un error.
 visible: los hijos apilados sin estiramiento.
 
 185 tests.
+
+### Paso 7: la pasada de consistencia
+
+Cinco radios distintos en la misma pantalla (6, 12, 16 px) pasan a dos: 8 px en todo lo que se
+toca y en todo lo que agrupa una fila (botones, pastillas, campos, filas de la barra lateral y
+del grid, mosaicos) y 16 px en una tarjeta. Las marcas de un grafico bajan a 4 px, que es lo que
+ya usaba la columna del grafico de columnas: una barra de 18 px con la esquina de un boton se lee
+como un boton. Los literales `px(20.0)`, `px(13.0)`, `px(12.0)` y `px(11.0)` pasan a los tokens
+que ya existian, y el 13 estrena nombre (`LETRA_CUERPO`), que era el tamano del texto corriente
+escrito a mano en cuatro sitios.
+
+Los dos paneles hermanos estrenan la misma cabecera: mismo alto (40 px), mismo relleno y la misma
+linea de abajo. Antes la de Datos media 40 y la de Visualizaciones lo que midiera su texto. La
+caja del control segmentado se queda en 28 px, el alto de un boton: el segmento media 22 y la
+caja 30, y la barra superior tenia dos altos distintos a la vista.
+
+Hallazgo de fondo, y el defecto mas visible de todo el trabajo: la tabla se dibujaba DEBAJO de la
+barra de pestanas. El lienzo medía lo que medía su contenido (cabecera, barra DAX, tarjetas,
+grafico y 210 px de tabla) y `h_full` no se resuelve contra un `flex_1`, asi que la columna se
+salia de la ventana. A 1470 x 956 (la referencia) el contenido entraba con 32 px de sobra y el
+defecto no se veia. En la pantalla real, que deja 888 px utiles despues de la barra de menus, la
+ultima fila y el borde de la tarjeta caian detras de las pestanas. Se arregla con el mismo
+recurso que el panel de Datos: un alto calculado desde la ventana. Con el alto definido, la tabla
+ya no necesita su propio alto fijo: se queda con lo que sobra, que es distinto en cada ventana, y
+`ALTO_GRID` desaparece. El grafico hace lo mismo cuando es lo unico del lienzo.
+
+Tres `.flex_col()` sin `.flex()` mas, los tres en el mismo sitio: el estado vacio. Sin `.flex()`
+la caja no era flexible y `items_center`/`justify_center` no centraban nada. Verificado forzando
+la condicion del estado vacio y capturando la pantalla.
+
+Fuera el ruido de consola de los eventos: quedaban cuatro `eprintln!` de depuracion (clic en una
+conexion, medida creada, rango elegido, clic en una celda). El de un guardado fallido se queda:
+es la unica senal de un error que la pantalla no dice.
+
+185 tests.

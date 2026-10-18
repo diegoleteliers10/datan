@@ -9,8 +9,10 @@
 //! copia en una constante se queda atras el dia que el tema cambia. Aqui vive solo lo que el
 //! tema no nombra: la paleta de series y la escala de tamanos.
 //!
-//! La escala de radios y de fracciones es la del sistema de estilos, que es la de Tailwind.
-//! Un control mide 8 px, una tarjeta 16 px, una pastilla el alto completo.
+//! La escala de radios es la del sistema de estilos. La app usa dos: 8 px (`rounded_xl`) en
+//! todo lo que se toca y en todo lo que agrupa una fila, y 16 px (`rounded_2xl`) en una
+//! tarjeta. Las marcas de un grafico van mas abajo, en 4 px, porque una barra de 18 px con la
+//! esquina de un boton se lee como un boton.
 
 use gpui::{Hsla, rgb};
 
@@ -24,18 +26,11 @@ pub const PANEL_DATOS: f32 = 264.0;
 pub const PANEL_VISUALES: f32 = 264.0;
 /// El alto de la barra de pestanas.
 pub const ALTO_PESTANAS: f32 = 40.0;
-/// El alto del grid.
+/// El alto de la tarjeta del grafico cuando comparte el lienzo con la tabla.
 ///
-/// La lista de filas mide su alto contra el de su caja: necesita un alto DEFINIDO arriba, o
-/// el alto disponible es "lo que sobre" y no pide ninguna fila. `flex_1` y `min_h` no
-/// alcanzan: con la lista adentro, la caja mide su contenido. Son seis filas, y las que
-/// faltan se alcanzan con el scroll de la propia tabla.
-pub const ALTO_GRID: f32 = 210.0;
-/// El alto de la tarjeta del grafico, titulo incluido.
-///
-/// Un alto fijo y no "lo que sobre": con el alto repartido por flex y el lienzo sin alto
-/// definido, el dibujo se queda en cero pixeles y no pinta nada. Los 156 del dibujo son una
-/// rejilla de cuatro lineas, el eje de categorias y las columnas.
+/// Cuando el grafico es lo unico del lienzo NO se usa: ahi la tarjeta se queda con lo que
+/// sobra, que es lo que hace la referencia. Con un alto fijo, "lo que sobra" se dibujaba
+/// fuera de la ventana.
 pub const ALTO_GRAFICO: f32 = 220.0;
 /// El ancho de una columna del grid.
 ///
@@ -44,6 +39,15 @@ pub const ALTO_GRAFICO: f32 = 220.0;
 pub const ANCHO_CELDA: f32 = 240.0;
 /// El alto de un boton, un input y un boton de segmento.
 pub const ALTO_CONTROL: f32 = 28.0;
+/// El alto de la caja de un control segmentado.
+///
+/// `ALTO_CONTROL` menos el relleno de la caja (4 px arriba y abajo). Sin esto el segmentado
+/// mide dos pixeles mas que los botones de al lado y la barra queda desalineada.
+pub const ALTO_SEGMENTO: f32 = 20.0;
+/// El alto de una pastilla: el nombre de la base, la pestana de la pagina.
+pub const ALTO_PASTILLA: f32 = 24.0;
+/// El alto de la cabecera de un panel.
+pub const ALTO_CABECERA: f32 = 40.0;
 /// El alto de una fila de la barra lateral.
 pub const ALTO_FILA: f32 = 26.0;
 /// El ancho de un mosaico del selector de visuales.
@@ -62,6 +66,8 @@ pub const LETRA_VALOR: f32 = 22.0;
 pub const LETRA_TITULO: f32 = 12.0;
 /// Una etiqueta, un eje, una pastilla.
 pub const LETRA_ETIQUETA: f32 = 12.0;
+/// El texto corriente: una celda del grid, la marca de la barra superior.
+pub const LETRA_CUERPO: f32 = 13.0;
 /// Un conteo, una nota al pie, la leyenda.
 pub const LETRA_NOTA: f32 = 11.0;
 /// Un icono de control.
