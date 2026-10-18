@@ -409,6 +409,59 @@ fn la_ventana_anterior_mide_lo_mismo_que_la_actual() {
 }
 
 #[test]
+fn un_filtro_con_varios_valores_da_la_union_y_sobrevive_a_guardar() {
+    // Un slicer con dos valores elegidos. El conjunto va DENTRO de un filtro (`IN`), y no son
+    // dos filtros que se intersectan: dos filtros sobre la misma columna dejan la matriz
+    // vacia, y el usuario veria un informe sin datos en vez de dos regiones.
+    let model = model();
+    let report = Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")])
+        .filtered_to(
+            ObjectId(21),
+            vec![
+                FilterValue::Text("Norte".to_string()),
+                FilterValue::Text("Sur".to_string()),
+            ],
+        );
+    let engine = engine().expect("motor");
+    let matrix = report.execute(&engine, None).expect("corre");
+
+    assert_eq!(matrix.row_count(), 2, "dos regiones elegidas");
+    assert_eq!(matrix.cell(0, 0), Some("Norte"));
+    assert_eq!(matrix.cell(1, 0), Some("Sur"));
+
+    // Y el viaje por el archivo guarda los DOS valores, no el primero.
+    datan_report::saved::save(&report, "informe de dos regiones").expect("guarda");
+    let reabierto = datan_report::saved::open("informe de dos regiones", &model).expect("abre");
+    let otra = reabierto.execute(&engine, None).expect("corre");
+    assert_eq!(otra.rows, matrix.rows, "los dos valores vuelven igual");
+
+    let _ = std::fs::remove_file(
+        datan_report::saved::folder().join("informe de dos regiones.toml"),
+    );
+}
+
+#[test]
+fn quitar_todos_los_valores_deja_el_informe_sin_filtro() {
+    // Un conjunto vacio es "sin filtro", no un `IN ()`. Los dos caminos no coinciden con ese
+    // `IN`: el SQL lo baja como `1 = 1` y el interprete lo evalua como falso.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")]);
+    let engine = engine().expect("motor");
+
+    let sin_filtro = report.filtered_to(ObjectId(21), vec![]);
+    assert_eq!(sin_filtro.execute(&engine, None).expect("corre").row_count(), 3);
+
+    let con_filtro = sin_filtro.filtered_to(ObjectId(21), vec![FilterValue::Text("Norte".to_string())]);
+    assert_eq!(con_filtro.execute(&engine, None).expect("corre").row_count(), 1);
+    let vuelto = con_filtro.filtered_to(ObjectId(21), vec![]);
+    assert_eq!(vuelto.execute(&engine, None).expect("corre").row_count(), 3);
+}
+
+#[test]
 fn dos_medidas_iguales_dan_el_mismo_numero() {
     // Dos medidas con la MISMA expresion comparten un plan y una sola consulta, que trae
     // una columna de medidas. Si cada una leyera la columna que le toca por posicion, la

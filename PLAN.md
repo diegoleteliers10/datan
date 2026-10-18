@@ -1216,3 +1216,74 @@ conexion, medida creada, rango elegido, clic en una celda). El de un guardado fa
 es la unica senal de un error que la pantalla no dice.
 
 185 tests.
+
+## Fase UI-3: los bucles rotos. El modelo del usuario y el informe guardado
+
+La app de la Fase UI-2 se veia bien y no podia cerrar dos ciclos. Los dos son de la misma clase:
+algo se escribe, se guarda, y al volver no esta.
+
+### Paso 1: el modelo del usuario vive en disco (80880fe)
+
+`Crear medida` ponia la medida en la RAM del `Report`. `Guardar` guardaba su NOMBRE en el TOML.
+Al reabrir, `saved::open` resuelve nombres contra el modelo, la medida no estaba en la base y el
+informe moria con `UnknownMeasure`. O sea: `Crear medida` + `Guardar` producia un archivo que no
+abre, y el usuario no tenia forma de saberlo hasta el dia siguiente.
+
+El modelo del usuario se guarda ahora aparte, por base, en `~/.datan/models/<base>.toml`:
+medidas propias y ajustes de columna. Se aplica ENCIMA de la introspeccion al conectar.
+
+Gana la introspeccion. Una medida que ya existe en el modelo no se toca: aplicar el documento dos
+veces no duplica, y un nombre que la base ya trae no se pisa. Una medida que referencia a otra del
+mismo documento chequea contra el modelo en su estado actual, asi que las dos se aplican en orden.
+Una medida que ya no chequea (la columna se renombro en la base) se SALTA con un aviso en la barra
+de estado, y se queda en el documento: renombrar algo en la base no es razon para tirar trabajo.
+
+Los ids de las medidas del usuario salen de `max + 1`, no de un literal: un literal se desincroniza
+la primera vez que la base trae una medida con mas id.
+
+`Crear medida` escribe el documento ANTES de tocar la vista. Si el archivo no se puede guardar, la
+medida no se agrega y el usuario ve por que. Al reves quedaria una medida en pantalla que se pierde
+al cerrar, que es el defecto que este paso arregla.
+
+14 tests. 199 en total.
+
+### Paso 2: el informe guardado se puede abrir
+
+`saved::list` existia y nadie lo llamaba. El nombre del informe estaba escrito a mano en tres
+sitios de `main.rs` ("Resumen de ventas"), asi que el archivo guardado y el titulo pintado no tenian
+nada que ver.
+
+El archivo gana dos campos que son de la PANTALLA y no de la consulta: el visual del lienzo y el
+periodo activo. Reabrir un informe guardado en "Anillo" y que aparezca en "Tabla" es abrir otro
+informe. Van en un `SavedView` aparte de `Report` a proposito: mezclarlos con los filtros haria que
+cambiar de vista cambiara los datos.
+
+Los filtros guardados pasan de un valor a un conjunto (`values: Vec<String>`), y el alias
+`value = "..."` sigue leyendo un informe de la version anterior. Era el momento: hay UN informe
+guardado en disco, y convertir el campo despues deja archivos que no abren.
+
+La pantalla de abrir es nueva (`State::Opening`). Lista los informes y marca los que no son de esta
+base. Se compara el QUALIFIER del informe (`pg`), que es lo que guarda el archivo, y no el nombre de
+la base: comparar con `self.database` daba todos los informes como ajenos.
+
+El nombre del informe se deriva de la PRIMERA DIMENSION DE LA SELECCION, no de `self.report`.
+`self.report` es el informe base que acumula filtros y `refresh` le pone las dimensiones al correr,
+asi que leer de ahi daba "informe" mientras la matriz mostraba `nombre`. El mismo error tenia el
+`Guardar` de antes, que por eso guardaba todo bajo `informe.toml`.
+
+Dos defectos del motor que salieron al ejercitar el camino nuevo, tapados porque nada construia un
+`IN`:
+
+- `lower_filter` bajaba `IN` con UN valor como `col IN 'x'`, que no es SQL. El parentesis no es
+  opcional. Con varios valores si lo ponia.
+- Un operador de comparacion con varios valores tomaba el primero en silencio. Ahora es el AND de
+  todos, que es lo que DAX significa, y no un filtro que no se pidio.
+
+`Report::filtered_to` es el primitivo de un slicer: un conjunto de valores para UNA columna. Un
+conjunto vacio quita el filtro en vez de dejar un `IN ()`, que el SQL baja como `1 = 1` y el
+interprete evalua como falso. Esa divergencia estaba viva y no era alcanzable. Con este paso deja de
+poder construirse. `refresh` agrupa los filtros activos por columna y los aplica con `filtered_to`,
+que es lo mismo para un valor y una union para varios.
+
+204 tests. 38 casos de conformidad, 0 divergencias.
+

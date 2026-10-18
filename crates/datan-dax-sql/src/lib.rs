@@ -721,13 +721,20 @@ fn lower_filter(
                 // escribe el caso explicito para que el SQL signifique lo mismo.
                 return Ok("1 = 1".to_string());
             }
-            if matches!(filter.operator, datan_dax_eval::FilterOperator::In)
-                && rendered.len() > 1
-            {
-                Ok(format!("{target} IN ({})", rendered.join(", ")))
-            } else {
-                Ok(format!("{target} {operator} {}", rendered[0]))
+            if matches!(filter.operator, datan_dax_eval::FilterOperator::In) {
+                // `IN` con uno o varios valores, siempre entre parentesis. Con UN valor
+                // salia `col IN 'x'`, que no es SQL: el parentesis no es opcional y la
+                // consulta no parsea.
+                return Ok(format!("{target} IN ({})", rendered.join(", ")));
             }
+            // Un operador de comparacion con varios valores es el AND de cada uno: `col = a`
+            // y `col = b` no los cumple ninguna fila, y `col <> a` y `col <> b` los cumple
+            // casi todas. Tomar el primero daria un filtro que no es el que se pidio.
+            Ok(rendered
+                .iter()
+                .map(|value| format!("{target} {operator} {value}"))
+                .collect::<Vec<_>>()
+                .join(" AND "))
         }
 
         FilterSource::Propagated {

@@ -56,14 +56,56 @@ struct File {
     database: String,
     dimensions: Vec<String>,
     measures: Vec<String>,
+    #[serde(default)]
     filters: Vec<SavedFilter>,
+    /// El visual del lienzo al guardar. Un informe guardado en "Anillo" y reabierto en
+    /// "Tabla" es otro informe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visual: Option<String>,
+    /// El periodo activo en meses hacia atras, si lo habia.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    period_months: Option<u8>,
 }
 
 /// Un filtro guardado.
+///
+/// `values` es un conjunto porque un slicer elige varios. Los informes guardados antes de
+/// esto tienen `value = "..."` con un solo valor, y siguen abriendo: el alias lo lee como un
+/// conjunto de uno.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct SavedFilter {
     column: String,
-    value: String,
+    #[serde(alias = "value", default, deserialize_with = "uno_o_varios")]
+    values: Vec<String>,
+}
+
+/// Lee un valor suelto o una lista, para que un informe viejo siga abriendo.
+fn uno_o_varios<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum UnoOVarios {
+        Uno(String),
+        Varios(Vec<String>),
+    }
+
+    Ok(match UnoOVarios::deserialize(deserializer)? {
+        UnoOVarios::Uno(value) => vec![value],
+        UnoOVarios::Varios(values) => values,
+    })
+}
+
+/// Lo que el informe guarda de la PANTALLA y no esta en la definicion de la consulta.
+///
+/// Va aparte de [`Report`] a proposito: el visual y el periodo no cambian un numero, cambian
+/// como se mira. Mezclarlos con los filtros haria que reabrir un informe en otra vista
+/// cambiara los datos.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SavedView {
+    pub visual: Option<String>,
+    pub period_months: Option<u8>,
 }
 
 /// El nombre de archivo de un informe.
@@ -93,6 +135,11 @@ pub fn folder() -> PathBuf {
 
 /// Guarda un informe.
 pub fn save(report: &Report, name: &str) -> Result<(), SavedError> {
+    save_view(report, name, &SavedView::default())
+}
+
+/// Guarda un informe con lo que la pantalla estaba mostrando.
+pub fn save_view(report: &Report, name: &str, view: &SavedView) -> Result<(), SavedError> {
     let path = folder().join(file_name(name)?);
 
     if let Some(parent) = path.parent()
@@ -117,16 +164,20 @@ pub fn save(report: &Report, name: &str) -> Result<(), SavedError> {
     let filters = report
         .filters
         .entries()
-        .flat_map(|(column, filters)| {
-            filters.iter().filter_map(move |filter| {
-                filter.values().first().map(|value| SavedFilter {
-                    column: report
-                        .model
-                        .column(*column)
-                        .map(|(_, c)| c.name.clone())
-                        .unwrap_or_default(),
-                    value: format!("{value:?}"),
-                })
+        .filter_map(|(column, filters)| {
+            // Todos los valores de un filtro, no el primero: un slicer con tres elegidos
+            // guardaba uno y el informe volvia con otro recorte.
+            let values: Vec<String> = filters
+                .iter()
+                .flat_map(|filter| filter.values().iter().map(|value| format!("{value:?}")))
+                .collect();
+            (!values.is_empty()).then(|| SavedFilter {
+                column: report
+                    .model
+                    .column(*column)
+                    .map(|(_, c)| c.name.clone())
+                    .unwrap_or_default(),
+                values,
             })
         })
         .collect();
@@ -137,6 +188,8 @@ pub fn save(report: &Report, name: &str) -> Result<(), SavedError> {
         dimensions,
         measures,
         filters,
+        visual: view.visual.clone(),
+        period_months: view.period_months,
     };
 
     let text = toml::to_string_pretty(&file)
@@ -167,11 +220,47 @@ pub fn list() -> Vec<String> {
     names
 }
 
+/// Un informe guardado, como lo necesita la pantalla de abrir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedEntry {
+    pub name: String,
+    /// La base contra la que se guardo. Un informe de otra base no se puede abrir con el
+    /// modelo de esta: los nombres resolverian a columnas distintas o a ninguna.
+    pub database: String,
+}
+
+/// Los informes guardados con su base.
+///
+/// Un archivo ilegible se SALTA: una pantalla de abrir que no abre porque uno de los
+/// informes esta roto no sirve para lo unico que hace.
+pub fn index() -> Vec<SavedEntry> {
+    list()
+        .into_iter()
+        .filter_map(|name| {
+            let path = folder().join(format!("{name}.toml"));
+            let text = std::fs::read_to_string(&path).ok()?;
+            let file: File = toml::from_str(&text).ok()?;
+            Some(SavedEntry {
+                name,
+                database: file.database,
+            })
+        })
+        .collect()
+}
+
 /// Abre un informe contra un modelo.
 ///
 /// Los nombres se resuelven contra el modelo de la conexion: los ids son internos y cambian
 /// entre ejecuciones. Guardar ids seria guardar numeros que no significan nada mañana.
 pub fn open(name: &str, model: &datan_model::Model) -> Result<Report, SavedError> {
+    Ok(open_view(name, model)?.0)
+}
+
+/// Abre un informe y devuelve ademas lo que la pantalla mostraba al guardarlo.
+pub fn open_view(
+    name: &str,
+    model: &datan_model::Model,
+) -> Result<(Report, SavedView), SavedError> {
     let path = folder().join(file_name(name)?);
     let text = std::fs::read_to_string(&path).map_err(|source| SavedError::Read {
         path,
@@ -219,11 +308,20 @@ pub fn open(name: &str, model: &datan_model::Model) -> Result<Report, SavedError
             continue;
         };
         let data_type = model.column(column).map(|(_, c)| c.data_type);
-        let value = parse_value(&filter.value, data_type);
-        report = report.filtered_by(column, value);
+        let values = filter
+            .values
+            .iter()
+            .map(|value| parse_value(value, data_type))
+            .collect();
+        report = report.filtered_to(column, values);
     }
 
-    Ok(report)
+    let view = SavedView {
+        visual: file.visual,
+        period_months: file.period_months,
+    };
+
+    Ok((report, view))
 }
 
 /// La columna por nombre, buscando en todas las tablas.
@@ -314,5 +412,69 @@ mod tests {
             parse_value("false", Some(DataType::Boolean)),
             FilterValue::Boolean(false)
         );
+    }
+
+    #[test]
+    fn un_informe_viejo_con_un_valor_sigue_abriendo() {
+        // El formato de antes tenia `value = "..."` con un solo valor. Un archivo guardado
+        // con la version anterior tiene que abrir igual: perder un filtro es abrir otro
+        // informe sin avisar.
+        let viejo = r#"
+name = "ventas"
+database = "pg"
+dimensions = ["region"]
+measures = ["Qty"]
+[[filters]]
+column = "region"
+value = "Text(\"Norte\")"
+"#;
+        let file: File = toml::from_str(viejo).expect("el formato viejo parsea");
+
+        assert_eq!(file.filters.len(), 1);
+        assert_eq!(file.filters[0].values, vec!["Text(\"Norte\")"]);
+        assert_eq!(file.visual, None);
+        assert_eq!(file.period_months, None);
+    }
+
+    #[test]
+    fn un_filtro_con_varios_valores_da_la_vuelta() {
+        let filter = SavedFilter {
+            column: "region".to_string(),
+            values: vec!["Text(\"Norte\")".to_string(), "Text(\"Sur\")".to_string()],
+        };
+        let text = toml::to_string_pretty(&filter).expect("serializa");
+
+        assert!(text.contains("Norte") && text.contains("Sur"), "{text}");
+
+        let back: SavedFilter = toml::from_str(&text).expect("parsea");
+        assert_eq!(back, filter);
+    }
+
+    #[test]
+    fn el_visual_y_el_periodo_solo_se_escriben_si_estan() {
+        let file = File {
+            name: "ventas".to_string(),
+            database: "pg".to_string(),
+            dimensions: vec![],
+            measures: vec![],
+            filters: vec![],
+            visual: None,
+            period_months: None,
+        };
+        let text = toml::to_string_pretty(&file).expect("serializa");
+        assert!(!text.contains("visual"), "{text}");
+        assert!(!text.contains("period"), "{text}");
+
+        let con_vista = File {
+            visual: Some("Anillo".to_string()),
+            period_months: Some(6),
+            ..file
+        };
+        let text = toml::to_string_pretty(&con_vista).expect("serializa");
+        assert!(text.contains("visual = \"Anillo\""), "{text}");
+        assert!(text.contains("period_months = 6"), "{text}");
+
+        let back: File = toml::from_str(&text).expect("parsea");
+        assert_eq!(back, con_vista);
     }
 }

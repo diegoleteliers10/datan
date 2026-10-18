@@ -80,6 +80,10 @@ struct Grid {
 enum State {
     Connecting,
     Choosing,
+    /// La lista de informes guardados. Se llega desde "Abrir", con el modelo ya conectado:
+    /// abrir un informe resuelve nombres contra un modelo, y sin modelo no hay nada que
+    /// resolver.
+    Opening,
     Ready,
     Failed(String),
 }
@@ -99,6 +103,11 @@ struct Datan {
     formula_error: Option<String>,
     /// El visual activo del lienzo: Todo, Tarjetas, Barras o Tabla.
     visual: String,
+    /// El nombre del informe que se esta mirando, si se guardo o se abrio.
+    ///
+    /// `None` es un informe sin guardar: no tiene archivo, asi que no tiene nombre. Se
+    /// muestra el que tendria, que es el que "Guardar" le va a poner.
+    report_name: Option<String>,
     /// El indicador de la barra superior tras guardar.
     /// Cuando se guardo el informe que se esta mirando, en segundos desde la epoca. `None`
     /// es un informe con cambios sin guardar, o sin guardar todavia.
@@ -158,6 +167,7 @@ impl Datan {
             totals: Vec::new(),
             formula_error: None,
             visual: "Todo".to_string(),
+            report_name: None,
             last_saved: None,
             lectura: false,
             sort: None,
@@ -219,6 +229,99 @@ impl Datan {
         }
 
         list.into_any_element()
+    }
+
+    /// La lista de informes guardados.
+    ///
+    /// Todos los de la base conectada. Un informe de OTRA base se pinta apagado, con su base al
+    /// lado y sin clic: abrirlo resolveria nombres contra un modelo que no es el suyo, y el error
+    /// que saldria ("la dimension X no existe") manda a buscar el problema al lugar equivocado.
+    fn render_reports(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let entries = datan_report::saved::index();
+
+        let mut list = div().flex_col().gap_2();
+        if entries.is_empty() {
+            list = list.child(
+                div()
+                    .w(px(360.0))
+                    .text_size(px(tokens::LETRA_CUERPO))
+                    .text_color(theme.muted_foreground)
+                    .child("No hay informes guardados con esta base."),
+            );
+        }
+
+        for entry in entries {
+            // El archivo guarda el QUALIFIER del informe (`pg`), no el nombre de la base: es
+            // la etiqueta con la que se califica cada tabla en el SQL. Compararlo con el
+            // nombre de la base ponia todos los informes como ajenos.
+            let propia = self
+                .report
+                .as_ref()
+                .is_some_and(|report| report.qualifier == entry.database);
+            let name = entry.name.clone();
+            let row = div()
+                .w(px(360.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px_4()
+                .py_3()
+                .rounded_xl()
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(entry.name.clone()),
+                );
+
+            if propia {
+                list = list.child(
+                    row.id(ElementId::Name(SharedString::from(format!("report-{name}"))))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.list_hover))
+                        .on_click(cx.listener(move |view, _event, _window, cx| {
+                            view.open_report(&name, cx)
+                        })),
+                );
+            } else {
+                // Sin clic: un informe de otra base no se puede abrir con este modelo.
+                list = list.child(row.bg(theme.muted));
+            }
+        }
+
+        div()
+            .flex()
+            .flex_1()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .child(
+                div()
+                    .font_semibold()
+                    .text_size(px(tokens::LETRA_H1))
+                    .child("Abrir informe"),
+            )
+            .child(
+                div()
+                    .text_size(px(tokens::LETRA_CUERPO))
+                    .text_color(theme.muted_foreground)
+                    .child("Los informes guardados de esta base"),
+            )
+            .child(list)
+            .child(clickable(
+                &theme,
+                "volver".into(),
+                "Volver".to_string(),
+                cx.listener(|view, _event, _window, cx| {
+                    view.state = State::Ready;
+                    cx.notify();
+                }),
+            ))
+            .into_any_element()
     }
 
     /// Crea una medida desde la barra de formula.
@@ -384,9 +487,37 @@ impl Datan {
         line
     }
 
+    /// El nombre que tendria el informe sin guardar: la primera dimension.
+    ///
+    /// Es la columna que distingue un informe de otro sobre la misma base. Un dialogo de
+    /// nombre no se puede verificar sin pantalla, y el nombre se puede cambiar renombrando el
+    /// archivo.
+    fn suggested_name(&self) -> String {
+        // Las dimensiones viven en la SELECCION, no en el informe base: el base es el que
+        // acumula filtros, y `refresh` le pone las dimensiones al correr.
+        let Some(report) = self.report.as_ref() else {
+            return "informe".to_string();
+        };
+        self.selection
+            .dimensions
+            .first()
+            .and_then(|id| report.model.column(*id).map(|(_, c)| c.name.clone()))
+            .unwrap_or_else(|| "informe".to_string())
+    }
+
+    /// El nombre del informe que se esta mirando: el guardado, o el que tendria.
+    fn report_title(&self) -> String {
+        self.report_name
+            .clone()
+            .unwrap_or_else(|| self.suggested_name())
+    }
+
     /// Guarda el informe actual. Sin nombre de archivo elegido a mano: el informe se llama
-    /// por la conexion y la primera dimension, que es lo que lo distingue. Un dialogo de
-    /// nombre no se puede verificar sin pantalla.
+    /// por la primera dimension, que es lo que lo distingue. Un dialogo de nombre no se puede
+    /// verificar sin pantalla.
+    ///
+    /// Se guarda DOS veces bajo el mismo nombre: la segunda vez sobrescribe. Un informe
+    /// guardado que se guarda otra vez con otro nombre deja dos archivos que se parecen.
     fn save_report(&mut self, cx: &mut Context<Self>) {
         let Some(report) = self.report.clone() else {
             return;
@@ -395,21 +526,79 @@ impl Datan {
             return;
         };
 
-        let name = report
-            .model
-            .column(*report.dimensions.first().unwrap_or(&ObjectId(0)))
-            .map(|(_, c)| c.name.clone())
-            .unwrap_or_else(|| "informe".to_string());
+        let name = self.report_title();
         let label = format!("{name} ({} filas)", matrix.row_count());
 
-        match datan_report::saved::save(&report, &name) {
+        // El visual y el periodo son de la PANTALLA: no cambian un numero, cambian como se
+        // mira. Se guardan al lado para que reabrir un informe en "Anillo" no abra "Tabla".
+        let view = datan_report::saved::SavedView {
+            visual: Some(self.visual.clone()),
+            period_months: self.date_months,
+        };
+
+        match datan_report::saved::save_view(&report, &name, &view) {
             Ok(()) => {
+                self.report_name = Some(name);
                 self.stats = Some(format!("guardado como `{label}`"));
                 self.last_saved = Some(epoch_now());
                 cx.notify();
             }
             Err(error) => {
                 self.stats = Some(format!("no se pudo guardar: {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Abre un informe guardado contra el modelo conectado.
+    ///
+    /// La seleccion, el visual y el periodo se recuperan del archivo. Los filtros se vuelven
+    /// a poner en la barra: el informe abre con el recorte que tenia, y se puede soltar.
+    fn open_report(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(model) = self.report.as_ref().map(|report| report.model.clone()) else {
+            return;
+        };
+
+        match datan_report::saved::open_view(name, &model) {
+            Ok((report, view)) => {
+                self.selection = Selection {
+                    dimensions: report.dimensions.clone(),
+                    measures: report.measures.clone(),
+                };
+                self.report_name = Some(name.to_string());
+                // El visual guardado puede ser uno que ya no existe: se queda el actual en
+                // vez de pintar una pantalla que no esta.
+                if let Some(visual) = view.visual {
+                    self.visual = visual;
+                }
+                self.date_months = view.period_months;
+                self.filters = report
+                    .filters
+                    .entries()
+                    .flat_map(|(column, filters)| {
+                        let label = report
+                            .model
+                            .column(*column)
+                            .map(|(_, c)| c.name.clone())
+                            .unwrap_or_default();
+                        filters
+                            .iter()
+                            .flat_map(|filter| filter.values().to_vec())
+                            .map(move |value| ActiveFilter {
+                                column: *column,
+                                label: SharedString::from(label.clone()),
+                                value: SharedString::from(valor_legible(&value)),
+                            })
+                    })
+                    .collect();
+                self.report = Some(report);
+                self.state = State::Ready;
+                self.stats = Some(format!("abierto `{name}`"));
+                self.refresh(cx);
+            }
+            Err(error) => {
+                self.stats = Some(format!("no se pudo abrir `{name}`: {error}"));
+                self.state = State::Ready;
                 cx.notify();
             }
         }
@@ -546,19 +735,32 @@ impl Datan {
         let mut report = base
             .with_dimensions(self.selection.dimensions.clone())
             .with_measures(self.selection.measures.clone());
-        // Los filtros activos se vuelven a aplicar en orden. Vienen del cross-filter, y el
-        // informe base es el que tiene el filtro de la ULTIMA pulsacion: reconstruir desde
-        // cero con la lista de filtros hace que quitar uno no deshaga los de despues.
+        // Los filtros activos se vuelven a aplicar por COLUMNA, como un conjunto: dos valores
+        // de la misma columna son una union (`IN`), y aplicarlos como dos filtros que se
+        // intersectan dejaria la matriz vacia. El informe base es el que tiene el filtro de
+        // la ULTIMA pulsacion, y reconstruir desde cero con la lista de filtros hace que
+        // quitar uno no deshaga los de despues.
+        let mut por_columna: Vec<(ObjectId, Vec<datan_dax_eval::FilterValue>)> = Vec::new();
         for filter in &self.filters {
-            if let Some(definition) = report.model.column(filter.column) {
-                let value = match definition.1.data_type {
-                    DataType::Integer | DataType::Moneda | DataType::Decimal => {
-                        datan_dax_eval::FilterValue::Integer(filter.value.parse().unwrap_or(0))
-                    }
-                    _ => datan_dax_eval::FilterValue::Text(filter.value.to_string()),
-                };
-                report = report.filtered_by(filter.column, value);
+            let Some(definition) = report.model.column(filter.column) else {
+                continue;
+            };
+            let value = match definition.1.data_type {
+                DataType::Integer | DataType::Moneda | DataType::Decimal => {
+                    datan_dax_eval::FilterValue::Integer(filter.value.parse().unwrap_or(0))
+                }
+                _ => datan_dax_eval::FilterValue::Text(filter.value.to_string()),
+            };
+            match por_columna
+                .iter_mut()
+                .find(|(column, _)| *column == filter.column)
+            {
+                Some((_, values)) => values.push(value),
+                None => por_columna.push((filter.column, vec![value])),
             }
+        }
+        for (column, values) in por_columna {
+            report = report.filtered_to(column, values);
         }
         // El rango de fechas va DESPUES de la igualdad: es otro filtro sobre otra columna y
         // el orden no altera el AND, pero aplicarlo aqui garantiza que el rango se imponga
@@ -817,6 +1019,24 @@ fn run_report(
 
     Ok((matrix, stats, cards))
 }
+
+/// El texto de un valor de filtro, como se lee en la pastilla de la barra.
+///
+/// La pastilla guarda TEXTO, y de ahi sale el filtro al reconstruir. Un valor de fecha sale
+/// como el dia desde 1970, que es lo que la pastilla muestra hoy: la barra de periodo no crea
+/// pastillas, crea el rango.
+fn valor_legible(value: &datan_dax_eval::FilterValue) -> String {
+    use datan_dax_eval::FilterValue;
+    match value {
+        FilterValue::Text(text) => text.clone(),
+        FilterValue::Integer(number) => number.to_string(),
+        FilterValue::Decimal(number) => number.to_string(),
+        FilterValue::Date(day) => day.to_string(),
+        FilterValue::Boolean(flag) => flag.to_string(),
+        FilterValue::Blank => "(en blanco)".to_string(),
+    }
+}
+
 
 /// La columna de fecha del informe: la del hecho primero, y si no, la primera conectada.
 ///
@@ -1475,6 +1695,7 @@ impl Render for Datan {
                         .child("Conectando..."),
                 )
                 .into_any_element(),
+            State::Opening => self.render_reports(cx),
             State::Failed(error) => div()
                 .flex()
                 .flex_1()
@@ -1738,7 +1959,7 @@ impl Datan {
                 div()
                     .text_size(px(tokens::LETRA_H1))
                     .font_semibold()
-                    .child("Resumen de ventas"),
+                    .child(self.report_title()),
             );
 
         // --- Filtros activos ---
@@ -1769,6 +1990,7 @@ impl Datan {
         // Guardar y exportar. Van aqui y no en un menu porque son las dos acciones que
         // existen sobre un informe, y un menu que no se abre no ensena sus opciones.
         filter_bar = filter_bar.child(div().flex_1());
+        filter_bar = filter_bar.child(open_button(&theme, cx));
         filter_bar = filter_bar.child(save_button(&theme, self.lectura, cx));
         filter_bar = filter_bar.child(export_button(&theme, cx));
 
@@ -2181,8 +2403,9 @@ impl Datan {
             .child(components::nota(
                 &theme,
                 format!(
-                    "{}  \u{203a}  Resumen de ventas",
-                    self.database.as_deref().unwrap_or("sin base")
+                    "{}  \u{203a}  {}",
+                    self.database.as_deref().unwrap_or("sin base"),
+                    self.report_title()
                 ),
             ))
             .child(guardado)
@@ -2233,7 +2456,7 @@ impl Datan {
                     .items_center()
                     .font_semibold()
                     .text_size(px(tokens::LETRA_TITULO))
-                    .child("Resumen de ventas"),
+                    .child(self.report_title()),
             )
             .child(components::boton_icono_apagado(&theme, IconName::Plus))
             .child(div().flex_1())
@@ -2617,6 +2840,18 @@ fn save_button(theme: &Theme, lectura: bool, cx: &mut Context<Datan>) -> AnyElem
 fn export_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
     clickable(theme, "export".into(), "CSV".to_string(), cx.listener(
         |view, _event, _window, cx| view.export_csv(cx),
+    ))
+}
+
+/// "Abrir" lleva a la lista de informes guardados. No abre el ultimo informe por su cuenta:
+/// abrir un informe encima de otro sin preguntar pierde lo que se estaba mirando.
+fn open_button(theme: &Theme, cx: &mut Context<Datan>) -> AnyElement {
+    clickable(theme, "open".into(), "Abrir".to_string(), cx.listener(
+        |view, _event, _window, cx| {
+            view.state = State::Opening;
+            view.stats = None;
+            cx.notify();
+        },
     ))
 }
 

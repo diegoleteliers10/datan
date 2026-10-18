@@ -29,7 +29,7 @@ pub mod saved;
 
 use std::collections::BTreeMap;
 
-use datan_dax_eval::{AtomSet, FilterContext, FilterValue, Interpreter, Scalar};
+use datan_dax_eval::{AtomSet, Filter, FilterContext, FilterValue, Interpreter, Scalar};
 use datan_dax_sql::{SourceMap, lower, lower_scalar};
 use datan_model::{DataType, Measure, Model, ObjectId};
 use datan_storage::Engine;
@@ -144,6 +144,27 @@ impl Report {
     pub fn filtered_by(&self, column: ObjectId, value: FilterValue) -> Self {
         let mut next = self.clone();
         next.filters = next.filters.with_equal(column, value);
+        next
+    }
+
+    /// Filtra la columna a un CONJUNTO de valores, como un slicer con varios elegidos.
+    ///
+    /// Reemplaza y no acumula: un slicer es UN filtro sobre la columna, y elegir dos valores
+    /// no es pedir dos filtros que se intersectan, que es lo que daria el conjunto vacio. La
+    /// union vive dentro del filtro (`IN`), y el `AND` entre columnas distintas sigue igual.
+    ///
+    /// Un conjunto VACIO quita el filtro en vez de dejar un `IN` sin valores. Los dos caminos
+    /// no coinciden con ese `IN`: el SQL lo baja como `1 = 1`, que pasa todo, y el interprete
+    /// lo evalua como falso, que no pasa nada. Un informe que da todas las filas por SQL y
+    /// ninguna por el interprete es la peor clase de divergencia, asi que el estado no se
+    /// puede construir.
+    pub fn filtered_to(&self, column: ObjectId, values: Vec<FilterValue>) -> Self {
+        let mut next = self.clone();
+        next.filters = next.filters.without_column(column);
+        if values.is_empty() {
+            return next;
+        }
+        next.filters = next.filters.with(Filter::in_values(column, values));
         next
     }
 
