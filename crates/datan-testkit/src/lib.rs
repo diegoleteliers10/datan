@@ -104,6 +104,8 @@ pub const FACT_DAY: ObjectId = ObjectId(14);
 pub const PRODUCT_ID: ObjectId = ObjectId(20);
 pub const PRODUCT_REGION: ObjectId = ObjectId(21);
 pub const PRODUCT_CATEGORY: ObjectId = ObjectId(22);
+/// La columna por la que `sort_by` ordena `region`. No es la clave de nada: es un dato.
+pub const PRODUCT_REGION_ORDER: ObjectId = ObjectId(23);
 pub const DATE_DAY: ObjectId = ObjectId(30);
 
 /// 2023-01-01 y 2024-01-01, en dias desde 1970. Los dos extremos que la suite usa de
@@ -149,6 +151,7 @@ pub fn model() -> Model {
                 columns: vec![
                     Column::new(PRODUCT_ID, "product_id", DataType::Integer),
                     Column::new(PRODUCT_REGION, "region", DataType::Text),
+                    Column::new(PRODUCT_REGION_ORDER, "region_orden", DataType::Integer),
                     Column::new(PRODUCT_CATEGORY, "category", DataType::Text),
                 ],
                 key_columns: vec![PRODUCT_ID],
@@ -223,6 +226,9 @@ pub const FIXTURES: &str = "\
     SELECT
         i AS product_id,
         CASE i % 3 WHEN 0 THEN 'Norte' WHEN 1 THEN 'Sur' ELSE 'Este' END AS region,
+        -- El orden REAL de las regiones, distinto del alfabetico. Es la columna por la que
+        -- `sort_by` ordena `region`: Norte, Sur y Este en vez de Este, Norte y Sur.
+        CASE i % 3 WHEN 0 THEN 1 WHEN 1 THEN 2 ELSE 3 END AS region_orden,
         CASE i % 2 WHEN 0 THEN 'A' ELSE 'B' END AS category
     FROM range(1, 7) t(i);
 
@@ -270,6 +276,7 @@ pub fn memory_source() -> MemorySource {
 
     let mut product_id = Vec::new();
     let mut region = Vec::new();
+    let mut region_orden = Vec::new();
     let mut category = Vec::new();
     for i in 1..=6 {
         product_id.push(Some(i as i64));
@@ -281,6 +288,13 @@ pub fn memory_source() -> MemorySource {
             }
             .to_string(),
         ));
+        // El MISMO orden que el SQL. Si difirieran, `sort_by` ordenaria distinto en cada
+        // camino y el arnes no podria decir quien miente.
+        region_orden.push(Some(match i % 3 {
+            0 => 1,
+            1 => 2,
+            _ => 3,
+        }));
         category.push(Some(if i % 2 == 0 { "A" } else { "B" }.to_string()));
     }
 
@@ -308,6 +322,12 @@ pub fn memory_source() -> MemorySource {
         )
         .with_column(PRODUCT_ID, IntColumn { values: product_id })
         .with_column(PRODUCT_REGION, TextColumn { values: region })
+        .with_column(
+            PRODUCT_REGION_ORDER,
+            IntColumn {
+                values: region_orden,
+            },
+        )
         .with_column(PRODUCT_CATEGORY, TextColumn { values: category })
         .with_table_length(FACT, 40)
         .with_table_length(PRODUCT, 6)

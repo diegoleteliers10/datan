@@ -147,6 +147,14 @@ pub fn lower(
         if !needed.contains(&owner) {
             needed.push(owner);
         }
+        // La columna de orden de un `sort_by` tiene que estar en el FROM, aunque no se
+        // agrupe ni se agrega por ella: solo aparece dentro del `MIN` del ORDER BY.
+        if let Some(sort) = model.column(*column).and_then(|(_, d)| d.sort_by) {
+            let owner = owner_of(model, sort);
+            if !needed.contains(&owner) {
+                needed.push(owner);
+            }
+        }
     }
 
     let aliases = Aliases::new(&needed);
@@ -271,9 +279,25 @@ pub fn lower(
     //
     // Ordena por las columnas de agrupamiento, que son la clave de la fila del informe. Las
     // medidas NO se ordenan: su orden cambiaria entre celdas sin motivo.
+    //
+    // Una columna con `sort_by` se ordena por SU columna de orden. En el SQL entra como
+    // `MIN` porque no esta en el `GROUP BY`: como es funcionalmente dependiente de la que
+    // agrupa, el minimo es EL valor, y el orden sale igual que en el interprete.
     let order_by = grouping
         .iter()
         .map(|column| {
+            if let Some((sort_physical, sort_owner)) = model
+                .column(*column)
+                .and_then(|(_, definition)| definition.sort_by)
+                .filter(|sort| *sort != *column)
+                .and_then(|sort| sources.column(sort).ok())
+            {
+                return Ok(format!(
+                    "MIN({}.{})",
+                    aliases.of(sort_owner),
+                    quote_identifier(sort_physical)
+                ));
+            }
             let (physical, _) = sources.column(*column)?;
             Ok(format!(
                 "{}.{}",

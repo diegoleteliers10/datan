@@ -243,6 +243,19 @@ fn la_columna_de_fechas_es_la_clave_no_cualquier_columna_de_fecha() {
 }
 
 #[test]
+fn una_columna_timestamp_tambien_sirve_de_fecha() {
+    // Postgres devuelve `timestamp` para sus fechas y datan-connect lo mapea a `DateTime`.
+    // Exigir `Date` puro dejaba a una base de timestamps sin periodo, sin filtro de fecha y
+    // sin time intelligence: el motor trabaja en dias, y un `timestamp` es un dia con hora.
+    let mut model = model_with_date_table();
+    model.tables[0].columns[0].data_type = DataType::DateTime;
+    assert_eq!(
+        date_column(&model).expect("un timestamp es una fecha para el motor"),
+        DATE
+    );
+}
+
+#[test]
 fn el_time_intelligence_no_exige_un_ciclo() {
     // Contraste con `tests/cycles.rs`: el rechazo del fast path es por el ciclo, no por la
     // tabla de fechas. Un star schema con tabla de fechas tiene que pasar.

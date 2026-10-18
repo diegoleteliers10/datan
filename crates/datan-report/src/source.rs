@@ -216,6 +216,29 @@ fn read_array(array: &dyn Array, out: &mut Vec<Scalar>) {
         }
         return;
     }
+    // Un `timestamp` se lee como su DIA: el motor trabaja en dias, y la hora dentro del dia
+    // no cambia ningun informe. Es la misma decision que toma el fast path cuando baja un
+    // filtro de fecha contra una columna `timestamp`.
+    macro_rules! timestamp {
+        ($tipo:ty, $escala:expr) => {
+            if let Some(values) = array.as_any().downcast_ref::<$tipo>() {
+                for row in 0..values.len() {
+                    out.push(if values.is_null(row) {
+                        Scalar::Blank
+                    } else {
+                        // `div_euclid` y no `/`: un instante anterior a 1970 trunca hacia
+                        // su dia, no hacia cero.
+                        Scalar::Date(values.value(row).div_euclid($escala) as i32)
+                    });
+                }
+                return;
+            }
+        };
+    }
+    timestamp!(arrow::array::TimestampSecondArray, 86_400);
+    timestamp!(arrow::array::TimestampMillisecondArray, 86_400_000);
+    timestamp!(arrow::array::TimestampMicrosecondArray, 86_400_000_000);
+    timestamp!(arrow::array::TimestampNanosecondArray, 86_400_000_000_000);
     if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
         for row in 0..values.len() {
             out.push(if values.is_null(row) {
@@ -295,5 +318,45 @@ mod tests {
             .expect("evalua");
         // La variacion contra el total, con Norte puesto: 60 menos 165.
         assert_eq!(values, vec![Scalar::Integer(-105)]);
+    }
+
+    /// Una columna `TIMESTAMP` se lee como su DIA. Postgres devuelve timestamps para sus
+    /// fechas, y una columna que el origen no supiera leer caeria a texto: sin periodo, sin
+    /// filtro de fecha y sin time intelligence en toda la base.
+    #[test]
+    fn un_timestamp_se_lee_como_su_dia() {
+        use datan_model::{Column, DataType, Table, TableKind};
+
+        let engine = Engine::open(":memory:").expect("motor");
+        engine
+            .execute("CREATE TABLE boleta (creado TIMESTAMP)")
+            .expect("tabla");
+        engine
+            .execute(
+                "INSERT INTO boleta VALUES \
+                 ('2023-01-01 23:59:59'), ('2024-06-15 06:30:00'), (NULL)",
+            )
+            .expect("datos");
+
+        // 19358 es el dia de 2023-01-01 en la fixture de la suite.
+        let model = Model {
+            tables: vec![Table {
+                id: ObjectId(1),
+                name: "boleta".to_string(),
+                kind: TableKind::Facts,
+                columns: vec![Column::new(ObjectId(2), "creado", DataType::DateTime)],
+                key_columns: vec![],
+                is_date_table: false,
+            }],
+            measures: vec![],
+            relationships: vec![],
+        };
+        let source = DuckSource::new(&engine, &model, "");
+        let view = source.column(ObjectId(2)).expect("columna");
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.value_at(0), Scalar::Date(19358));
+        assert_eq!(view.value_at(1), Scalar::Date(19358 + 531));
+        assert_eq!(view.value_at(2), Scalar::Blank);
+        assert_eq!(view.non_blank_count(), 2);
     }
 }

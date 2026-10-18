@@ -25,6 +25,7 @@ use datan_dax_eval::{AtomKind, BinaryOp, Shape};
 use datan_model::{DataType, Model, ObjectId, TableKind};
 mod components;
 mod config;
+mod formato;
 mod model_doc;
 mod tokens;
 
@@ -85,7 +86,12 @@ enum State {
     /// resolver.
     Opening,
     Ready,
+    /// La conexion fallo: no hay modelo.
     Failed(String),
+    /// La conexion funciono y el INFORME fallo. El mismo pantallazo con otro titulo: decir
+    /// "no se pudo conectar" cuando la conexion funciona manda a buscar el error al lugar
+    /// equivocado.
+    Broken(String),
 }
 
 /// La vista.
@@ -749,6 +755,11 @@ impl Datan {
                 DataType::Integer | DataType::Moneda | DataType::Decimal => {
                     datan_dax_eval::FilterValue::Integer(filter.value.parse().unwrap_or(0))
                 }
+                // La pastilla de una fecha guarda el DIA desde 1970, que es lo que escribio
+                // `valor_legible`. Leerla como texto daba un filtro que nunca coincide.
+                DataType::Date => {
+                    datan_dax_eval::FilterValue::Date(filter.value.parse().unwrap_or(0))
+                }
                 _ => datan_dax_eval::FilterValue::Text(filter.value.to_string()),
             };
             match por_columna
@@ -809,15 +820,19 @@ impl Datan {
                         // del medio, el resultado baja a tres filas, y se queda mirando la
                         // posicion 400 de una lista de tres: el grid parece vacio.
                         view.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                        view.grid = Some(build_grid(&matrix));
-                        view.matrix = Some(matrix);
-                        view.stats = Some(stats);
+                        let formatos = view
+                            .report
+                            .as_ref()
+                            .map(|report| formatos_del_modelo(&report.model))
+                            .unwrap_or_default();
+                        view.grid = Some(build_grid(&matrix, &formatos));
+                        view.matrix = Some(matrix);                        view.stats = Some(stats);
                         view.totals = cards;
                         view.formula_error = None;
                         view.last_saved = None;
                         view.state = State::Ready;
                     }
-                    Err(error) => view.state = State::Failed(error),
+                    Err(error) => view.state = State::Broken(error),
                 }
                 cx.notify();
             });
@@ -995,6 +1010,7 @@ fn run_report(
     );
     // Los nombres de las medidas, en el MISMO orden que los totales: la tarjeta i es la
     // medida i.
+    let formatos = formatos_del_modelo(&report.model);
     let cards = report
         .measures
         .iter()
@@ -1017,6 +1033,7 @@ fn run_report(
                 total: total.clone(),
                 delta,
                 serie: series.por_medida.get(index).cloned().flatten(),
+                formato: formatos.get(id).cloned(),
             }
         })
         .collect();
@@ -1069,7 +1086,7 @@ fn date_column(report: &Report) -> Option<ObjectId> {
         .iter()
         .filter(|t| connected(t.id))
         .flat_map(|t| t.columns.iter().map(move |c| (t.id, c)))
-        .filter(|(_, c)| matches!(c.data_type, DataType::Date))
+        .filter(|(_, c)| matches!(c.data_type, DataType::Date | DataType::DateTime))
         .map(|(table, column)| (table, column.id))
         .collect();
     dates
@@ -1243,7 +1260,10 @@ fn suggested(model: &Model) -> Selection {
     }
 }
 
-fn build_grid(matrix: &Matrix) -> Grid {
+fn build_grid(
+    matrix: &Matrix,
+    formatos: &std::collections::HashMap<ObjectId, formato::Formato>,
+) -> Grid {
     let width = matrix.width();
     let columns: Vec<Column> = (0..width)
         .map(|column| {
@@ -1255,8 +1275,21 @@ fn build_grid(matrix: &Matrix) -> Grid {
                 .header(column)
                 .map(|h: &Header| !h.is_dimension())
                 .unwrap_or(false);
+            // La celda de una medida con `format_string` sale formateada para LEERSE. El
+            // texto crudo sigue siendo el que viaja: el clic que filtra lee `view.matrix`.
+            let formato = matrix
+                .header(column)
+                .and_then(|h| h.measure)
+                .and_then(|id| formatos.get(&id));
             let values: Vec<SharedString> = (0..matrix.row_count())
-                .map(|row| SharedString::from(matrix.cell(row, column).unwrap_or("")))
+                .map(|row| {
+                    let texto = matrix.cell(row, column).unwrap_or("");
+                    let mostrado = match (formato, texto.parse::<f64>()) {
+                        (Some(formato), Ok(value)) => formato.aplicar(value),
+                        _ => texto.to_string(),
+                    };
+                    SharedString::from(mostrado)
+                })
                 .collect();
             Column {
                 header,
@@ -1270,6 +1303,20 @@ fn build_grid(matrix: &Matrix) -> Grid {
         columns: Arc::from(columns.into_boxed_slice()),
         row_count: matrix.row_count(),
     }
+}
+
+/// El formato entendible de cada medida, por su id. Las medidas sin `format_string`, o con
+/// uno que no se reconoce, no entran.
+fn formatos_del_modelo(model: &Model) -> std::collections::HashMap<ObjectId, formato::Formato> {
+    model
+        .measures
+        .iter()
+        .filter_map(|measure| {
+            let texto = measure.format_string.as_deref()?;
+            let formato = formato::Formato::parse(texto)?;
+            Some((measure.id, formato))
+        })
+        .collect()
 }
 
 
@@ -1387,14 +1434,7 @@ fn plural(cantidad: usize, singular: &str, plural: &str) -> String {
 
 /// Un numero con los puntos de miles, como los muestra la gente: 1.284.310.
 fn count_text(value: i64) -> String {
-    let digits = value.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            out.push('.');
-        }
-        out.push(ch);
-    }
+    let out = formato::con_puntos(&value.unsigned_abs().to_string());
     if value < 0 {
         format!("-{out}")
     } else {
@@ -1505,17 +1545,31 @@ struct Tarjeta {
     total: String,
     delta: Option<f64>,
     serie: Option<Vec<f64>>,
+    /// El `format_string` de la medida, si se entiende. Sin el, el total va abreviado
+    /// (`1,3M`), que es lo que cabe en una tarjeta.
+    formato: Option<formato::Formato>,
 }
 
 fn tarjeta_kpi(theme: &Theme, tarjeta: &Tarjeta) -> AnyElement {
     let valor = if tarjeta.total.is_empty() {
         "-".to_string()
     } else {
-        tarjeta
-            .total
-            .parse::<f64>()
-            .map(format_value)
-            .unwrap_or_else(|_| tarjeta.total.clone())
+        // Con `format_string` manda el formato de la medida, exacto y sin abreviar. Sin el,
+        // la abreviatura que cabe: `1,3M`.
+        match tarjeta.formato.as_ref().and_then(|formato| {
+            tarjeta
+                .total
+                .parse::<f64>()
+                .ok()
+                .map(|value| formato.aplicar(value))
+        }) {
+            Some(texto) => texto,
+            None => tarjeta
+                .total
+                .parse::<f64>()
+                .map(format_value)
+                .unwrap_or_else(|_| tarjeta.total.clone()),
+        }
     };
     let comparacion: AnyElement = match tarjeta.delta {
         Some(delta) => {
@@ -1705,23 +1759,27 @@ impl Render for Datan {
                 )
                 .into_any_element(),
             State::Opening => self.render_reports(cx),
-            State::Failed(error) => div()
-                .flex()
-                .flex_1()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child("No se pudo conectar"),
-                )
-                .child(div().child(error.clone()))
-                .child(
-                retry_button(&theme, self.database.as_deref().unwrap_or("datan_bench"), cx),
-            )
-                .into_any_element(),
+            State::Failed(error) | State::Broken(error) => {
+                let titulo = match &self.state {
+                    State::Failed(_) => "No se pudo conectar",
+                    _ => "La conexion funciona, el informe fallo",
+                };
+                div()
+                    .flex()
+                    .flex_1()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(
+                        div().text_color(theme.muted_foreground).child(titulo),
+                    )
+                    .child(div().child(error.clone()))
+                    .child(
+                        retry_button(&theme, self.database.as_deref().unwrap_or("datan_bench"), cx),
+                    )
+                    .into_any_element()
+            }
             _ => self.render_report(window, cx),
         };
 
@@ -1775,7 +1833,13 @@ impl Datan {
             .iter()
             .filter(|t| matches!(t.kind, TableKind::Dimension) && connected(t))
             .flat_map(|t| t.columns.iter().map(move |c| (t, c)))
-            .filter(|(t, c)| !t.key_columns.contains(&c.id) && !matches!(c.data_type, DataType::Date))
+            // Una columna oculta (`is_hidden` del modelo del usuario) no se ofrece: es lo
+            // que hace que una clave tecnica o un codigo sin nombre no estorben en el panel.
+            .filter(|(t, c)| {
+                !t.key_columns.contains(&c.id)
+                    && !c.is_hidden
+                    && !matches!(c.data_type, DataType::Date)
+            })
             .filter(|(t, c)| query.is_empty() || hit(&c.name, &query) || hit(&t.name, &query))
             .map(|(_, c)| c.id)
             .collect();

@@ -706,3 +706,49 @@ fn una_medida_sin_forma_da_error_y_no_el_valor_de_su_primera_hoja() {
         .with_measures(vec![measure("Cruda")]);
     assert!(totals.totals(&engine().expect("motor"), None).is_err());
 }
+
+#[test]
+fn la_matriz_sale_en_el_orden_de_sort_by() {
+    // `region` ordenada por `region_orden`: Norte, Sur y Este, que es el orden REAL, no el
+    // alfabetico. Los dos caminos tienen que decir el mismo orden: el SQL con un `MIN` en el
+    // ORDER BY (la columna de orden no esta en el GROUP BY) y el interprete con la clave de
+    // su primera aparicion.
+    let mut model = model();
+    for table in &mut model.tables {
+        if table.name != "dim_product" {
+            continue;
+        }
+        let orden = table
+            .columns
+            .iter()
+            .find(|c| c.name == "region_orden")
+            .map(|c| c.id);
+        if let Some(column) = table.columns.iter_mut().find(|c| c.name == "region") {
+            column.sort_by = orden;
+        }
+    }
+    let report = Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")]);
+
+    let esperado = [("Norte", 60.0), ("Sur", 48.0), ("Este", 57.0)];
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let regiones: Vec<&str> = (0..matrix.row_count())
+        .filter_map(|row| matrix.cell(row, 0))
+        .collect();
+    assert_eq!(regiones, vec!["Norte", "Sur", "Este"], "camino SQL");
+
+    let source = memory_source();
+    let matrix = report
+        .execute(&engine().expect("motor"), Some(&source))
+        .expect("corre");
+    let regiones: Vec<&str> = (0..matrix.row_count())
+        .filter_map(|row| matrix.cell(row, 0))
+        .collect();
+    assert_eq!(regiones, vec!["Norte", "Sur", "Este"], "camino interprete");
+    for (row, (region, qty)) in esperado.iter().enumerate() {
+        assert_eq!(matrix.cell(row, 0), Some(*region));
+        let q: f64 = matrix.cell(row, 1).unwrap().parse().unwrap();
+        assert_eq!(q, *qty, "fila {region}");
+    }
+}

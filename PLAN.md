@@ -1425,3 +1425,64 @@ con el origen puesto y su consumo de memoria no cambia.
 de texto y `ABS`, y todas caen en el mismo error nombrado. Los iteradores dentro de un CALCULATE
 anidado (`SUMX(VALUES(a), CALCULATE(...))`) conservan el camino del interprete, que ya resolvia ese
 grano; no hay caso de conformidad que lo fije.
+
+## Fase UI-6: los cuatro campos del modelo llegan a la pantalla
+
+`datan-model` ya traia `format_string`, `description`, `is_hidden` y `sort_by`, y el documento del
+usuario ya los aplicaba al modelo. Nadie los leia: un `sort_by` escrito en el TOML no cambiaba el
+orden de la matriz, y un formato de moneda no llegaba a la tarjeta.
+
+### sort_by
+
+El orden de las filas de una dimension es SU columna de orden, no el alfabetico: los meses salen
+Enero, Diciembre, Febrero si se ordenan por su nombre. Los dos caminos:
+
+- Interprete: `distinct_values` ordena por la clave de la PRIMERA aparicion en la columna de orden,
+  con clave numerica primero y texto despues (el orden alfabetico de claves numericas pone "10"
+  antes que "9").
+- SQL: `ORDER BY MIN(columna_de_orden)`. No esta en el `GROUP BY`; como es funcionalmente
+  dependiente de la columna agrupada, el minimo es EL valor. La tabla de la columna de orden entra
+  al FROM por el mismo camino que las de agrupamiento.
+
+La fixture gana `dim_product.region_orden` (Norte=1, Sur=2, Este=3), distinto del alfabetico, para
+que el test pueda distinguir quien ordena bien. El test corre el informe por los DOS caminos y
+compara el orden.
+
+### format_string
+
+Subconjunto honesto del lenguaje de Power BI y .NET: `#,##0`, `#,##0.00`, `0.0%`, `Currency`,
+`C0..C6`, `N0..N6`, `P0..P6`, y patron con simbolo de moneda (`EUR #,##0`). Lo que no se reconoce
+deja el numero como esta. La salida es en espanol: punto de miles y coma decimal. Solo formatea lo
+que se MUESTRA (el grid y la tarjeta): el texto crudo sigue siendo el que viaja al filtro cuando se
+pincha una celda. Una medida sin formato sigue abreviada (`1,3M`), que es lo que cabe en una
+tarjeta.
+
+### is_hidden
+
+Una columna oculta no se ofrece en el panel Datos. Es lo que hace que una clave tecnica no estorbe.
+Las medidas no tienen el campo.
+
+### description
+
+Se guarda y se aplica al modelo (ya lo hacia `ModelDoc::apply`). Sin UI: gpui-kit no tiene tooltip
+sobre un div, y una linea de texto bajo cada campo del panel ensucia la lista. Queda para la
+etapa de panel de propiedades.
+
+## Arreglos de la misma pasada
+
+- Una columna `TIMESTAMP` (lo que Postgres llama fecha) servia para nada: `date_column` exigia
+  `Date` puro en los dos lados, asi que la base se quedaba sin periodo, sin filtro de fecha y sin
+  time intelligence. Ahora `DateTime` tambien vale, y `DuckSource` lee un timestamp como su DIA
+  (`div_euclid`, para que un instante anterior a 1970 trunque hacia su dia). El fast path ya
+  comparaba bien: DuckDB coerciona fecha contra timestamp.
+- La pastilla de una fecha se reconstruia como TEXTO y el filtro nunca coincidia. Ahora se lee el
+  dia desde 1970, que es lo que `valor_legible` escribe.
+- El pantallazo de error decia "No se pudo conectar" tambien cuando la conexion habia funcionado y
+  lo que fallo fue el informe. Hay un estado `Broken` con su titulo: manda a buscar el error al
+  lugar correcto.
+- `count_text` reusa `formato::con_puntos`: una sola implementacion de los puntos de miles.
+
+### Resultado
+
+221 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergen. Solo `arrow v58.4.0`. La app
+arranca y su consumo de memoria no cambia.

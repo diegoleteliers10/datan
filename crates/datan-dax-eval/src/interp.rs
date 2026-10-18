@@ -1005,8 +1005,29 @@ impl<'a> Interpreter<'a> {
             .source
             .column(column)
             .ok_or(InterpError::MissingColumn(column))?;
+        // La columna por la que se ORDENA, si el modelo declara una. `mes_nombre` se lee
+        // mejor ordenado por `mes_numero` que por su propio texto: el orden alfabetico de
+        // los meses es Enero, Diciembre, Febrero.
+        let sort_by = self
+            .model
+            .column(column)
+            .and_then(|(_, definition)| definition.sort_by)
+            .filter(|sort| *sort != column);
+        let sort_view = match sort_by {
+            Some(sort) => Some(
+                self.source
+                    .column(sort)
+                    .ok_or(InterpError::MissingColumn(sort))?,
+            ),
+            None => None,
+        };
         let mut distinct: BTreeSet<String> = BTreeSet::new();
         let mut order: std::collections::HashMap<String, Option<Scalar>> =
+            std::collections::HashMap::new();
+        // La clave de orden de CADA valor distinto: la de su primera aparicion. Un valor que
+        // aparece en dos filas con dos claves de orden es un modelo mal formado, y quedarse
+        // con la primera es la misma regla que un `MIN` en SQL.
+        let mut keys: std::collections::HashMap<String, (f64, String)> =
             std::collections::HashMap::new();
         let length = self.source.table_len(self.owner(column));
         for row in 0..length {
@@ -1016,11 +1037,27 @@ impl<'a> Interpreter<'a> {
             }
             let key = scalar_key(&value);
             if distinct.insert(key.clone()) {
-                order.insert(key, Some(value));
+                order.insert(key.clone(), Some(value.clone()));
+                let sort_value = match &sort_view {
+                    Some(sort_view) => sort_view.value_at(row),
+                    None => value,
+                };
+                keys.insert(key, order_key(&sort_value));
             }
         }
-        let mut out: Vec<Option<Scalar>> = distinct.iter().filter_map(|k| order.get(k).cloned()).collect();
-        out.sort_by(|a, b| scalar_key(a.as_ref().unwrap()).cmp(&scalar_key(b.as_ref().unwrap())));
+        let mut out: Vec<Option<Scalar>> =
+            distinct.iter().filter_map(|k| order.get(k).cloned()).collect();
+        out.sort_by(|a, b| {
+            let ka = keys.get(&scalar_key(a.as_ref().unwrap()));
+            let kb = keys.get(&scalar_key(b.as_ref().unwrap()));
+            match (ka, kb) {
+                (Some(x), Some(y)) => x.0.total_cmp(&y.0).then_with(|| x.1.cmp(&y.1)),
+                // Un valor que no tiene clave de orden (no aparecio) va al final.
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
         Ok(out)
     }
 
@@ -1197,6 +1234,21 @@ fn scalar_key(value: &Scalar) -> String {
         Scalar::Decimal(n) => format!("d{n}"),
         Scalar::Text(t) => format!("t{t}"),
         Scalar::Date(d) => format!("D{d}"),
+    }
+}
+
+/// La clave con la que se ORDENA un valor: numero primero, texto despues.
+///
+/// Un orden alfabetico de claves numericas pone "10" antes que "9", y es exactamente el
+/// caso de una columna de orden. Un texto ordena despues de cualquier numero, que es lo que
+/// se espera de un `sort_by` que apunta a una columna de otro tipo.
+fn order_key(value: &Scalar) -> (f64, String) {
+    match value {
+        Scalar::Integer(n) => (*n as f64, String::new()),
+        Scalar::Decimal(n) => (*n, String::new()),
+        Scalar::Date(d) => (*d as f64, String::new()),
+        Scalar::Blank => (f64::NEG_INFINITY, String::new()),
+        other => (f64::NEG_INFINITY, scalar_key(other)),
     }
 }
 

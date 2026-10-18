@@ -157,9 +157,14 @@ pub fn filters(
 /// devolveria filas que el rango de fechas dice excluir.
 pub fn date_column(model: &Model) -> Result<ObjectId, TimeError> {
     let table = model.date_table().ok_or(TimeError::NoDateTable)?;
+    // Una columna `DateTime` tambien sirve: Postgres devuelve `timestamp` para sus fechas, y
+    // el motor trabaja en dias. Exigir `Date` puro dejaba a una base de timestamps sin
+    // periodo, sin filtro de fecha y sin time intelligence.
+    let es_fecha =
+        |c: &datan_model::Column| matches!(c.data_type, DataType::Date | DataType::DateTime);
 
     if let Some(key) = table.key_columns.first()
-        && table.column(*key).is_some_and(|c| c.data_type == DataType::Date)
+        && table.column(*key).is_some_and(es_fecha)
     {
         return Ok(*key);
     }
@@ -167,7 +172,7 @@ pub fn date_column(model: &Model) -> Result<ObjectId, TimeError> {
     table
         .columns
         .iter()
-        .find(|c| c.data_type == DataType::Date)
+        .find(|c| es_fecha(c))
         .map(|c| c.id)
         .ok_or_else(|| TimeError::NoDateColumn(table.name.clone()))
 }
