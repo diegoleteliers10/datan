@@ -163,6 +163,136 @@ impl ColumnValues {
     }
 }
 
+/// Si el operador compara o combina booleanos, que no es aritmetica.
+pub(crate) fn is_boolean_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::Less
+            | BinaryOp::LessEqual
+            | BinaryOp::Greater
+            | BinaryOp::GreaterEqual
+            | BinaryOp::And
+            | BinaryOp::Or
+    )
+}
+
+/// Comparaciones y conectores de DAX sobre dos escalares.
+///
+/// Vive aparte de `binary_numbers` porque no son aritmetica: esa funcion devuelve BLANK para
+/// todo lo que no sea `+`, `-`, `*` y `/`, y con eso la condicion de un `IF` salia BLANK y la
+/// medida tomaba SIEMPRE la rama falsa. Un numero equivocado, sin error.
+fn boolean_values(left: &Scalar, right: &Scalar, op: BinaryOp) -> Scalar {
+    if left.is_blank() || right.is_blank() {
+        return Scalar::Blank;
+    }
+    let value = match op {
+        BinaryOp::Equal => same_scalar(left, right),
+        BinaryOp::NotEqual => !same_scalar(left, right),
+        BinaryOp::And => truthy(left) && truthy(right),
+        BinaryOp::Or => truthy(left) || truthy(right),
+        _ => {
+            let Some(ordering) = compare_scalars(left, right) else {
+                return Scalar::Blank;
+            };
+            match op {
+                BinaryOp::Less => ordering.is_lt(),
+                BinaryOp::LessEqual => ordering.is_le(),
+                BinaryOp::Greater => ordering.is_gt(),
+                _ => ordering.is_ge(),
+            }
+        }
+    };
+    Scalar::Boolean(value)
+}
+
+/// Una funcion escalar de DAX sobre valores ya calculados.
+///
+/// Lo que no esta en la lista devuelve BLANK, que es lo que DAX hace con un argumento de tipo
+/// equivocado. La lista coincide con la de `Shape::Call`: la forma no se construye para una
+/// funcion que no este aqui.
+fn call_scalar(name: &str, args: &[Scalar]) -> Scalar {
+    match (name, args) {
+        // `DIVIDE(a, b)` da BLANK si `b` es cero o BLANK. Es exactamente la division binaria,
+        // que ya tiene esa regla.
+        ("DIVIDE", [a, b]) => binary_numbers(a, b, BinaryOp::Divide),
+        ("DIVIDE", [a, b, alternate]) => match binary_numbers(a, b, BinaryOp::Divide) {
+            Scalar::Blank => alternate.clone(),
+            value => value,
+        },
+        ("IF", [condition, yes, no]) => {
+            if truthy(condition) {
+                yes.clone()
+            } else {
+                no.clone()
+            }
+        }
+        ("IF", [condition, yes]) => {
+            if truthy(condition) {
+                yes.clone()
+            } else {
+                Scalar::Blank
+            }
+        }
+        ("COALESCE", values) => values
+            .iter()
+            .find(|value| !value.is_blank())
+            .cloned()
+            .unwrap_or(Scalar::Blank),
+        ("SWITCH", [expression, rest @ ..]) => switch_scalar(expression, rest),
+        _ => Scalar::Blank,
+    }
+}
+
+/// `SWITCH`: el primer valor que coincide con la expresion, o el ultimo argumento suelto.
+fn switch_scalar(expression: &Scalar, rest: &[Scalar]) -> Scalar {
+    let mut index = 0;
+    while index + 1 < rest.len() {
+        if same_scalar(expression, &rest[index]) {
+            return rest[index + 1].clone();
+        }
+        index += 2;
+    }
+    // Un argumento que sobra al final es el valor por defecto, y no una pareja sin resultado.
+    if index < rest.len() {
+        return rest[index].clone();
+    }
+    Scalar::Blank
+}
+
+/// Si un escalar es verdadero. `BLANK` y cualquier cosa que no sea un booleano no lo son, que
+/// es lo que hace `IF` con una condicion vacia.
+fn truthy(value: &Scalar) -> bool {
+    matches!(value, Scalar::Boolean(true))
+}
+
+fn same_scalar(left: &Scalar, right: &Scalar) -> bool {
+    match (left, right) {
+        (Scalar::Blank, Scalar::Blank) => true,
+        (Scalar::Blank, _) | (_, Scalar::Blank) => false,
+        (Scalar::Text(a), Scalar::Text(b)) => a == b,
+        (Scalar::Boolean(a), Scalar::Boolean(b)) => a == b,
+        _ => compare_scalars(left, right).is_some_and(|ordering| ordering.is_eq()),
+    }
+}
+
+/// El orden de dos escalares, si son comparables.
+///
+/// El texto se compara como texto: pasar los dos por `as_number` haria que `"b" < "a"` fuera
+/// falso por los dos lados, y una comparacion que no distingue nada es peor que un BLANK.
+fn compare_scalars(left: &Scalar, right: &Scalar) -> Option<std::cmp::Ordering> {
+    match (left, right) {
+        (Scalar::Text(a), Scalar::Text(b)) => Some(a.cmp(b)),
+        (Scalar::Date(a), Scalar::Date(b)) => Some(a.cmp(b)),
+        (Scalar::Integer(_) | Scalar::Decimal(_), Scalar::Integer(_) | Scalar::Decimal(_)) => {
+            left.as_number().partial_cmp(&right.as_number())
+        }
+        (Scalar::Boolean(a), Scalar::Boolean(b)) => Some(a.cmp(b)),
+        _ => None,
+    }
+}
+
 /// Aritmetica de DAX sobre dos escalares.
 ///
 /// La division es el caso que importa: `BLANK / algo` y `algo / 0` dan BLANK, nunca `inf` ni
@@ -784,7 +914,20 @@ impl<'a> Interpreter<'a> {
             Shape::Binary { op, left, right } => {
                 let left = self.eval_shape(left, atoms, values);
                 let right = self.eval_shape(right, atoms, values);
+                if is_boolean_op(*op) {
+                    return boolean_values(&left, &right, *op);
+                }
                 binary_numbers(&left, &right, *op)
+            }
+            // Una funcion escalar sobre hojas ya calculadas. `IF` con la condicion en BLANK
+            // toma la rama falsa, y `DIVIDE` con denominador cero da BLANK, igual que la
+            // division binaria: los dos caminos tienen que decir lo mismo.
+            Shape::Call { name, args } => {
+                let args: Vec<Scalar> = args
+                    .iter()
+                    .map(|arg| self.eval_shape(arg, atoms, values))
+                    .collect();
+                call_scalar(name, &args)
             }
         }
     }

@@ -110,6 +110,51 @@ fn margin_no_es_qty_repetido() {
 }
 
 #[test]
+fn una_medida_con_divide_no_es_su_primera_hoja() {
+    // `DIVIDE` no tenia forma propia: el conjunto de atomos quedaba con dos hojas y NINGUNA
+    // salida, el plan emitia una columna por hoja, y el informe pegaba la primera en la
+    // columna de la medida. `Ratio` salia con el valor de `Qty`: un numero con el tipo
+    // correcto, sin error y sin aviso.
+    let model = model();
+    let report = Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), measure("Amount"), measure("Ratio")]);
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+
+    for row in 0..matrix.row_count() {
+        let qty: f64 = matrix.cell(row, 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let amount: f64 = matrix.cell(row, 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let ratio: f64 = matrix.cell(row, 3).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let expected = if amount == 0.0 { 0.0 } else { qty / amount };
+        assert!(
+            (ratio - expected).abs() < 1e-9,
+            "fila {row}: ratio {ratio}, esperado {expected} con qty {qty} y amount {amount}"
+        );
+    }
+}
+
+#[test]
+fn una_medida_con_if_elige_por_fila_y_no_copia_su_hoja() {
+    // `IF` tampoco tenia forma: la comparacion de la condicion tiene que llegar a los dos
+    // caminos, y sin eso la medida salia con el valor de su primera hoja.
+    let model = model();
+    let report = Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), measure("Condicional")]);
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+
+    for row in 0..matrix.row_count() {
+        let qty: f64 = matrix.cell(row, 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let condicional: f64 = matrix.cell(row, 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let expected = if qty > 50.0 { qty } else { 0.0 };
+        assert_eq!(
+            condicional, expected,
+            "fila {row}: condicional {condicional}, esperado {expected} con qty {qty}"
+        );
+    }
+}
+
+#[test]
 fn las_filas_vienen_ordenadas_para_que_el_clic_sea_estable() {
     // El clic sobre la celda (fila, columna) tiene que seguir apuntando a la misma fila
     // después de un reordenamiento. Sin `ORDER BY` en el SQL, el hash de DuckDB puede dar
@@ -316,6 +361,66 @@ fn los_totales_de_las_tarjetas_son_los_mismos_que_la_suma_de_la_matriz() {
         .sum();
     let amount_total: f64 = totals[1].parse().unwrap_or(0.0);
     assert!((amount_matriz - amount_total).abs() < 1e-6);
+}
+
+#[test]
+fn las_tarjetas_no_confunden_dos_medidas_que_comparten_hoja() {
+    // `Qty` y `Grande` leen la MISMA hoja `SUM(qty)` y dan numeros distintos: el total de
+    // `Qty` en la suite es 165 y el umbral de `Grande` es 1000, asi que su total es cero. Si
+    // las dos caen en el mismo grupo de lectura, la consulta produce una sola columna con la
+    // forma de la primera y las dos tarjetas muestran el mismo numero.
+    let mut model = model();
+    model.measures.push(Measure::new(
+        ObjectId(901),
+        "Grande",
+        "IF([Qty] > 1000, [Qty], 0)",
+    ));
+
+    let report = datan_report::Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty"), ObjectId(901)]);
+    let engine = engine().expect("motor");
+
+    assert_eq!(report.query_count().expect("cuenta"), 2, "una consulta por forma");
+
+    let totals = report.totals(&engine, None).expect("totales");
+    let qty: f64 = totals[0].parse().unwrap_or(0.0);
+    let grande: f64 = totals[1].parse().unwrap_or(0.0);
+    assert_eq!(qty, 165.0);
+    assert_eq!(grande, 0.0, "el total no es el de Qty");
+
+    // Y la matriz dice lo mismo que las tarjetas, con la misma separacion de planes.
+    let matrix = report.execute(&engine, None).expect("corre");
+    for row in 0..matrix.row_count() {
+        assert_eq!(matrix.cell(row, 2), Some("0"));
+    }
+}
+
+#[test]
+fn dos_medidas_iguales_llenan_las_dos_tarjetas() {
+    // El grupo produce UNA columna para las dos medidas. La segunda tarjeta leia la columna 1,
+    // que no existe, y quedaba vacia: un guion que parece un dato que falta.
+    let mut model = model();
+    let original = model
+        .measures
+        .iter()
+        .find(|m| m.name == "Qty")
+        .expect("no esta Qty")
+        .clone();
+    model.measures.push(Measure::new(
+        ObjectId(900),
+        "Unidades",
+        original.expression.clone(),
+    ));
+
+    let report = datan_report::Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![ObjectId(900), original.id]);
+    let totals = report.totals(&engine().expect("motor"), None).expect("totales");
+
+    assert_eq!(totals.len(), 2);
+    assert_eq!(totals[0], "165");
+    assert_eq!(totals[1], "165", "la segunda tarjeta no puede quedar vacia");
 }
 
 #[test]

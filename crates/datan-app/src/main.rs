@@ -1093,6 +1093,10 @@ fn forma_aditiva(shape: &Shape, kinds: &[AtomKind]) -> bool {
                 && forma_aditiva(left, kinds)
                 && forma_aditiva(right, kinds)
         }
+        // Una llamada no es aditiva sin razonarlo funcion por funcion, y una racha de meses
+        // equivocada en una tarjeta es una mentira con forma de dato. `DIVIDE` es un cociente,
+        // y `IF` y `COALESCE` eligen: ninguna es la suma de sus meses.
+        Shape::Call { .. } => false,
     }
 }
 

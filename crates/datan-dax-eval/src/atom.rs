@@ -11,7 +11,7 @@
 //! 6 atomos son 30.000 busquedas hash, que son milisegundos.
 
 use datan_dax_check::CheckedExpr;
-use datan_dax_syntax::BinaryOp;
+use datan_dax_syntax::{BinaryOp, UnaryOp};
 use datan_model::{Model, ObjectId};
 
 use crate::filter::FilterContext;
@@ -127,6 +127,17 @@ pub enum Shape {
         left: Box<Shape>,
         right: Box<Shape>,
     },
+    /// Una funcion escalar sobre otras formas: `DIVIDE`, `IF`, `COALESCE`, `SWITCH`.
+    ///
+    /// Hace falta porque el nivel superior de una medida no tiene por que ser una agregacion.
+    /// Sin esta forma, `DIVIDE([A],[B])` no tenia representacion: el conjunto de atomos
+    /// quedaba con dos hojas y SIN salidas, el plan emitia una columna por hoja, y el
+    /// informe pegaba la primera en la columna de la medida. O sea, el valor de `[A]`, sin
+    /// error y sin aviso. El nombre va en MAYUSCULAS, como llega del chequeo.
+    Call {
+        name: String,
+        args: Vec<Shape>,
+    },
 }
 
 /// Una columna de salida del informe.
@@ -172,6 +183,8 @@ impl AtomSet {
             Shape::Atom(index) => self.atoms.get(*index).and_then(|atom| atom.column),
             Shape::Number(_) => None,
             Shape::Binary { left, .. } => self.outputs_atom_column(left),
+            // Una llamada elige o combina varias hojas: no hay UNA columna que la produzca.
+            Shape::Call { .. } => None,
         }
     }
 
@@ -230,8 +243,36 @@ impl Extractor<'_> {
                 right: Box::new(self.shape_of(right, context)?),
             }),
 
+            // `-x` se baja como `0 - x`. Cualquier otra forma de representarlo obligaria a
+            // los dos caminos a tratar el menos unario como una resta por otra rama.
+            // Sin este caso, `DIVIDE(a, b, -1)` no tenia forma y caia al camino viejo.
+            CheckedExpr::Unary {
+                op: UnaryOp::Negate,
+                operand,
+                ..
+            } => Some(Shape::Binary {
+                op: BinaryOp::Subtract,
+                left: Box::new(Shape::Number(0.0)),
+                right: Box::new(self.shape_of(operand, context)?),
+            }),
+
+            // Una variable ya resuelta es su cuerpo. `VAR x = SUM(a) RETURN x` vale lo que
+            // `x`, y sin esto la medida perdia la forma y el informe pegaba la primera hoja
+            // en su columna: el valor de `SUM(a)`, sin error y sin aviso.
+            CheckedExpr::Variable { value, .. } => self.shape_of(value, context),
+
+            // `VAR`/`RETURN` es un bloque: vale lo que su cuerpo. Las ligaduras no tienen
+            // efecto, y las referencias ya vienen resueltas a su valor, asi que no hay ningun
+            // orden que respetar.
+            CheckedExpr::Block { body, .. } => self.shape_of(body, context),
+
             CheckedExpr::Call { name, args, .. } => {
-                let kind = aggregation_of(name)?;
+                // Una funcion que no es agregacion no nace un atomo: combina los que ya hay.
+                // Sin este caso, `DIVIDE([A],[B])` no tenia forma y el conjunto de atomos
+                // quedaba con dos hojas y ninguna salida.
+                let Some(kind) = aggregation_of(name) else {
+                    return self.scalar_call(name, args, context);
+                };
                 // Los iteradores cambian de verdad el grano: `SUMX(VALUES(A), ...)`
                 // recalcula por fila. No tienen forma sobre atomos y van al interprete.
                 if matches!(kind, AtomKind::Expression) {
@@ -281,6 +322,41 @@ impl Extractor<'_> {
 
             _ => None,
         }
+    }
+
+    /// La forma de una funcion escalar sobre las formas de sus argumentos.
+    ///
+    /// Solo las funciones que los DOS caminos saben calcular. Cualquier otra devuelve `None`,
+    /// y `None` es lo correcto: una forma a medias seria peor que no tener forma, porque el
+    /// plan la tomaria por valida y el numero saldria de la hoja equivocada.
+    ///
+    /// Las comparaciones entran: `IF([A] > 0, ...)` necesita que la condicion tenga forma, y
+    /// el lowering la baja a un predicado de SQL y el interprete a un booleano.
+    fn scalar_call(
+        &mut self,
+        name: &str,
+        args: &[CheckedExpr],
+        context: &FilterContext,
+    ) -> Option<Shape> {
+        // El rango de argumentos, para no aceptar una llamada que despues no se sabe
+        // calcular. `IF` y `DIVIDE` tienen un tercer argumento opcional.
+        let allowed = match name {
+            "DIVIDE" | "IF" => (2, 3),
+            "COALESCE" => (1, usize::MAX),
+            "SWITCH" => (3, usize::MAX),
+            _ => return None,
+        };
+        if args.len() < allowed.0 || args.len() > allowed.1 {
+            return None;
+        }
+        let args = args
+            .iter()
+            .map(|arg| self.shape_of(arg, context))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Shape::Call {
+            name: name.to_string(),
+            args,
+        })
     }
 
     /// Emite una hoja, o no hace nada si ya existe una identica.

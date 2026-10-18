@@ -573,20 +573,84 @@ fn render_shape(
         Shape::Binary { op, left, right } => {
             let left = render_shape(left, atoms, model, sources, aliases)?;
             let right = render_shape(right, atoms, model, sources, aliases)?;
-            let rendered = match op {
+            match op {
                 BinaryOp::Add => format!("({left} + {right})"),
                 BinaryOp::Subtract => format!("({left} - {right})"),
                 BinaryOp::Multiply => format!("({left} * {right})"),
                 BinaryOp::Divide => format!("({left} / NULLIF({right}, 0))"),
+                // Las comparaciones y los conectores se bajan a un predicado. `IF` necesita
+                // que su condicion sepa bajar, y una comparacion suelta en el nivel superior
+                // de una medida tambien es un valor: antes esto era un error.
+                BinaryOp::Equal => format!("({left} = {right})"),
+                BinaryOp::NotEqual => format!("({left} <> {right})"),
+                BinaryOp::Less => format!("({left} < {right})"),
+                BinaryOp::LessEqual => format!("({left} <= {right})"),
+                BinaryOp::Greater => format!("({left} > {right})"),
+                BinaryOp::GreaterEqual => format!("({left} >= {right})"),
+                BinaryOp::And => format!("({left} AND {right})"),
+                BinaryOp::Or => format!("({left} OR {right})"),
                 other => {
                     return Err(LowerError::Unsupported(format!(
                         "el operador `{}` no se baja a SQL dentro de una forma de medida",
                         other.as_str()
                     )));
                 }
-            };
-            rendered
+            }
         }
+        // Una funcion escalar sobre formas: `DIVIDE`, `IF`, `COALESCE`, `SWITCH`. Los
+        // argumentos se renderizan primero, para que la precedencia la decida el arbol.
+        Shape::Call { name, args } => {
+            let args = args
+                .iter()
+                .map(|arg| render_shape(arg, atoms, model, sources, aliases))
+                .collect::<Result<Vec<_>, _>>()?;
+            render_call(name, &args)?
+        }
+    })
+}
+
+/// Una funcion escalar sobre formas ya renderizadas.
+///
+/// La division lleva el mismo `NULLIF` que la binaria, por la misma razon: DuckDB devuelve
+/// `inf` para `x / 0` y DAX devuelve BLANK. El tercer argumento de `DIVIDE` es el valor
+/// alterno, y va en un `COALESCE` porque el denominador cero y un numerador BLANK dan los dos
+/// el mismo nulo.
+///
+/// Una funcion que no este aqui devuelve un error, no un texto a medias: la forma solo se
+/// construye para las funciones que esta funcion sabe bajar.
+fn render_call(name: &str, args: &[String]) -> Result<String, LowerError> {
+    let unsupported = || {
+        LowerError::Unsupported(format!(
+            "`{name}` con {} argumentos no se baja a SQL dentro de una forma de medida",
+            args.len()
+        ))
+    };
+    Ok(match (name, args) {
+        ("DIVIDE", [a, b]) => format!("(({a}) / NULLIF(({b}), 0))"),
+        ("DIVIDE", [a, b, alternate]) => {
+            format!("COALESCE((({a}) / NULLIF(({b}), 0)), {alternate})")
+        }
+        ("IF", [condition, yes, no]) => {
+            format!("(CASE WHEN {condition} THEN {yes} ELSE {no} END)")
+        }
+        ("IF", [condition, yes]) => format!("(CASE WHEN {condition} THEN {yes} END)"),
+        ("COALESCE", args) if !args.is_empty() => format!("COALESCE({})", args.join(", ")),
+        ("SWITCH", [expression, rest @ ..]) => {
+            let mut sql = format!("(CASE {expression}");
+            let mut index = 0;
+            while index + 1 < rest.len() {
+                sql.push_str(&format!(" WHEN {} THEN {}", rest[index], rest[index + 1]));
+                index += 2;
+            }
+            // Un argumento que sobra al final es el valor por defecto, no una pareja sin
+            // resultado.
+            if index < rest.len() {
+                sql.push_str(&format!(" ELSE {}", rest[index]));
+            }
+            sql.push_str(" END)");
+            sql
+        }
+        _ => return Err(unsupported()),
     })
 }
 

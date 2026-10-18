@@ -1287,3 +1287,87 @@ que es lo mismo para un valor y una union para varios.
 
 204 tests. 38 casos de conformidad, 0 divergencias.
 
+## Fase UI-4: una medida no es su primera hoja
+
+El primer paso del plan de brechas con Power BI. Es un defecto del MOTOR y no de la pantalla, y
+estaba en el camino mas comun: una medida de negocio escrita con `DIVIDE`.
+
+### El defecto
+
+`Shape` tenia tres casos: una hoja, un numero y una operacion binaria. El nivel superior de una
+medida que NO es una agregacion ni una operacion aritmetica no tenia forma. `shape_of` devolvia
+`None`, el conjunto de atomos quedaba con sus hojas y SIN salidas, el plan emitia una columna por
+hoja, y `Report::execute` pegaba la columna de la hoja 0 en la columna de la medida.
+
+`DIVIDE([Qty], [Amount])` daba el valor de `Qty`. Con el tipo correcto, sin error y sin aviso. Una
+medida que se ve bien y miente es el peor resultado posible de esta pieza.
+
+La misma clase de defecto alcanzaba a `VAR`/`RETURN` (el bloque entero quedaba sin forma) y a un
+literal negado, que el parser produce como `Unary(Negate)`. `DIVIDE(a, b, -1)` no tenia forma por
+el `-1`.
+
+### La forma de una llamada
+
+`Shape::Call { name, args: Vec<Shape> }`. Una lista blanca de cuatro funciones: `DIVIDE`, `IF`,
+`COALESCE` y `SWITCH`. Cualquier otra devuelve `None`, y `None` es lo correcto: una forma a medias
+seria peor que no tener forma, porque el plan la tomaria por valida y el numero saldria de la hoja
+equivocada.
+
+`Block` vale lo que su cuerpo y `Variable` lo que su valor: las dos son plegados, no evaluacion.
+Las ligaduras de un `VAR` no tienen efecto y el chequeo ya resolvio las referencias.
+
+Los dos caminos tienen que dar el mismo numero, asi que las cuatro funciones se escriben dos veces
+a proposito:
+
+- SQL, en `render_call`: `DIVIDE` -> `((a) / NULLIF((b), 0))`, con el valor alterno dentro de un
+  `COALESCE`; `IF` -> `CASE WHEN`; `SWITCH` -> `CASE expr WHEN v THEN r ... END`. El `NULLIF` no es
+  decorativo: DuckDB devuelve `inf` para `x / 0` y DAX devuelve BLANK.
+- Interprete, en `call_scalar`: `DIVIDE` reusa `binary_numbers`, que ya tiene la regla del cero;
+  `IF` con la condicion en BLANK toma la rama falsa; `COALESCE` devuelve el primer valor no vacio.
+
+La condicion de un `IF` es una comparacion, y comparar no es aritmetica: `binary_numbers` devuelve
+BLANK para todo lo que no sea `+`, `-`, `*` y `/`. Con eso, la condicion salia BLANK y la medida
+tomaba SIEMPRE la rama falsa. Hay ahora una rama de comparaciones en el interprete
+(`boolean_values`) y los mismos operadores en `render_shape`, que antes eran un error.
+
+`forma_aditiva` responde `false` para una llamada: `DIVIDE` es un cociente y `IF` elige, asi que
+sumar sus meses no da el total. Esa medida no lleva racha en la tarjeta, que es preferible a una
+racha equivocada.
+
+### La clave del plan no eran las hojas
+
+La prueba de `IF` expuso un defecto vecino. Los planes se agrupaban por la FIRMA DE LOS ATOMOS, y
+`Qty` (`SUM(qty)`) y `Condicional` (`IF(SUM(qty) > 50, ...)`) comparten hoja. Caian en el mismo
+plan, la consulta producia una columna con la forma de la primera, y las dos medidas mostraban el
+mismo numero.
+
+Dos medidas comparten consulta solo si comparten las hojas Y la forma de salida. La agrupacion vive
+ahora en `Report::plans`, y `execute`, `query_count` y `totals` la usan. Antes eran tres bucles
+iguales, y no decian lo mismo: `query_count` contaba por firmas y `execute` agrupaba por firmas, asi
+que el numero de consultas y la ejecucion podian discrepar sin que nada lo notara.
+
+Dentro de un grupo, la consulta produce una columna por FORMA, no por medida. Cuando el grupo tiene
+mas medidas que columnas, las de mas son identicas y leen la ultima. `execute` ya lo hacia;
+`totals` leia por posicion y dejaba la segunda tarjeta de dos medidas iguales EN BLANCO. Un guion en
+una tarjeta parece un dato que falta, no una medida que no se pudo leer.
+
+### Resultado
+
+Cuatro casos de conformidad nuevos con la forma de salida y su condicion, mas el denominador cero
+con y sin valor alterno. Los dos caminos coinciden.
+
+208 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergencias.
+
+### Lo que sigue abierto, y por que
+
+Una medida que NO tiene forma (un `CALCULATE`, un iterador, una funcion de texto) sigue sin poder
+resolverse con el mapeo de columnas, que es "una columna por salida". Hoy no se nota porque la app
+no le pasa ningun `DataSource` y esas medidas fallan con `NoSource` en vez de dar un numero. El
+arreglo NO es una forma: el interprete tiene que producir UNA columna de medida para la expresion
+entera, y eso va con el paso del `DataSource` sobre DuckDB, que es el que hace que esas medidas
+corran en la app.
+
+El campo `expected` de `Case` no lo comprueba nadie: `expecting(...)` documenta la intencion y
+`run_suite` no lo mira. Los casos se validan por la coincidencia entre caminos, que es lo que
+importa, pero un valor escrito a mano que nadie compara es una promesa sin comprobar.
+

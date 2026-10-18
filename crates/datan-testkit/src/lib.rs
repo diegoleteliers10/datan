@@ -166,6 +166,13 @@ pub fn model() -> Model {
                 "Margin",
                 "([Qty] - [Amount]) / [Qty]",
             ),
+            // Una funcion escalar en el nivel SUPERIOR de la medida. `DIVIDE` es la forma en
+            // que se escriben las medidas de negocio, y es la que decide si una fila sin
+            // datos da BLANK o una division por cero. Sin forma propia, el conjunto quedaba
+            // con dos hojas y ninguna salida, y el informe pegaba la primera en la columna de
+            // la medida: el valor de `[Qty]`, sin error y sin aviso.
+            Measure::new(ObjectId(104), "Ratio", "DIVIDE([Qty], [Amount])"),
+            Measure::new(ObjectId(105), "Condicional", "IF([Qty] > 50, [Qty], 0)"),
         ],
         relationships: vec![
             Relationship {
@@ -564,6 +571,30 @@ pub fn suite() -> Vec<Case> {
         Case::new("margin: division entre medidas", "[Margin]"),
         Case::new("margin con filtro de region", "[Margin]").filter("region", "Norte"),
         Case::new("margin de una hoja repetida", "([Qty] - [Qty]) / [Qty]"),
+
+        // Funciones escalares en el nivel superior. Los dos caminos tienen que decir lo
+        // mismo: el `NULLIF` del SQL y el BLANK del interprete son la misma regla escrita dos
+        // veces, y una medida de negocio se escribe con `DIVIDE`, no con una barra.
+        Case::new("divide entre medidas", "[Ratio]"),
+        Case::new("divide con filtro de region", "[Ratio]").filter("region", "Norte"),
+        // Denominador cero. DuckDB devuelve `inf` sin el `NULLIF` y DAX devuelve BLANK, asi
+        // que este caso es el que distingue una regla de una casualidad.
+        Case::new("divide con denominador cero", "DIVIDE([Qty], [Qty] - [Qty])")
+            .expecting(Scalar::Blank),
+        Case::new(
+            "divide con denominador cero y valor alterno",
+            "DIVIDE([Qty], [Qty] - [Qty], -1)",
+        )
+        .expecting(Scalar::Integer(-1)),
+        Case::new("if con una comparacion", "[Condicional]"),
+        Case::new("if con una comparacion por region", "[Condicional]").filter("region", "Sur"),
+        Case::new("coalesce de una medida", "COALESCE([Qty], 0)"),
+        Case::new("switch por el valor de la medida", "SWITCH([Qty], 57, [Amount], 0)"),
+        Case::new("menos unario", "-[Qty]").expecting(Scalar::Integer(0)),
+        Case::new(
+            "variable de una medida",
+            "VAR total = [Qty] RETURN total * 2",
+        ),
 
         // Casos de `CALCULATE`. No tienen fast path: el atomo se marca para el interprete
         // porque el conjunto de filtros cambia de forma no uniforme. El harness tiene que

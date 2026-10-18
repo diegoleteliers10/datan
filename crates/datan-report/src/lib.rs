@@ -27,8 +27,6 @@
 pub mod export;
 pub mod saved;
 
-use std::collections::BTreeMap;
-
 use datan_dax_eval::{AtomSet, Filter, FilterContext, FilterValue, Interpreter, Scalar};
 use datan_dax_sql::{SourceMap, lower, lower_scalar};
 use datan_model::{DataType, Measure, Model, ObjectId};
@@ -200,30 +198,14 @@ impl Report {
         source: Option<&dyn datan_dax_eval::DataSource>,
     ) -> Result<Vec<String>, ReportError> {
         let sources = SourceMap::from_model(&self.model).with_qualifier(&self.qualifier);
-        let definitions = self.measure_definitions()?;
 
-        // Los mismos grupos de lectura que `execute`: medidas con las mismas hojas
-        // comparten consulta.
-        let mut groups: Vec<(AtomSet, Vec<usize>)> = Vec::new();
-        for (index, measure) in definitions.iter().enumerate() {
-            let atoms = datan_dax_eval::extract_atoms(
-                &measure.expression,
-                &self.model,
-                &self.filters,
-                &self.dimensions,
-            )
-            .map_err(|error| ReportError::Interp(error.to_string()))?;
-            match groups
-                .iter_mut()
-                .find(|(set, _)| set.signature() == atoms.signature())
-            {
-                Some((_, members)) => members.push(index),
-                None => groups.push((atoms, vec![index])),
-            }
-        }
+        // Los mismos grupos de lectura que `execute`. La agrupacion vive en un solo sitio:
+        // mientras fueron dos bucles, `execute` separaba dos medidas que comparten hoja y
+        // distinta forma, y las tarjetas no: las dos daban el numero de la primera.
+        let plans = self.plans()?;
 
         let mut out = vec![String::new(); self.measures.len()];
-        for (atoms, members) in &groups {
+        for (atoms, members) in &plans {
             let values: Vec<String> = if atoms.needs_interpreter() {
                 let src = source.ok_or_else(|| ReportError::NoSource {
                     measure: members
@@ -250,7 +232,12 @@ impl Report {
             };
 
             for (offset, member) in members.iter().enumerate() {
-                out[*member] = values.get(offset).cloned().unwrap_or_default();
+                // Una consulta produce una columna por FORMA, no por medida. Cuando el grupo
+                // tiene mas medidas que columnas, las de mas son identicas a la ultima y leen
+                // su valor. Leer por posicion dejaba la segunda en blanco: un guion en una
+                // tarjeta que parece un dato que falta.
+                let index = offset.min(values.len().saturating_sub(1));
+                out[*member] = values.get(index).cloned().unwrap_or_default();
             }
         }
 
@@ -288,8 +275,21 @@ impl Report {
     /// Es el numero que importa para la latencia: no las medidas, sino las CONSULTAS. Dos
     /// medidas que comparten hojas cuestan una.
     pub fn query_count(&self) -> Result<usize, ReportError> {
-        let mut signatures: BTreeMap<Vec<(String, Vec<ObjectId>)>, usize> = BTreeMap::new();
-        for measure in self.measure_definitions()? {
+        Ok(self.plans()?.len())
+    }
+
+    /// Agrupa las medidas por consulta.
+    ///
+    /// Dos medidas comparten consulta solo si comparten las hojas Y la forma de salida. Las
+    /// hojas solas no alcanzan: `Qty` es `SUM(qty)` y `Condicional` es `IF(SUM(qty) > 50, ...)`
+    /// sobre la MISMA hoja, y dan numeros distintos. Compartiendo plan, la segunda leia la
+    /// columna de la primera y salia con el valor de `Qty`.
+    ///
+    /// `query_count` y `execute` llaman a esto para no divergir: mientras fueron dos bucles
+    /// separados, la cuenta decia una consulta y la ejecucion hacia otra.
+    fn plans(&self) -> Result<Vec<(AtomSet, Vec<usize>)>, ReportError> {
+        let mut plans: Vec<(AtomSet, Vec<usize>)> = Vec::new();
+        for (index, measure) in self.measure_definitions()?.into_iter().enumerate() {
             let atoms = datan_dax_eval::extract_atoms(
                 &measure.expression,
                 &self.model,
@@ -297,9 +297,14 @@ impl Report {
                 &self.dimensions,
             )
             .map_err(|error| ReportError::Interp(error.to_string()))?;
-            *signatures.entry(atoms.signature()).or_default() += 1;
+            match plans.iter_mut().find(|(set, _)| {
+                set.signature() == atoms.signature() && set.outputs == atoms.outputs
+            }) {
+                Some((_, members)) => members.push(index),
+                None => plans.push((atoms, vec![index])),
+            }
         }
-        Ok(signatures.len())
+        Ok(plans)
     }
 
     /// Corre el informe.
@@ -320,23 +325,7 @@ impl Report {
 
         // Un plan por conjunto de atomos. Cada plan lleva la lista de medidas que lee, en
         // el orden en que deben salir en la matriz.
-        let mut plans: Vec<(AtomSet, Vec<usize>)> = Vec::new();
-        for (index, measure) in self.measure_definitions()?.into_iter().enumerate() {
-            let atoms = datan_dax_eval::extract_atoms(
-                &measure.expression,
-                &self.model,
-                &self.filters,
-                &self.dimensions,
-            )
-            .map_err(|error| ReportError::Interp(error.to_string()))?;
-            match plans
-                .iter_mut()
-                .find(|(set, _)| set.signature() == atoms.signature())
-            {
-                Some((_, members)) => members.push(index),
-                None => plans.push((atoms, vec![index])),
-            }
-        }
+        let plans = self.plans()?;
 
         let width = headers.len();
         let mut rows: Vec<Vec<String>> = Vec::new();

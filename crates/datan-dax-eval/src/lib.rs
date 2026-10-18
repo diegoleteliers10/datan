@@ -153,6 +153,11 @@ fn shape_label(expr: &CheckedExpr) -> String {
         CheckedExpr::Measure { name, .. } => name.clone(),
         CheckedExpr::Column { name, .. } => name.clone(),
         CheckedExpr::Number { value, .. } => value.to_string(),
+        // La etiqueta de una variable es la de su cuerpo: el nombre local no distingue una
+        // medida de otra, y dos medidas con el mismo cuerpo no pueden compartir etiqueta si
+        // el cuerpo es distinto.
+        CheckedExpr::Variable { value, .. } => shape_label(value),
+        CheckedExpr::Unary { operand, .. } => format!("-({})", shape_label(operand)),
         other => format!("{other:?}"),
     }
 }
