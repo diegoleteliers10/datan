@@ -25,6 +25,7 @@ use datan_dax_eval::{AtomKind, BinaryOp, Shape};
 use datan_model::{DataType, Model, ObjectId, TableKind};
 mod components;
 mod config;
+mod model_doc;
 mod tokens;
 
 use components::Peso;
@@ -131,6 +132,11 @@ struct Datan {
     counted_at: Option<i64>,
     /// Cuantas consultas costo el ultimo informe, y cuantos ms.
     stats: Option<String>,
+    /// Lo que el modelo del usuario no pudo aplicar al conectar.
+    ///
+    /// Se muestra en la barra de estado porque una medida que existia y ya no se puede
+    /// aplicar no puede desaparecer en silencio: el informe la pide por nombre y falla.
+    model_warnings: Vec<String>,
     database: Option<String>,
     scroll: UniformListScrollHandle,
 }
@@ -162,6 +168,7 @@ impl Datan {
             row_counts: Default::default(),
             counted_at: None,
             stats: None,
+            model_warnings: Vec::new(),
             database: None,
             scroll: UniformListScrollHandle::default(),
         }
@@ -250,20 +257,42 @@ impl Datan {
             cx.notify();
             return;
         }
+        // Un nombre repetido no crea una segunda medida: la referencia por nombre seria
+        // ambigua, y el modelo resuelve por la primera. Se avisa y no se toca nada.
+        if model.measure_by_name(&name).is_some() {
+            self.formula_error = Some(format!("ya existe una medida `{name}`"));
+            cx.notify();
+            return;
+        }
+        // El documento se escribe antes de tocar la vista: si el archivo no se puede guardar,
+        // la medida no se agrega y el usuario ve por que. Una medida que vive solo en pantalla
+        // se pierde al cerrar y deja un informe guardado que no abre.
+        let Some(database) = self.database.clone() else {
+            self.formula_error = Some("sin base conectada: la medida no se puede guardar".to_string());
+            cx.notify();
+            return;
+        };
+        let mut doc = match model_doc::ModelDoc::load(&database) {
+            Ok(doc) => doc,
+            Err(error) => {
+                self.formula_error = Some(format!("{error}"));
+                cx.notify();
+                return;
+            }
+        };
+        doc.upsert_measure(model_doc::MeasureDoc::new(name.clone(), expression.clone()));
+        if let Err(error) = doc.save(&database) {
+            self.formula_error = Some(format!("{error}"));
+            cx.notify();
+            return;
+        }
 
-        let next_id = model
-            .measures
-            .iter()
-            .map(|m| m.id.0)
-            .max()
-            .unwrap_or(10_000)
-            + 1;
-        let id = ObjectId(next_id);
-        model.measures.push(datan_model::Measure::new(
-            id,
-            name.clone(),
-            expression.clone(),
-        ));
+        // El modelo en memoria se arma con el MISMO codigo que al conectar. El id sale de
+        // ahi y no de una cuenta escrita aparte, que se desincronizaria al primer cambio.
+        self.model_warnings = doc.apply(&mut model);
+        let Some(id) = model.measure_by_name(&name).map(|m| m.id) else {
+            return;
+        };
 
         self.formula_error = None;
         self.report = Some(
@@ -331,6 +360,30 @@ impl Datan {
         titulo_de(&medida, &dimension)
     }
 
+    /// La linea de estado de la barra superior: visuales, consultas y milisegundos, y al
+    /// final lo que el modelo del usuario no pudo aplicar.
+    ///
+    /// Lo que no se pudo aplicar se agrega y no reemplaza al resto: el informe puede estar
+    /// bien y faltar una medida que el usuario no esta mirando.
+    fn linea_estado(&self, visuales: usize) -> String {
+        let mut line = match &self.stats {
+            Some(stats) => format!(
+                "{}  \u{00b7}  {stats}",
+                plural(visuales, "visualizacion", "visualizaciones")
+            ),
+            None => plural(visuales, "visualizacion", "visualizaciones"),
+        };
+        if let Some(first) = self.model_warnings.first() {
+            line.push_str("  \u{00b7}  ");
+            line.push_str(first);
+            let rest = self.model_warnings.len() - 1;
+            if rest > 0 {
+                line.push_str(&format!(" y {rest} mas"));
+            }
+        }
+        line
+    }
+
     /// Guarda el informe actual. Sin nombre de archivo elegido a mano: el informe se llama
     /// por la conexion y la primera dimension, que es lo que lo distingue. Un dialogo de
     /// nombre no se puede verificar sin pantalla.
@@ -396,9 +449,10 @@ impl Datan {
 
             _ = this.update(cx, |view, cx| {
                 match built {
-                    Ok((model, report)) => {
+                    Ok((model, report, avisos)) => {
                         view.selection = suggested(&model);
                         view.report = Some(report);
+                        view.model_warnings = avisos;
                         // Sin esto la cabecera dice "sin base" y el refresh cae por defecto a
                         // `datan_bench`: la app aparentaba estar conectada a otra base.
                         view.database = Some(database.clone());
@@ -659,7 +713,7 @@ fn attach(engine: &Engine, database: &str) -> Result<(), String> {
 }
 
 #[allow(dead_code)]
-fn build_model(database: &str) -> Result<(Model, Report), String> {
+fn build_model(database: &str) -> Result<(Model, Report, Vec<String>), String> {
     let engine = open_engine()?;
     attach(&engine, database)?;
 
@@ -675,10 +729,17 @@ fn build_model(database: &str) -> Result<(Model, Report), String> {
         None,
     )
     .map_err(|e| e.to_string())?;
-    let model = introspection.model;
+    let mut model = introspection.model;
+
+    // El modelo del usuario se aplica ENCIMA del introspeccionado. La introspeccion no puede
+    // devolver una medida que el usuario escribio, y sin esto un informe guardado con una
+    // medida de usuario no la puede resolver al abrir. Un documento corrupto para la conexion
+    // a proposito: ahi esta el trabajo que no se puede volver a generar.
+    let doc = model_doc::ModelDoc::load(database).map_err(|e| e.to_string())?;
+    let avisos = doc.apply(&mut model);
 
     let report = Report::new(model.clone()).attached_to("pg");
-    Ok((model, report))
+    Ok((model, report, avisos))
 }
 
 fn run_report(
@@ -2176,16 +2237,7 @@ impl Datan {
             )
             .child(components::boton_icono_apagado(&theme, IconName::Plus))
             .child(div().flex_1())
-            .child(components::nota(
-                &theme,
-                match self.stats.clone() {
-                    Some(stats) => format!(
-                        "{}  \u{00b7}  {stats}",
-                        plural(visuales, "visualizacion", "visualizaciones")
-                    ),
-                    None => plural(visuales, "visualizacion", "visualizaciones"),
-                },
-            ));
+            .child(components::nota(&theme, self.linea_estado(visuales)));
 
         div()
             .flex()
