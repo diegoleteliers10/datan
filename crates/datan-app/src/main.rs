@@ -158,6 +158,9 @@ struct Datan {
     /// Las jerarquias del usuario, ya resueltas a ids: (nombre, niveles de fuera a dentro).
     /// Es lo que alimenta el drill.
     jerarquias: Vec<(String, Vec<ObjectId>)>,
+    /// El Top N de la matriz, si hay uno. Es de la PANTALLA, como el periodo: se vuelve a
+    /// aplicar en cada corrida y se guarda con la vista.
+    top_n: Option<datan_report::TopN>,
     database: Option<String>,
     scroll: UniformListScrollHandle,
 }
@@ -192,6 +195,7 @@ impl Datan {
             stats: None,
             model_warnings: Vec::new(),
             jerarquias: Vec::new(),
+            top_n: None,
             database: None,
             scroll: UniformListScrollHandle::default(),
         }
@@ -547,6 +551,11 @@ impl Datan {
         let view = datan_report::saved::SavedView {
             visual: Some(self.visual.clone()),
             period_months: self.date_months,
+            top_n: self.top_n.map(|top| datan_report::saved::SavedTopN {
+                measure: self.model_measure_name(top.measure),
+                count: top.count,
+                abajo: top.abajo,
+            }),
         };
 
         match datan_report::saved::save_view(&report, &name, &view) {
@@ -585,6 +594,20 @@ impl Datan {
                     self.visual = visual;
                 }
                 self.date_months = view.period_months;
+                // La medida del Top N se resuelve por nombre, como todo lo guardado. Una
+                // medida que ya no existe deja la vista sin Top N en vez de romperla.
+                self.top_n = view.top_n.and_then(|top| {
+                    report
+                        .model
+                        .measures
+                        .iter()
+                        .find(|measure| measure.name == top.measure)
+                        .map(|measure| datan_report::TopN {
+                            measure: measure.id,
+                            count: top.count,
+                            abajo: top.abajo,
+                        })
+                });
                 self.filters = report
                     .filters
                     .entries()
@@ -618,6 +641,24 @@ impl Datan {
     }
 
     /// Exporta la matriz a CSV junto a la carpeta del usuario.
+    /// Enciende, apaga o cambia el Top N.
+    ///
+    /// La medida que ordena es la PRIMERA de la seleccion: la matriz ordena por la columna
+    /// que se ve mas a la izquierda de las medidas, que es la que el usuario eligio primero.
+    fn set_top_n(&mut self, top: Option<(usize, bool)>, cx: &mut Context<Self>) {
+        self.top_n = top.and_then(|(count, abajo)| {
+            self.selection
+                .measures
+                .first()
+                .map(|measure| datan_report::TopN {
+                    measure: *measure,
+                    count,
+                    abajo,
+                })
+        });
+        self.refresh(cx);
+    }
+
     /// Reemplaza la dimension actual por el nivel de jerarquia que llega.
     ///
     /// Los filtros activos SE QUEDAN: filtrar por region y bajar a producto tiene que ver
@@ -769,6 +810,15 @@ impl Datan {
     /// Cambia una dimension o medida de la seleccion y vuelve a correr el informe.
     fn toggle(&mut self, column: ObjectId, is_measure: bool, cx: &mut Context<Self>) {
         if is_measure {
+            // El Top N ordena por UNA medida. Cuando esa medida sale de la seleccion, el
+            // recorte no tiene por que ordenar y se suelta: dejarlo puesto seria un ajuste
+            // encendido que no hace nada.
+            if let Some(top) = self.top_n
+                && top.measure == column
+                && self.selection.measures.contains(&column)
+            {
+                self.top_n = None;
+            }
             if let Some(index) = self.selection.measures.iter().position(|id| *id == column)
             {
                 self.selection.measures.remove(index);
@@ -799,6 +849,15 @@ impl Datan {
             // una, no hay niveles intermedios y encenderlos cambiaria el numero de filas
             // que ven el grid, el drill y los exports sin motivo.
             .with_subtotals(self.selection.dimensions.len() >= 2);
+        // El Top N es de la primera dimension: con dos o mas la matriz es una jerarquia y el
+        // recorte no tiene una lectura unica, asi que no se aplica. El ajuste SE QUEDA: al
+        // volver a una dimension vuelve a regir.
+        if let Some(top) = self.top_n
+            && self.selection.dimensions.len() == 1
+            && self.selection.measures.contains(&top.measure)
+        {
+            report = report.with_top_n(top);
+        }
         // Los filtros activos se vuelven a aplicar por COLUMNA, como un conjunto: dos valores
         // de la misma columna son una union (`IN`), y aplicarlos como dos filtros que se
         // intersectan dejaria la matriz vacia. El informe base es el que tiene el filtro de
@@ -1599,6 +1658,33 @@ fn range_button(
     )
 }
 
+/// Un boton del Top N.
+///
+/// Los tres van en un control segmentado porque son excluyentes, y el que esta encendido se
+/// APAGA al volver a pincharlo: un boton de segmento que no se puede soltar deja el recorte
+/// puesto sin una forma de quitarlo que se vea.
+fn top_button(
+    theme: &Theme,
+    label: &str,
+    count: usize,
+    abajo: bool,
+    actual: &Option<datan_report::TopN>,
+    cx: &mut Context<Datan>,
+) -> impl IntoElement {
+    let active = actual
+        .map(|top| top.count == count && top.abajo == abajo)
+        .unwrap_or(false);
+    components::segmento(
+        theme,
+        SharedString::from(format!("top-{count}-{abajo}")),
+        label.to_string(),
+        active,
+        cx.listener(move |view, _event, _window, cx| {
+            view.set_top_n((!active).then_some((count, abajo)), cx);
+        }),
+    )
+}
+
 /// El dia de hoy en dias desde 1970. Es UTC: en Chile puede ser el dia anterior, y en un
 /// rango de meses un dia de borde no cambia el informe.
 fn today() -> i32 {
@@ -2150,6 +2236,25 @@ impl Datan {
                 ),
                 None => components::boton_icono_apagado(&theme, IconName::ChevronsUp),
             });
+        }
+
+        // El Top N vive en la misma fila que el periodo y el drill: las tres cosas cambian
+        // QUE filas se ven. La medida que ordena se dice al lado, porque el boton solo dice
+        // cuantas filas quedan, no por que.
+        if self.selection.dimensions.len() == 1
+            && !self.lectura
+            && let Some(medida) = self.selection.measures.first()
+        {
+            fila_etiquetas = fila_etiquetas.child(components::nota(
+                &theme,
+                format!("top por {}", self.model_measure_name(*medida)),
+            ));
+            let mut topes = components::caja_segmentada(&theme);
+            for (label, count, abajo) in [("Top 5", 5usize, false), ("Top 10", 10, false), ("Ultimos 5", 5, true)]
+            {
+                topes = topes.child(top_button(&theme, label, count, abajo, &self.top_n, cx));
+            }
+            fila_etiquetas = fila_etiquetas.child(topes);
         }
 
         let cabecera = div()

@@ -133,4 +133,45 @@ fn main() {
             }
         }
     }
+
+    // El Top N: el primer nivel de la primera jerarquia, acotado a un valor por la primera
+    // medida. El recorte es un filtro, asi que el gran total sigue saliendo de la base y la
+    // matriz trae exactamente los valores elegidos.
+    //
+    // Para `categoria` la base dice: Ferreteria 1588000, Oficina 1516000, Limpieza 1472000,
+    // Almacen 1424000. El mayor y el menor tienen que salir con esos numeros.
+    if let (Some(jerarquia), Some(medida)) = (doc.jerarquias.first(), measures.first())
+        && let Ok(niveles) = jerarquia.resolver(&model)
+        && let Some(nivel) = niveles.first()
+    {
+        let nombre = model
+            .column(*nivel)
+            .map(|(_, c)| c.name.clone())
+            .unwrap_or_default();
+        for abajo in [false, true] {
+            println!(
+                "\n--- {} de {nombre} por {} ---",
+                if abajo { "el menor" } else { "el mayor" },
+                model
+                    .measures
+                    .iter()
+                    .find(|m| m.id == *medida)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_default()
+            );
+            let informe = Report::new(model.clone())
+                .attached_to("pg")
+                .with_dimensions(vec![*nivel])
+                .with_measures(vec![*medida])
+                .with_top_n(datan_report::TopN {
+                    measure: *medida,
+                    count: 1,
+                    abajo,
+                });
+            match informe.execute(&engine, None) {
+                Ok(matrix) => matrix.print(10),
+                Err(error) => println!("  ERROR: {error}"),
+            }
+        }
+    }
 }

@@ -7,7 +7,7 @@
 
 use datan_dax_eval::FilterValue;
 use datan_model::{DataType, Measure, ObjectId};
-use datan_report::{Header, Matrix, Report, RowKind};
+use datan_report::{Header, Matrix, Report, RowKind, TopN};
 use datan_testkit::{engine, memory_source, model, Y2024};
 
 fn measure(id: &str) -> ObjectId {
@@ -879,4 +879,169 @@ fn pinchar_una_celda_de_fecha_filtra_por_ese_dia() {
     );
     // Y una columna de medida no es una celda que se pueda filtrar.
     assert_eq!(matrix.valor_de_celda(1, "10"), None);
+}
+
+/// El fixture: Norte 60, Este 57, Sur 48.
+fn por_region() -> Report {
+    Report::new(model())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")])
+}
+
+#[test]
+fn el_top_n_deja_los_n_primeros_y_su_medida() {
+    let qty = measure("Qty");
+    let completo = por_region()
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
+    assert_eq!(completo.row_count(), 3, "tres regiones");
+
+    let arriba = por_region()
+        .with_top_n(TopN {
+            measure: qty,
+            count: 1,
+            abajo: false,
+        })
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
+    assert_eq!(arriba.row_count(), 1);
+    assert_eq!(arriba.cell(0, 0), Some("Norte"));
+    assert_eq!(
+        arriba.cell(0, 1).and_then(|v| v.parse::<i64>().ok()),
+        Some(60),
+        "Norte es la region con mas cantidad"
+    );
+
+    let abajo = por_region()
+        .with_top_n(TopN {
+            measure: qty,
+            count: 2,
+            abajo: true,
+        })
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
+    assert_eq!(abajo.row_count(), 2);
+    let regiones: Vec<&str> = (0..2).filter_map(|row| abajo.cell(row, 0)).collect();
+    assert!(regiones.contains(&"Sur") && regiones.contains(&"Este"), "{regiones:?}");
+    assert!(!regiones.contains(&"Norte"), "la mayor queda fuera: {regiones:?}");
+}
+
+#[test]
+fn el_top_n_tambien_ordena_por_una_medida_del_interprete() {
+    // `QtyDoble` es un `SUMX` en el nivel superior: lo resuelve el interprete, no el SQL. El
+    // recorte es un FILTRO, asi que viaja igual y la segunda pasada lo vuelve a ver.
+    let doble = measure("QtyDoble");
+    let motor = engine().expect("motor");
+    let matrix = por_region()
+        .with_measures(vec![doble])
+        .with_top_n(TopN {
+            measure: doble,
+            count: 1,
+            abajo: false,
+        })
+        .execute(&motor, Some(&memory_source()))
+        .expect("interprete");
+
+    assert_eq!(matrix.row_count(), 1, "una sola region");
+    assert_eq!(matrix.cell(0, 0), Some("Norte"));
+    // El doble de la cantidad de Norte: 60.
+    assert_eq!(
+        matrix.cell(0, 1).and_then(|v| v.parse::<f64>().ok()),
+        Some(120.0)
+    );
+}
+
+#[test]
+fn las_tarjetas_no_las_toca_el_top_n() {
+    // En Power BI el filtro de un visual no cambia otra tarjeta. El total de cada medida
+    // sigue siendo el de la consulta entera.
+    let qty = measure("Qty");
+    let motor = engine().expect("motor");
+    let completas = por_region().totals(&motor, None).expect("totales");
+    let con_top = por_region()
+        .with_top_n(TopN {
+            measure: qty,
+            count: 1,
+            abajo: false,
+        })
+        .totals(&motor, None)
+        .expect("totales");
+
+    assert_eq!(con_top, completas);
+}
+
+#[test]
+fn un_top_n_mas_largo_que_la_tabla_no_recorta_nada() {
+    let qty = measure("Qty");
+    let matrix = por_region()
+        .with_top_n(TopN {
+            measure: qty,
+            count: 50,
+            abajo: false,
+        })
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
+
+    assert_eq!(matrix.row_count(), 3);
+}
+
+#[test]
+fn el_top_n_y_los_subtotales_no_pueden_estar_juntos() {
+    // Un Top N elige valores de la PRIMERA dimension, y un renglon de subtotal no es un valor
+    // de esa dimension. El ultimo que se pide gana, y el estado imposible no se puede armar.
+    let qty = measure("Qty");
+    let con_subtotales = por_region()
+        .with_top_n(TopN {
+            measure: qty,
+            count: 1,
+            abajo: false,
+        })
+        .with_subtotals(true);
+    assert!(con_subtotales.subtotales);
+    assert!(con_subtotales.top_n.is_none());
+
+    let con_top = por_region()
+        .with_subtotals(true)
+        .with_top_n(TopN {
+            measure: qty,
+            count: 1,
+            abajo: false,
+        });
+    assert!(con_top.top_n.is_some());
+    assert!(!con_top.subtotales);
+}
+
+#[test]
+fn una_medida_que_no_esta_en_el_informe_no_ordena_nada() {
+    // Un Top N que apunta a una medida que ya no se miro no puede tirar la pantalla: el
+    // informe sale entero. La app lo suelta antes de llegar aca, pero el estado es posible en
+    // un informe guardado.
+    let matrix = por_region()
+        .with_top_n(TopN {
+            measure: ObjectId(999),
+            count: 1,
+            abajo: false,
+        })
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
+
+    assert_eq!(matrix.row_count(), 3);
+}
+
+#[test]
+fn el_top_n_cuesta_dos_lecturas() {
+    // Una para saber que valores son los mayores y otra acotada. El contador de consultas es
+    // lo que la app muestra en el pie: si dijera una, mentiria.
+    let qty = measure("Qty");
+    let una = por_region().query_count().expect("cuenta");
+    let dos = por_region()
+        .with_top_n(TopN {
+            measure: qty,
+            count: 1,
+            abajo: false,
+        })
+        .query_count()
+        .expect("cuenta");
+
+    assert_eq!(dos, una * 2);
 }

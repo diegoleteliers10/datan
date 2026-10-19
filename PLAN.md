@@ -1588,3 +1588,38 @@ siguiente, subir por el anterior. Datan no tenia jerarquias, y la base no las de
 jerarquia Producto resuelve a `catalogo_productos[categoria]` y `catalogo_productos[nombre]`,
 y cada nivel corre su propio informe. La suma de las categorias cuadra con el desglose de los
 productos.
+
+## Fase UI-8: Top N de la matriz
+
+Power BI recorta un visual a los N valores mayores de una dimension, por una medida. Es un
+FILTRO del visual, no una vista: la matriz muestra los elegidos y el resto no existe para ese
+visual.
+
+- `Report.top_n` lleva la medida que ordena, cuantas filas quedan y la direccion. `execute`
+  hace DOS pasadas: lee el informe entero, elige los valores, y vuelve a leer con la
+  primera dimension acotada a esos valores.
+- El recorte viaja como FILTRO (`IN`), no como un corte de las filas ya leidas. La diferencia
+  importa: un corte de la matriz dejaria el gran total de la base en una tabla que ya no
+  tiene esas filas, y las dos rutas de lectura verian cosas distintas. Con filtro, las dos
+  ven lo mismo.
+- Reemplaza los filtros de esa columna, y es equivalente: los valores se eligen entre las
+  filas que YA pasaron los filtros activos, asi que el conjunto que queda es el mismo.
+- Las tarjetas NO se tocan. En Power BI el filtro de un visual no cambia otra tarjeta, y el
+  total de cada medida sigue saliendo de la consulta entera.
+- Una celda sin numero no compite: un BLANK no es un cero. Una medida que no esta en el
+  informe deja la matriz entera en vez de fallar: es un ajuste de la vista, y un informe
+  guardado puede traer el nombre de una medida que ya no se mira.
+- `Top N` y subtotales son excluyentes y el ultimo que se pide gana. Un Top N elige valores de
+  la PRIMERA dimension, y un renglon de subtotal no es un valor de esa dimension.
+- `query_count` cuenta las dos lecturas. El pie de la app dice lo que costo la pantalla.
+- En la app son tres botones en la fila del periodo y del drill: Top 5, Top 10 y Ultimos 5.
+  El que esta encendido se apaga al volver a pincharlo. La medida que ordena es la PRIMERA de
+  la seleccion y se dice al lado. Con dos dimensiones o mas el control no se dibuja: el
+  recorte no tendria una lectura unica.
+- El ajuste se guarda con la vista (`SavedView.top_n`), con la medida por NOMBRE, y se vuelve
+  a aplicar al abrir.
+
+### Resultado
+
+248 tests. Contra `datan_bench`, el mayor de `catalogo_productos[categoria]` por cantidad es
+Ferreteria con 1588000 y el menor es Almacen con 1424000, los mismos numeros que da `psql`.

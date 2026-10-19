@@ -65,6 +65,22 @@ struct File {
     /// El periodo activo en meses hacia atras, si lo habia.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     period_months: Option<u8>,
+    /// El Top N de la vista, si lo habia.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    top_n: Option<SavedTopN>,
+}
+
+/// El Top N de la vista, con la medida por NOMBRE.
+///
+/// Los ids de las medidas son internos y cambian entre ejecuciones: guardar el id seria
+/// guardar un numero que manana no significa nada.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTopN {
+    pub measure: String,
+    pub count: usize,
+    /// `true` toma los MENORES.
+    #[serde(default)]
+    pub abajo: bool,
 }
 
 /// Un filtro guardado.
@@ -106,6 +122,7 @@ where
 pub struct SavedView {
     pub visual: Option<String>,
     pub period_months: Option<u8>,
+    pub top_n: Option<SavedTopN>,
 }
 
 /// El nombre de archivo de un informe.
@@ -190,6 +207,7 @@ pub fn save_view(report: &Report, name: &str, view: &SavedView) -> Result<(), Sa
         filters,
         visual: view.visual.clone(),
         period_months: view.period_months,
+        top_n: view.top_n.clone(),
     };
 
     let text = toml::to_string_pretty(&file)
@@ -319,6 +337,7 @@ pub fn open_view(
     let view = SavedView {
         visual: file.visual,
         period_months: file.period_months,
+        top_n: file.top_n,
     };
 
     Ok((report, view))
@@ -434,6 +453,7 @@ value = "Text(\"Norte\")"
         assert_eq!(file.filters[0].values, vec!["Text(\"Norte\")"]);
         assert_eq!(file.visual, None);
         assert_eq!(file.period_months, None);
+        assert_eq!(file.top_n, None);
     }
 
     #[test]
@@ -460,21 +480,30 @@ value = "Text(\"Norte\")"
             filters: vec![],
             visual: None,
             period_months: None,
+            top_n: None,
         };
         let text = toml::to_string_pretty(&file).expect("serializa");
         assert!(!text.contains("visual"), "{text}");
         assert!(!text.contains("period"), "{text}");
+        assert!(!text.contains("top_n"), "{text}");
 
         let con_vista = File {
             visual: Some("Anillo".to_string()),
             period_months: Some(6),
+            top_n: Some(SavedTopN {
+                measure: "Qty".to_string(),
+                count: 5,
+                abajo: false,
+            }),
             ..file
         };
         let text = toml::to_string_pretty(&con_vista).expect("serializa");
         assert!(text.contains("visual = \"Anillo\""), "{text}");
         assert!(text.contains("period_months = 6"), "{text}");
+        assert!(text.contains("measure = \"Qty\""), "{text}");
 
         let back: File = toml::from_str(&text).expect("parsea");
         assert_eq!(back, con_vista);
+        assert_eq!(back.top_n.expect("el top n").count, 5);
     }
 }

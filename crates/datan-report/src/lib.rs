@@ -85,6 +85,26 @@ pub struct Report {
     /// Apagado por defecto: una matriz de UNA dimension no tiene subtotales que mostrar, y
     /// encenderlo de mas cambia el numero de filas que ven todos los consumidores.
     pub subtotales: bool,
+    /// El Top N de la primera dimension por una medida, como el filtro de visual de Power BI.
+    ///
+    /// `None` es la matriz entera. Encenderlo APAGA los subtotales y al reves: un Top N elige
+    /// valores de la primera dimension, y los renglones de subtotal no son valores de esa
+    /// dimension. Los dos juntos no tienen una lectura unica.
+    pub top_n: Option<TopN>,
+}
+
+/// El Top N de una matriz.
+///
+/// No es un recorte de las filas que ya se leyeron: es un FILTRO sobre la primera dimension,
+/// y por eso el gran total de la matriz sigue saliendo de la base. La medida que ordena tiene
+/// que estar entre las medidas del informe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopN {
+    pub measure: ObjectId,
+    /// Cuantas filas se quedan.
+    pub count: usize,
+    /// `true` toma los MENORES. Un "Bottom N" es el mismo filtro al reves.
+    pub abajo: bool,
 }
 
 impl Report {
@@ -96,6 +116,7 @@ impl Report {
             filters: FilterContext::empty(),
             qualifier: String::new(),
             subtotales: false,
+            top_n: None,
         }
     }
 
@@ -103,6 +124,23 @@ impl Report {
     /// jerarquia de un nivel no tiene niveles intermedios.
     pub fn with_subtotals(mut self, subtotales: bool) -> Self {
         self.subtotales = subtotales;
+        if subtotales {
+            // Los dos juntos no tienen una lectura unica: ver `top_n`.
+            self.top_n = None;
+        }
+        self
+    }
+
+    /// Recorta la primera dimension a sus `count` valores con mayor (o menor) medida.
+    pub fn with_top_n(mut self, top: TopN) -> Self {
+        self.top_n = Some(top);
+        self.subtotales = false;
+        self
+    }
+
+    /// Suelta el Top N.
+    pub fn sin_top_n(mut self) -> Self {
+        self.top_n = None;
         self
     }
 
@@ -263,6 +301,59 @@ impl Report {
         Ok(out)
     }
 
+    /// Corre el informe y despues lo acota a los `count` valores mayores de la primera
+    /// dimension.
+    ///
+    /// Dos pasadas, no un recorte de filas: la medida que ordena se lee del informe entero y
+    /// el recorte viaja como FILTRO, asi que las dos rutas de lectura (SQL e interprete) ven
+    /// lo mismo. Un recorte de la matriz ya leida dejaria un gran total que ya no es el de la
+    /// base.
+    ///
+    /// El filtro REEMPLAZA los de esa columna, y es equivalente: los valores se eligen entre
+    /// las filas que ya pasaron los filtros activos, asi que el conjunto que queda es el
+    /// mismo.
+    fn execute_top_n(
+        &self,
+        engine: &Engine,
+        source: Option<&dyn datan_dax_eval::DataSource>,
+        top: TopN,
+    ) -> Result<Matrix, ReportError> {
+        let mut base = self.clone();
+        base.top_n = None;
+        let matrix = base.execute(engine, source)?;
+
+        // Sin dimension no hay nada que acotar, y con una medida que no esta en la matriz no
+        // hay por que ordenar. El informe sale entero: es un ajuste de la vista, no un dato,
+        // y no puede tirar la pantalla.
+        let Some(dimension) = base.dimensions.first().copied() else {
+            return Ok(matrix);
+        };
+        let Some(column) = matrix
+            .headers
+            .iter()
+            .position(|header| header.measure == Some(top.measure))
+        else {
+            return Ok(matrix);
+        };
+
+        let valores: Vec<FilterValue> = top_n_rows(&matrix, column, top.count, top.abajo)
+            .into_iter()
+            .filter_map(|row| {
+                matrix
+                    .cell(row, 0)
+                    .and_then(|texto| matrix.valor_de_celda(0, texto))
+            })
+            .collect();
+
+        // Un Top N sin valores seria un filtro vacio, y `filtered_to` con la lista vacia es
+        // "sin filtro": la matriz entera, que es lo contrario de lo que se pidio.
+        if valores.is_empty() {
+            return Ok(matrix);
+        }
+
+        base.filtered_to(dimension, valores).execute(engine, source)
+    }
+
     /// Las cabeceras: primero las dimensiones, luego las medidas.
     pub fn headers(&self) -> Result<Vec<Header>, ReportError> {
         let mut out = Vec::with_capacity(self.dimensions.len() + self.measures.len());
@@ -294,7 +385,15 @@ impl Report {
     /// Es el numero que importa para la latencia: no las medidas, sino las CONSULTAS. Dos
     /// medidas que comparten hojas cuestan una.
     pub fn query_count(&self) -> Result<usize, ReportError> {
-        Ok(self.plans()?.len())
+        let lecturas = self.plans()?.len();
+        // El Top N lee el informe entero para saber que valores son los mayores, y despues lo
+        // vuelve a leer acotado. El contador tiene que decir las dos, o el pie de la app
+        // miente sobre lo que costo la pantalla.
+        Ok(if self.top_n.is_some() {
+            lecturas * 2
+        } else {
+            lecturas
+        })
     }
 
     /// El error de una medida sin forma, con el nombre de la primera del grupo.
@@ -348,6 +447,9 @@ impl Report {
         engine: &Engine,
         source: Option<&dyn datan_dax_eval::DataSource>,
     ) -> Result<Matrix, ReportError> {
+        if let Some(top) = self.top_n {
+            return self.execute_top_n(engine, source, top);
+        }
         if self.measures.is_empty() {
             return Err(ReportError::NoMeasures);
         }
@@ -539,6 +641,34 @@ fn separar_banderas(
         filas.push(fila);
     }
     Ok((filas, kinds))
+}
+
+/// Las filas de una matriz que entran en un Top N, en el orden de la matriz.
+///
+/// Solo los renglones de DATOS: un subtotal no es un valor de la dimension y no compite. Una
+/// celda sin numero no entra: un BLANK no es un cero, y ordenarlo como cero pondria arriba
+/// (o abajo) a una fila que no tiene medida.
+///
+/// El orden es estable, asi que dos filas con la misma medida quedan en el orden de la matriz
+/// y el resultado no cambia entre dos corridas.
+fn top_n_rows(matrix: &Matrix, column: usize, count: usize, abajo: bool) -> Vec<usize> {
+    let mut candidatas: Vec<(usize, f64)> = (0..matrix.row_count())
+        .filter(|row| matches!(matrix.row_kind(*row), RowKind::Data))
+        .filter_map(|row| {
+            let valor = matrix.cell(row, column)?.parse::<f64>().ok()?;
+            valor.is_finite().then_some((row, valor))
+        })
+        .collect();
+
+    candidatas.sort_by(|(_, una), (_, otra)| {
+        if abajo {
+            una.partial_cmp(otra).unwrap_or(std::cmp::Ordering::Equal)
+        } else {
+            otra.partial_cmp(una).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+    candidatas.truncate(count);
+    candidatas.into_iter().map(|(row, _)| row).collect()
 }
 
 /// Los renglones de una matriz con subtotales por el camino del interprete.
