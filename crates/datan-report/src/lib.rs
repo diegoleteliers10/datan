@@ -80,17 +80,32 @@ pub struct Report {
     /// `pg.product_boleta`. Sin esto, el SQL se genera bien y DuckDB responde "table does not
     /// exist" con una pista que es justamente el nombre con el prefijo que falta.
     pub qualifier: String,
-    /// Subtotales por nivel de dimension y gran total al final.
+    /// Que renglones de total lleva la matriz.
     ///
-    /// Apagado por defecto: una matriz de UNA dimension no tiene subtotales que mostrar, y
-    /// encenderlo de mas cambia el numero de filas que ven todos los consumidores.
-    pub subtotales: bool,
+    /// Apagado por defecto: encenderlo cambia el numero de filas que ven todos los
+    /// consumidores, y una matriz es tambien un archivo de exportacion.
+    pub totales: Totales,
     /// El Top N de la primera dimension por una medida, como el filtro de visual de Power BI.
     ///
     /// `None` es la matriz entera. Encenderlo APAGA los subtotales y al reves: un Top N elige
     /// valores de la primera dimension, y los renglones de subtotal no son valores de esa
     /// dimension. Los dos juntos no tienen una lectura unica.
     pub top_n: Option<TopN>,
+}
+
+/// Que renglones de total lleva la matriz.
+///
+/// Un enum y no dos banderas: "subtotales sin gran total" y "gran total sin subtotales" son
+/// cosas distintas, y dos `bool` dejan construir estados que no significan nada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Totales {
+    /// Ni subtotales ni gran total: una fila por grupo.
+    #[default]
+    Ninguno,
+    /// Una fila por grupo y el gran total al final.
+    General,
+    /// Una fila por grupo, un subtotal por cada nivel y el gran total al final.
+    Subtotales,
 }
 
 /// El Top N de una matriz.
@@ -115,26 +130,38 @@ impl Report {
             measures: Vec::new(),
             filters: FilterContext::empty(),
             qualifier: String::new(),
-            subtotales: false,
+            totales: Totales::Ninguno,
             top_n: None,
         }
     }
 
-    /// Enciende o apaga los subtotales. Con menos de dos dimensiones no hacen nada: una
-    /// jerarquia de un nivel no tiene niveles intermedios.
-    pub fn with_subtotals(mut self, subtotales: bool) -> Self {
-        self.subtotales = subtotales;
-        if subtotales {
+    /// Elige los renglones de total.
+    pub fn with_totales(mut self, totales: Totales) -> Self {
+        self.totales = totales;
+        if totales == Totales::Subtotales {
             // Los dos juntos no tienen una lectura unica: ver `top_n`.
             self.top_n = None;
         }
         self
     }
 
+    /// Enciende o apaga los subtotales. Con menos de dos dimensiones no hacen nada: una
+    /// jerarquia de un nivel no tiene niveles intermedios, y el resultado es el gran total.
+    pub fn with_subtotals(self, subtotales: bool) -> Self {
+        let totales = if subtotales {
+            Totales::Subtotales
+        } else {
+            Totales::Ninguno
+        };
+        self.with_totales(totales)
+    }
+
     /// Recorta la primera dimension a sus `count` valores con mayor (o menor) medida.
     pub fn with_top_n(mut self, top: TopN) -> Self {
         self.top_n = Some(top);
-        self.subtotales = false;
+        if self.totales == Totales::Subtotales {
+            self.totales = Totales::Ninguno;
+        }
         self
     }
 
@@ -470,6 +497,18 @@ impl Report {
             .any(calculada)
     }
 
+    /// Los renglones de total que la matriz lleva de verdad.
+    ///
+    /// Con una sola dimension no hay niveles intermedios: `Subtotales` es el gran total. Con
+    /// cero dimensiones tampoco hay grupos, y el total es la unica fila que tiene sentido;
+    /// pero una matriz sin dimensiones no es una matriz, y se deja como esta.
+    fn totales_efectivos(&self) -> Totales {
+        match self.totales {
+            Totales::Subtotales if self.dimensions.len() < 2 => Totales::General,
+            otro => otro,
+        }
+    }
+
     /// Corre el informe.
     ///
     /// `source` solo se usa para las medidas que caen al interprete. Sin el, un informe con
@@ -494,7 +533,7 @@ impl Report {
         let plans = self.plans()?;
 
         let width = headers.len();
-        let con_subtotales = self.subtotales && self.dimensions.len() >= 2;
+        let totales = self.totales_efectivos();
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut kinds: Vec<RowKind> = Vec::new();
 
@@ -522,9 +561,24 @@ impl Report {
                 })?;
                 let calculadas = datan_dax_eval::CalculatedSource::new(&self.model, source);
                 let interpreter = Interpreter::new(&self.model, &calculadas);
-                if con_subtotales {
-                    subtotales_del_interprete(&interpreter, atoms, &self.filters, &self.dimensions)?
-                } else {
+                match totales {
+                    Totales::Subtotales => {
+                        subtotales_del_interprete(
+                            &interpreter,
+                            atoms,
+                            &self.filters,
+                            &self.dimensions,
+                        )?
+                    }
+                    Totales::General => {
+                        general_del_interprete(
+                            &interpreter,
+                            atoms,
+                            &self.filters,
+                            &self.dimensions,
+                        )?
+                    }
+                    Totales::Ninguno => {
                     let grouped = interpreter
                         .evaluate_grouped(
                             &atoms.atoms,
@@ -537,26 +591,34 @@ impl Report {
                     let filas = grouped
                         .rows
                         .iter()
-                        .map(|row| row.iter().map(scalar_to_text).collect())
+                        .map(|row| fila_a_texto(row, self.dimensions.len()))
                         .collect::<Vec<Vec<String>>>();
                     let tipos = vec![RowKind::Data; filas.len()];
                     (filas, tipos)
+                    }
                 }
             } else {
-                let plan = if con_subtotales {
-                    datan_dax_sql::lower_with_subtotals(&self.model, &sources, atoms, &self.filters)
-                } else {
-                    lower(&self.model, &sources, atoms, &self.filters)
+                let plan = match totales {
+                    Totales::Ninguno => lower(&self.model, &sources, atoms, &self.filters),
+                    Totales::General => {
+                        datan_dax_sql::lower_with_total(&self.model, &sources, atoms, &self.filters)
+                    }
+                    Totales::Subtotales => datan_dax_sql::lower_with_subtotals(
+                        &self.model,
+                        &sources,
+                        atoms,
+                        &self.filters,
+                    ),
                 }
                 .map_err(|error| ReportError::Interp(error.to_string()))?;
                 let crudas = engine
                     .render_rows(&plan.sql)
                     .map_err(|error| ReportError::Query(error.to_string()))?;
-                if con_subtotales {
-                    separar_banderas(crudas, self.dimensions.len(), produced)?
-                } else {
+                if totales == Totales::Ninguno {
                     let tipos = vec![RowKind::Data; crudas.len()];
                     (crudas, tipos)
+                } else {
+                    separar_banderas(crudas, self.dimensions.len(), produced)?
                 }
             };
 
@@ -621,6 +683,21 @@ impl Report {
                     if target < row.len() && source < cell.len() {
                         row[target] = cell[source].clone();
                     }
+                }
+            }
+        }
+
+        // La marca de celda en blanco se traduce una sola vez, al final: en una dimension es
+        // un ROTULO (hay un grupo que no tiene valor) y en una medida es vacio (no hay dato).
+        // Hacerlo en cada camino dejaria tres copias de la misma regla.
+        for row in &mut rows {
+            for (index, cell) in row.iter_mut().enumerate() {
+                if cell == datan_storage::CELDA_EN_BLANCO {
+                    *cell = if index < self.dimensions.len() {
+                        ETIQUETA_EN_BLANCO.to_string()
+                    } else {
+                        String::new()
+                    };
                 }
             }
         }
@@ -724,7 +801,7 @@ fn subtotales_del_interprete(
                     grouped
                         .rows
                         .iter()
-                        .map(|row| row.iter().map(scalar_to_text).collect::<Vec<String>>())
+                        .map(|row| fila_a_texto(row, dims.len()))
                         .collect()
                 })
                 .map_err(|error| ReportError::Interp(error.to_string()))
@@ -756,8 +833,40 @@ fn subtotales_del_interprete(
     let mut filas = Vec::new();
     let mut kinds = Vec::new();
     rec(0, &[], &niveles, &mut filas, &mut kinds);
+    fila_del_total(interpreter, atoms, filters, dims, &mut filas, &mut kinds)?;
 
-    // El gran total es OTRA consulta: sin agrupamiento, una fila de medidas.
+    Ok((filas, kinds))
+}
+
+/// Los renglones de detalle y el gran total, sin subtotales intermedios.
+fn general_del_interprete(
+    interpreter: &Interpreter,
+    atoms: &datan_dax_eval::AtomSet,
+    filters: &FilterContext,
+    dims: &[ObjectId],
+) -> Result<(Vec<Vec<String>>, Vec<RowKind>), ReportError> {
+    let grouped = interpreter
+        .evaluate_grouped(&atoms.atoms, &atoms.outputs, filters, dims, MAX_CELLS)
+        .map_err(|error| ReportError::Interp(error.to_string()))?;
+    let mut filas: Vec<Vec<String>> = grouped
+        .rows
+        .iter()
+        .map(|row| fila_a_texto(row, dims.len()))
+        .collect();
+    let mut kinds = vec![RowKind::Data; filas.len()];
+    fila_del_total(interpreter, atoms, filters, dims, &mut filas, &mut kinds)?;
+    Ok((filas, kinds))
+}
+
+/// Agrega el gran total: OTRA consulta, sin agrupamiento, una fila de medidas.
+fn fila_del_total(
+    interpreter: &Interpreter,
+    atoms: &datan_dax_eval::AtomSet,
+    filters: &FilterContext,
+    dims: &[ObjectId],
+    filas: &mut Vec<Vec<String>>,
+    kinds: &mut Vec<RowKind>,
+) -> Result<(), ReportError> {
     let totales = interpreter
         .evaluate_totals(&atoms.atoms, &atoms.outputs, filters)
         .map_err(|error| ReportError::Interp(error.to_string()))?;
@@ -765,8 +874,7 @@ fn subtotales_del_interprete(
     fila.extend(totales.iter().map(scalar_to_text));
     filas.push(fila);
     kinds.push(RowKind::GrandTotal);
-
-    Ok((filas, kinds))
+    Ok(())
 }
 
 /// Una cabecera de columna.
@@ -929,12 +1037,41 @@ impl Matrix {
         if !header.is_dimension() {
             return None;
         }
+        if texto == ETIQUETA_EN_BLANCO {
+            return Some(FilterValue::Blank);
+        }
         match header.data_type {
             DataType::Text => Some(FilterValue::Text(texto.to_string())),
             DataType::Date => Some(FilterValue::Date(datan_dax_eval::parse_day(texto)?)),
             _ => Some(FilterValue::Integer(texto.parse().ok()?)),
         }
     }
+}
+
+/// El rotulo de una celda de dimension en blanco.
+///
+/// El SQL devuelve NULL para una clave que no existe en la dimension, y el informe tiene que
+/// decirlo con una palabra: una celda vacia se lee como un dato que falta, y no es eso, es un
+/// grupo. El rotulo es el que usa Power BI.
+///
+/// Es un valor RESERVADO: una categoria que se llame literalmente asi se lee igual y el clic
+/// la filtra como blanco. Un catalogo con ese nombre es una rareza, y la alternativa era
+/// llevar una marca por celda a traves de todo el informe.
+pub const ETIQUETA_EN_BLANCO: &str = "(en blanco)";
+
+/// Una fila del interprete como texto, marcando las claves de dimension en blanco con el
+/// centinela que usa el motor. La marca se traduce a `ETIQUETA_EN_BLANCO` al final.
+fn fila_a_texto(row: &[Scalar], dims: usize) -> Vec<String> {
+    row.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if index < dims && value.is_blank() {
+                datan_storage::CELDA_EN_BLANCO.to_string()
+            } else {
+                scalar_to_text(value)
+            }
+        })
+        .collect()
 }
 
 /// Un escalar del interprete como texto, con la misma convencion que el SQL.

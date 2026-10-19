@@ -92,13 +92,38 @@ impl SqlPlan {
 ///
 /// Falla si algun atomo necesita el interprete. Quien llama debe comprobar
 /// `AtomSet::needs_interpreter()` antes, o usar `try_lower` y dejar que lo diga.
+/// Que renglones de total lleva la consulta, ademas de los grupos.
+///
+/// Un enum y no dos banderas: "gran total sin subtotales" y "subtotales sin gran total" son
+/// cosas distintas, y dos `bool` dejan construir la cuarta combinacion, que no significa nada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Renglones {
+    /// Una fila por grupo.
+    Datos,
+    /// Una fila por grupo y el gran total al final.
+    Total,
+    /// Una fila por grupo, un subtotal por nivel y el gran total al final.
+    Subtotales,
+}
+
 pub fn lower(
     model: &Model,
     sources: &SourceMap,
     atoms: &AtomSet,
     filters: &FilterContext,
 ) -> Result<SqlPlan, LowerError> {
-    bajar(model, sources, atoms, filters, false)
+    bajar(model, sources, atoms, filters, Renglones::Datos)
+}
+
+/// La misma consulta, con el GRAN TOTAL al final: `GROUPING SETS` con el agrupamiento entero
+/// y el conjunto vacio, mas una columna `GROUPING` por dimension al final del `SELECT`.
+pub fn lower_with_total(
+    model: &Model,
+    sources: &SourceMap,
+    atoms: &AtomSet,
+    filters: &FilterContext,
+) -> Result<SqlPlan, LowerError> {
+    bajar(model, sources, atoms, filters, Renglones::Total)
 }
 
 /// La misma consulta, con SUBTOTALES: `GROUPING SETS` con todos los prefijos del
@@ -115,7 +140,7 @@ pub fn lower_with_subtotals(
     atoms: &AtomSet,
     filters: &FilterContext,
 ) -> Result<SqlPlan, LowerError> {
-    bajar(model, sources, atoms, filters, true)
+    bajar(model, sources, atoms, filters, Renglones::Subtotales)
 }
 
 fn bajar(
@@ -123,7 +148,7 @@ fn bajar(
     sources: &SourceMap,
     atoms: &AtomSet,
     filters: &FilterContext,
-    subtotales: bool,
+    renglones: Renglones,
 ) -> Result<SqlPlan, LowerError> {
     if atoms.needs_interpreter() {
         let culprit = atoms
@@ -299,25 +324,40 @@ fn bajar(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let group_by = if subtotales && grouping.len() >= 2 {
-        let conjuntos: Vec<String> = (0..=grouping.len())
-            .rev()
-            .map(|k| {
-                if k == 0 {
-                    "()".to_string()
-                } else {
-                    format!("({})", expresiones[..k].join(", "))
-                }
-            })
-            .collect();
+    // Con una sola dimension no hay niveles intermedios: los subtotales SON el gran total.
+    let con_sets = match renglones {
+        Renglones::Datos => false,
+        Renglones::Total => true,
+        Renglones::Subtotales => grouping.len() >= 2,
+    };
+
+    let group_by = if con_sets {
+        let conjuntos: Vec<String> = match renglones {
+            // El agrupamiento entero y el conjunto vacio. Cortar en `grouping.len()` daria
+            // el subtotal de la primera dimension, que es otro renglon.
+            Renglones::Total => vec![
+                format!("({})", expresiones.join(", ")),
+                "()".to_string(),
+            ],
+            _ => (0..=grouping.len())
+                .rev()
+                .map(|k| {
+                    if k == 0 {
+                        "()".to_string()
+                    } else {
+                        format!("({})", expresiones[..k].join(", "))
+                    }
+                })
+                .collect(),
+        };
         format!("GROUPING SETS ({})", conjuntos.join(", "))
     } else {
         expresiones.join(", ")
     };
 
-    // Con subtotales, una bandera `GROUPING` por dimension al final del SELECT: dicen si el
-    // renglon recoge esa dimension, y con eso se sabe si es dato, subtotal o gran total.
-    if subtotales && grouping.len() >= 2 {
+    // Con renglones de total, una bandera `GROUPING` por dimension al final del SELECT: dicen
+    // si el renglon recoge esa dimension, y con eso se sabe si es dato, subtotal o gran total.
+    if con_sets {
         for (index, expresion) in expresiones.iter().enumerate() {
             select.push(format!("GROUPING({}) AS \"grupo{index}\"", expresion));
         }
@@ -341,7 +381,7 @@ fn bajar(
     // renglon del subtotal tiene la dimension en NULL, y el NULL se va al fondo de su grupo.
     // El resultado es el layout de una matriz: los detalles de cada grupo, debajo su
     // subtotal, y el gran total al final.
-    let con_subtotales = subtotales && grouping.len() >= 2;
+    let con_subtotales = con_sets;
     let order_by = grouping
         .iter()
         .enumerate()
@@ -872,8 +912,17 @@ fn lower_filter(
                 datan_dax_eval::FilterOperator::GreaterOrEqual => ">=",
                 datan_dax_eval::FilterOperator::In => "IN",
             };
-            let rendered: Vec<String> = values.iter().map(render_value).collect();
-            if rendered.is_empty() {
+            // Un `BLANK` no se compara con `=`: en SQL da NULL y en DAX es el grupo de las
+            // claves que no tienen valor. Se baja como `IS NULL`, que es el mismo renglon.
+            let con_blanco = values
+                .iter()
+                .any(|value| matches!(value, datan_dax_eval::FilterValue::Blank));
+            let valores: Vec<&datan_dax_eval::FilterValue> = values
+                .iter()
+                .filter(|value| !matches!(value, datan_dax_eval::FilterValue::Blank))
+                .collect();
+            let rendered: Vec<String> = valores.into_iter().map(render_value).collect();
+            if values.is_empty() {
                 // Un filtro sin valores no deja pasar nada, salvo `<>`: negar el vacio es no
                 // negar nada. Es la regla que aplica el interprete en `matches`, y un filtro
                 // que da todas las filas por SQL y ninguna por el interprete es la peor
@@ -890,7 +939,23 @@ fn lower_filter(
                 // `IN` con uno o varios valores, siempre entre parentesis. Con UN valor
                 // salia `col IN 'x'`, que no es SQL: el parentesis no es opcional y la
                 // consulta no parsea.
+                if con_blanco {
+                    let mut partes = vec![format!("{target} IS NULL")];
+                    if !rendered.is_empty() {
+                        partes.insert(0, format!("{target} IN ({})", rendered.join(", ")));
+                    }
+                    return Ok(format!("({})", partes.join(" OR ")));
+                }
                 return Ok(format!("{target} IN ({})", rendered.join(", ")));
+            }
+            if con_blanco && rendered.is_empty() {
+                return Ok(match filter.operator {
+                    datan_dax_eval::FilterOperator::Equal => format!("{target} IS NULL"),
+                    datan_dax_eval::FilterOperator::NotEqual => format!("{target} IS NOT NULL"),
+                    // Un rango contra BLANK no tiene lectura: el interprete lo compara como
+                    // cero y el SQL lo deja en NULL. Nadie pide ese filtro desde la app.
+                    _ => format!("{target} {operator} NULL"),
+                });
             }
             // Un operador de comparacion con varios valores es el AND de cada uno: `col = a`
             // y `col = b` no los cumple ninguna fila, y `col <> a` y `col <> b` los cumple

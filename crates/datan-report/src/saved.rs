@@ -111,6 +111,9 @@ pub struct SavedFormato {
     /// Las lineas horizontales de la tabla.
     #[serde(skip_serializing_if = "es_cierto")]
     pub cuadricula: bool,
+    /// El renglon de total al final de la tabla. Con dos dimensiones o mas, los subtotales.
+    #[serde(skip_serializing_if = "es_cierto")]
+    pub total_general: bool,
 }
 
 impl Default for SavedFormato {
@@ -122,6 +125,7 @@ impl Default for SavedFormato {
             eje: true,
             comparacion: true,
             cuadricula: true,
+            total_general: true,
         }
     }
 }
@@ -488,6 +492,12 @@ fn find_column(model: &datan_model::Model, name: &str) -> Option<ObjectId> {
 /// numero guardado como texto se parsea; un texto se queda igual. Guardar el tipo al lado
 /// seria mas limpio y mas codigo para un caso que hoy no existe.
 fn parse_value(text: &str, data_type: Option<DataType>) -> FilterValue {
+    // El `BLANK` se guarda como `Blank` y no depende del tipo: un grupo sin valor en una
+    // columna de texto tambien es BLANK, y leerlo como el texto "Blank" creaba un filtro que
+    // no coincidia con ninguna fila.
+    if text == "Blank" {
+        return FilterValue::Blank;
+    }
     match data_type {
         Some(DataType::Integer | DataType::Moneda) => {
             FilterValue::Integer(text.parse().unwrap_or(0))

@@ -262,9 +262,18 @@ fn advance(index: &mut [usize], dimensions: &[Vec<Option<Scalar>>]) -> bool {
 
 /// Compara dos filas por las columnas de agrupamiento.
 fn compare_rows(left: &[Scalar], right: &[Scalar], width: usize) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
     for column in 0..width {
-        let ordering = left[column].compare(&right[column]);
-        if ordering != std::cmp::Ordering::Equal {
+        // Un BLANK va al final de su columna: es donde lo pone el `NULLS LAST` del SQL, y el
+        // orden de la matriz es la clave del clic. `Scalar::compare` lo compara como cero,
+        // que sirve para los filtros y no para ordenar renglones.
+        let ordering = match (&left[column], &right[column]) {
+            (Scalar::Blank, Scalar::Blank) => Ordering::Equal,
+            (Scalar::Blank, _) => Ordering::Greater,
+            (_, Scalar::Blank) => Ordering::Less,
+            (a, b) => a.compare(b),
+        };
+        if ordering != Ordering::Equal {
             return ordering;
         }
     }
@@ -1222,9 +1231,9 @@ impl<'a> Interpreter<'a> {
         let length = self.source.table_len(self.owner(column));
         for row in 0..length {
             let value = view.value_at(row);
-            if value.is_blank() {
-                continue;
-            }
+            // Un BLANK ES un grupo: es el renglon que el SQL devuelve para una clave NULL de
+            // la dimension. Saltarlo daba una tabla con una fila menos por el interprete, y
+            // el informe pintaba un dato en un camino y no en el otro.
             let key = scalar_key(&value);
             if distinct.insert(key.clone()) {
                 order.insert(key.clone(), Some(value.clone()));
@@ -1441,7 +1450,8 @@ fn order_key(value: &Scalar) -> (f64, String) {
         Scalar::Integer(n) => (*n as f64, String::new()),
         Scalar::Decimal(n) => (*n, String::new()),
         Scalar::Date(d) => (*d as f64, String::new()),
-        Scalar::Blank => (f64::NEG_INFINITY, String::new()),
+        // Al final: es donde lo pone el `NULLS LAST` del SQL.
+        Scalar::Blank => (f64::INFINITY, String::new()),
         other => (f64::NEG_INFINITY, scalar_key(other)),
     }
 }

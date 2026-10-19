@@ -8,8 +8,10 @@
 use datan_dax_eval::FilterValue;
 use datan_model::{Column, DataType, Measure, ObjectId};
 use datan_report::source::DuckSource;
-use datan_report::{Header, Matrix, Report, RowKind, TopN};
-use datan_testkit::{engine, memory_source, model, Y2024};
+use datan_report::{Header, Matrix, Report, RowKind, TopN, Totales};
+use datan_testkit::{
+    engine, engine_con_region_nula, memory_source, memory_source_con_region_nula, model, Y2024,
+};
 
 fn measure(id: &str) -> ObjectId {
     let model = model();
@@ -833,20 +835,107 @@ fn los_subtotales_cuelgan_de_su_grupo_y_el_total_va_al_final() {
 }
 
 #[test]
-fn los_subtotales_con_una_dimension_no_hacen_nada() {
-    // Una jerarquia de un nivel no tiene niveles intermedios: con subtotales encendidos, la
-    // matriz sigue siendo la de siempre. Cambiar el numero de filas sin motivo romperia a
-    // los que leen la matriz.
+fn con_una_dimension_los_subtotales_son_el_gran_total() {
+    // Una jerarquia de un nivel no tiene niveles intermedios: pedir subtotales con una
+    // dimension da los datos y el total, que es lo que se puede resumir.
     let model = model();
     let report = Report::new(model)
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty")])
         .with_subtotals(true);
     let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
-    assert_eq!(matrix.row_count(), 3, "Este, Norte y Sur");
-    for row in 0..matrix.row_count() {
+    assert_eq!(matrix.row_count(), 4, "Este, Norte, Sur y el total");
+    for row in 0..3 {
         assert_eq!(matrix.row_kind(row), RowKind::Data);
     }
+    assert_eq!(matrix.row_kind(3), RowKind::GrandTotal);
+    assert_eq!(matrix.cell(3, 1), Some("165"), "60 + 57 + 48");
+
+    // El interprete dice lo mismo: mismos renglones, mismo total.
+    let source = memory_source();
+    let otra = report.execute(&engine().expect("motor"), Some(&source)).expect("corre");
+    assert_eq!(otra.rows, matrix.rows);
+    assert_eq!(otra.kinds, matrix.kinds);
+}
+
+#[test]
+fn el_gran_total_con_dos_dimensiones_no_trae_los_subtotales() {
+    // `General` es el total SIN los renglones intermedios. Son dos ajustes distintos: una
+    // tabla con dos dimensiones y sin subtotales sigue teniendo su total.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21), ObjectId(22)])
+        .with_measures(vec![measure("Qty")])
+        .with_totales(Totales::General);
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    assert_eq!(matrix.row_count(), 7, "seis detalles y el total");
+    for row in 0..6 {
+        assert_eq!(matrix.row_kind(row), RowKind::Data, "fila {row}");
+    }
+    assert_eq!(matrix.row_kind(6), RowKind::GrandTotal);
+    assert_eq!(matrix.cell(6, 2), Some("165"));
+
+    let source = memory_source();
+    let otra = report.execute(&engine().expect("motor"), Some(&source)).expect("corre");
+    assert_eq!(otra.rows, matrix.rows);
+    assert_eq!(otra.kinds, matrix.kinds);
+}
+
+#[test]
+fn una_clave_sin_valor_es_el_renglon_en_blanco_en_los_dos_caminos() {
+    // Una dimension con una clave NULL da un grupo: el SQL lo devuelve como NULL y el
+    // interprete lo saltaba, asi que la misma tabla tenia una fila mas por un camino. Ahora
+    // la fila existe en los dos y se rotula, porque una celda vacia se lee como un dato que
+    // falta y es un grupo.
+    let report = Report::new(model())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")]);
+
+    let engine = engine_con_region_nula().expect("motor");
+    let sql = report.execute(&engine, None).expect("corre");
+    let regiones: Vec<&str> = (0..sql.row_count())
+        .filter_map(|row| sql.cell(row, 0))
+        .collect();
+    assert_eq!(
+        regiones,
+        vec!["Este", "Norte", "Sur", "(en blanco)"],
+        "el blanco va al final, como el NULLS LAST del SQL"
+    );
+
+    let source = memory_source_con_region_nula();
+    let interprete = report.execute(&engine, Some(&source)).expect("corre");
+    assert_eq!(interprete.rows, sql.rows);
+    assert_eq!(interprete.kinds, sql.kinds);
+
+    // Y el clic sobre esa fila filtra por BLANK, no por el texto del rotulo: si bajara como
+    // texto, no coincidiria con ninguna clave y el informe se vaciaria.
+    let en_blanco = sql.row_count() - 1;
+    let valor = sql.valor_de_celda(0, sql.cell(en_blanco, 0).unwrap());
+    assert_eq!(valor, Some(FilterValue::Blank));
+    let solo_blanco = report
+        .filtered_to(ObjectId(21), vec![FilterValue::Blank])
+        .execute(&engine, None)
+        .expect("corre");
+    assert_eq!(solo_blanco.row_count(), 1);
+    assert_eq!(solo_blanco.cell(0, 0), Some("(en blanco)"));
+    assert_eq!(solo_blanco.cell(0, 1), sql.cell(en_blanco, 1));
+
+    let por_interprete = report
+        .filtered_to(ObjectId(21), vec![FilterValue::Blank])
+        .execute(&engine, Some(&source))
+        .expect("corre");
+    assert_eq!(por_interprete.rows, solo_blanco.rows);
+}
+
+#[test]
+fn sin_totales_no_hay_ningun_renglon_de_total() {
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")]);
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    assert_eq!(matrix.row_count(), 3);
+    assert!(matrix.kinds.iter().all(|kind| *kind == RowKind::Data));
 }
 
 #[test]
@@ -1031,7 +1120,7 @@ fn el_top_n_y_los_subtotales_no_pueden_estar_juntos() {
             abajo: false,
         })
         .with_subtotals(true);
-    assert!(con_subtotales.subtotales);
+    assert_eq!(con_subtotales.totales, Totales::Subtotales);
     assert!(con_subtotales.top_n.is_none());
 
     let con_top = por_region()
@@ -1042,7 +1131,7 @@ fn el_top_n_y_los_subtotales_no_pueden_estar_juntos() {
             abajo: false,
         });
     assert!(con_top.top_n.is_some());
-    assert!(!con_top.subtotales);
+    assert_eq!(con_top.totales, Totales::Ninguno);
 }
 
 #[test]

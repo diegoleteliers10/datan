@@ -393,6 +393,19 @@ mod tests {
     }
 
     #[test]
+    fn un_null_y_el_texto_null_no_son_lo_mismo() {
+        // `render_rows` devuelve texto. Si un NULL llegara como "NULL", el informe no podria
+        // distinguir un dato que falta de una categoria que se llama asi, y el clic sobre el
+        // renglon en blanco filtraria por el texto.
+        let engine = Engine::open(":memory:").expect("abre motor en memoria");
+        let rows = engine
+            .render_rows("SELECT CAST(NULL AS VARCHAR) AS a, 'NULL' AS b")
+            .expect("consulta");
+        assert_eq!(rows[0][0], CELDA_EN_BLANCO);
+        assert_eq!(rows[0][1], "NULL");
+    }
+
+    #[test]
     fn sentencia_sin_resultado_falla() {
         let engine = Engine::open(":memory:").expect("abre motor en memoria");
         let result = engine.query_arrow("CREATE TABLE t (n INT)");
@@ -509,6 +522,13 @@ mod explain_tests {
 /// El objetivo es que la comparacion entre dos motores sea exacta. Un `Decimal128` de
 /// `HUGEINT` y un `Int64` del mismo numero tienen que salir como la misma cadena, y por eso
 /// `Decimal128` se pasa por su representacion decimal y no por su escala.
+/// La marca de una celda NULL en el texto que devuelve `render_rows`.
+///
+/// Un `NULL` y la cadena `"NULL"` no son lo mismo, y `render_rows` devuelve texto. Sin una
+/// marca, el informe no puede distinguir un dato que falta de una categoria que se llama
+/// `NULL`. El caracter de separacion de unidad no aparece en un catalogo real.
+pub const CELDA_EN_BLANCO: &str = "\u{1f}";
+
 fn render_cell(
     batch: &arrow::record_batch::RecordBatch,
     column: usize,
@@ -521,7 +541,7 @@ fn render_cell(
 
     let array = batch.column(column);
     if array.null_count() > 0 && array.is_null(row) {
-        return "NULL".to_string();
+        return CELDA_EN_BLANCO.to_string();
     }
     if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
         return values.value(row).to_string();

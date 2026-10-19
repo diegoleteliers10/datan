@@ -251,6 +251,18 @@ pub const FIXTURES: &str = "\
 
 /// Los datos en memoria, con la misma forma que `FIXTURES`.
 pub fn memory_source() -> MemorySource {
+    armar_memoria(false)
+}
+
+/// Los mismos datos, con la region del primer producto en NULL.
+///
+/// Es la unica forma de probar el renglon en blanco sin tocar el fixture compartido: los
+/// numeros de los demas tests no cambian.
+pub fn memory_source_con_region_nula() -> MemorySource {
+    armar_memoria(true)
+}
+
+fn armar_memoria(region_nula: bool) -> MemorySource {
     let mut qty = Vec::new();
     let mut amount = Vec::new();
     let mut product_ids = Vec::new();
@@ -280,14 +292,18 @@ pub fn memory_source() -> MemorySource {
     let mut category = Vec::new();
     for i in 1..=6 {
         product_id.push(Some(i as i64));
-        region.push(Some(
-            match i % 3 {
-                0 => "Norte",
-                1 => "Sur",
-                _ => "Este",
-            }
-            .to_string(),
-        ));
+        region.push(if region_nula && i == 1 {
+            None
+        } else {
+            Some(
+                match i % 3 {
+                    0 => "Norte",
+                    1 => "Sur",
+                    _ => "Este",
+                }
+                .to_string(),
+            )
+        });
         // El MISMO orden que el SQL. Si difirieran, `sort_by` ordenaria distinto en cada
         // camino y el arnes no podria decir quien miente.
         region_orden.push(Some(match i % 3 {
@@ -331,6 +347,13 @@ pub fn memory_source() -> MemorySource {
         .with_column(PRODUCT_CATEGORY, TextColumn { values: category })
         .with_table_length(FACT, 40)
         .with_table_length(PRODUCT, 6)
+}
+
+/// El mismo motor, con la region del primer producto en NULL.
+pub fn engine_con_region_nula() -> datan_storage::Result<Engine> {
+    let engine = engine()?;
+    engine.execute("UPDATE dim_product SET region = NULL WHERE product_id = 1")?;
+    Ok(engine)
 }
 
 /// Crea un motor con los fixtures cargados.
@@ -484,7 +507,9 @@ const MAX_CELLS: usize = 100_000;
 /// `27009.090909` en DuckDB y `27009.09090909091` en Rust divergen siempre.
 fn scalar_text(value: &Scalar) -> String {
     match value {
-        Scalar::Blank => "NULL".to_string(),
+        // La MISMA marca que `Engine::render_rows` para un NULL: si el arnes usara otra,
+        // todas las medidas en BLANK divergirian por el texto y no por el valor.
+        Scalar::Blank => datan_storage::CELDA_EN_BLANCO.to_string(),
         Scalar::Boolean(b) => b.to_string(),
         Scalar::Integer(n) => n.to_string(),
         Scalar::Decimal(n) => {
