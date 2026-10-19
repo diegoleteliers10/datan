@@ -14,8 +14,8 @@
 //! # Formato
 //!
 //! TOML en `~/.datan/models/<base>.toml`. Un archivo por base, como las conexiones. El
-//! archivo se puede leer y editar a mano: son medidas, ajustes de columnas y jerarquias,
-//! nada mas.
+//! archivo se puede leer y editar a mano: son medidas, ajustes de columnas, columnas
+//! calculadas y jerarquias, nada mas.
 //!
 //! # Que gana la introspeccion y que gana el documento
 //!
@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use datan_model::{Measure, Model, ObjectId};
+use datan_model::{Column, DataType, Measure, Model, ObjectId};
 use serde::{Deserialize, Serialize};
 
 /// El archivo, con las dos listas que el formato TOML exige en la raiz.
@@ -62,11 +62,26 @@ impl MeasureDoc {
     }
 }
 
-/// Un ajuste de una columna del modelo introspeccionado.
+/// Una columna del documento: un ajuste sobre una que ya existe, o una calculada nueva.
 ///
-/// Los dos campos son `Option` a proposito: `None` es "no lo toco". Un `false` en
+/// Los campos de ajuste son `Option` a proposito: `None` es "no lo toco". Un `false` en
 /// `is_hidden` significa que el usuario la mostro a mano, y no es lo mismo que no haber
 /// dicho nada.
+///
+/// ```toml
+/// # Un ajuste: la columna ya esta en la base.
+/// [[column]]
+/// table = "catalogo_productos"
+/// column = "categoria"
+/// sort_by = "categoria_orden"
+///
+/// # Una columna calculada: la declara este archivo, no la base.
+/// [[column]]
+/// table = "boleta"
+/// column = "anio"
+/// expression = "YEAR('boleta'[fecha])"
+/// data_type = "entero"
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnDoc {
     pub table: String,
@@ -75,6 +90,32 @@ pub struct ColumnDoc {
     pub sort_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_hidden: Option<bool>,
+    /// El texto DAX de una columna calculada. Se evalua FILA A FILA sobre su tabla.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    /// El tipo de una columna calculada. Solo hace falta al crearla: una que ya existe tiene
+    /// el suyo. Sin el, la columna queda como texto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+}
+
+impl ColumnDoc {
+    /// Una columna calculada: no esta en la base, la define el documento.
+    pub fn calculada(
+        table: impl Into<String>,
+        column: impl Into<String>,
+        expression: impl Into<String>,
+        data_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            table: table.into(),
+            column: column.into(),
+            sort_by: None,
+            is_hidden: None,
+            expression: Some(expression.into()),
+            data_type: Some(data_type.into()),
+        }
+    }
 }
 
 /// El documento. Se lee, se edita y se escribe entero: es un archivo de decenas de lineas.
@@ -248,30 +289,89 @@ impl ModelDoc {
 
     /// Aplica el documento encima del modelo y devuelve lo que no se pudo aplicar.
     ///
-    /// Cada medida se chequea contra el modelo EN SU ESTADO ACTUAL, que ya incluye las
-    /// medidas aplicadas antes: una medida que referencia otra del documento tiene que
-    /// chequear igual que si las dos estuvieran escritas en el modelo.
+    /// Las COLUMNAS van primero. Una columna calculada no existe en la base hasta que este
+    /// documento la crea, y una medida que la suma tiene que encontrarla. Al reves, la medida
+    /// fallaria con "esa columna no existe" por un motivo que no es del usuario.
+    ///
+    /// Cada pieza se chequea contra el modelo EN SU ESTADO ACTUAL, que ya incluye lo aplicado
+    /// antes: una medida que referencia otra del documento, o una calculada que usa otra,
+    /// chequean igual que si todas estuvieran escritas en el modelo.
     ///
     /// Lo que no se pudo aplicar no se borra del documento. La columna puede volver: renombrar
     /// algo en la base no es razon para tirar la medida que lo usaba.
     pub fn apply(&self, model: &mut Model) -> Vec<String> {
         let mut avisos = Vec::new();
 
-        for doc in &self.measures {
-            if model.measure_by_name(&doc.name).is_some() {
-                continue;
-            }
-            if let Err(error) = datan_dax_check::check(&doc.expression, model) {
-                avisos.push(format!("la medida `{}` no se aplico: {error}", doc.name));
-                continue;
-            }
-            let mut measure = Measure::new(next_id(model), doc.name.clone(), doc.expression.clone());
-            measure.format_string = doc.format_string.clone();
-            measure.description = doc.description.clone();
-            model.measures.push(measure);
-        }
-
         for doc in &self.columns {
+            // Una columna CALCULADA: la declara el documento y no esta en la base. Se
+            // chequea en contexto de FILA sobre su tabla, que es donde se va a evaluar, y se
+            // agrega al final de su tabla. El orden importa: una calculada que usa otra ya
+            // aplicada chequea igual que si las dos estuvieran escritas en el modelo.
+            if let Some(expression) = &doc.expression {
+                let Some(table) = model.table_by_name(&doc.table) else {
+                    avisos.push(format!(
+                        "la columna calculada `{}`[{}] habla de una tabla que no esta en el modelo",
+                        doc.table, doc.column
+                    ));
+                    continue;
+                };
+                if table.column_by_name(&doc.column).is_some() {
+                    avisos.push(format!(
+                        "la columna calculada `{}`[{}] no se aplico: esa columna ya existe",
+                        doc.table, doc.column
+                    ));
+                    continue;
+                }
+                let table_id = table.id;
+                let checked = match datan_dax_check::check_row(expression, model, table_id) {
+                    Ok(checked) => checked,
+                    Err(error) => {
+                        avisos.push(format!(
+                            "la columna calculada `{}`[{}] no se aplico: {error}",
+                            doc.table, doc.column
+                        ));
+                        continue;
+                    }
+                };
+                // Una medida no tiene fila actual. El chequeo lo permite con un aviso, pero
+                // una columna que la use no puede dar valor nunca, y es mejor decirlo al
+                // aplicar que dejar una columna que rompe el informe al leerla.
+                if !checked.measure_dependencies.is_empty() {
+                    avisos.push(format!(
+                        "la columna calculada `{}`[{}] no se aplico: usa una medida, y una \
+                         medida no tiene valor fila a fila",
+                        doc.table, doc.column
+                    ));
+                    continue;
+                }
+                let data_type = match &doc.data_type {
+                    Some(text) => match parse_data_type(text) {
+                        Some(data_type) => data_type,
+                        None => {
+                            avisos.push(format!(
+                                "la columna calculada `{}`[{}] no se aplico: el tipo `{text}` no existe",
+                                doc.table, doc.column
+                            ));
+                            continue;
+                        }
+                    },
+                    None => DataType::Text,
+                };
+                let id = next_column_id(model);
+                if let Some(table) = model.tables.iter_mut().find(|t| t.id == table_id) {
+                    let mut column =
+                        Column::calculated(id, doc.column.clone(), data_type, expression.clone());
+                    column.sort_by = doc
+                        .sort_by
+                        .as_ref()
+                        .and_then(|name| table.column_by_name(name))
+                        .map(|column| column.id);
+                    column.is_hidden = doc.is_hidden.unwrap_or(false);
+                    table.columns.push(column);
+                }
+                continue;
+            }
+
             // Los ids se resuelven antes de tocar nada: `table_by_name` presta el modelo, y
             // la escritura necesita prestarlo mutable.
             let resolved = model.table_by_name(&doc.table).and_then(|table| {
@@ -303,6 +403,20 @@ impl ModelDoc {
             }
         }
 
+        for doc in &self.measures {
+            if model.measure_by_name(&doc.name).is_some() {
+                continue;
+            }
+            if let Err(error) = datan_dax_check::check(&doc.expression, model) {
+                avisos.push(format!("la medida `{}` no se aplico: {error}", doc.name));
+                continue;
+            }
+            let mut measure = Measure::new(next_id(model), doc.name.clone(), doc.expression.clone());
+            measure.format_string = doc.format_string.clone();
+            measure.description = doc.description.clone();
+            model.measures.push(measure);
+        }
+
         avisos
     }
 }
@@ -310,6 +424,32 @@ impl ModelDoc {
 /// El id de la proxima medida. Las del modelo arrancan en 100; las del usuario, mas arriba.
 fn next_id(model: &Model) -> ObjectId {
     ObjectId(model.measures.iter().map(|m| m.id.0).max().unwrap_or(10_000) + 1)
+}
+
+/// El id de la proxima columna. Por encima de todas las de la introspeccion, para no chocar
+/// con la que el motor agregue manana.
+fn next_column_id(model: &Model) -> ObjectId {
+    let max = model
+        .tables
+        .iter()
+        .flat_map(|table| table.columns.iter().map(|column| column.id.0))
+        .max()
+        .unwrap_or(0);
+    ObjectId(max + 1)
+}
+
+/// El tipo de una columna calculada, en el espanol del documento.
+fn parse_data_type(text: &str) -> Option<DataType> {
+    match text.trim().to_lowercase().as_str() {
+        "texto" | "text" => Some(DataType::Text),
+        "entero" | "integer" => Some(DataType::Integer),
+        "decimal" => Some(DataType::Decimal),
+        "fecha" | "date" => Some(DataType::Date),
+        "fecha-hora" | "fecha_hora" | "datetime" => Some(DataType::DateTime),
+        "booleano" | "boolean" => Some(DataType::Boolean),
+        "moneda" | "currency" => Some(DataType::Moneda),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -492,6 +632,8 @@ mod tests {
                 column: "mes".to_string(),
                 sort_by: None,
                 is_hidden: Some(true),
+                expression: None,
+                data_type: None,
             }],
             jerarquias: vec![],
         };
@@ -513,6 +655,8 @@ mod tests {
                 column: "anio".to_string(),
                 sort_by: None,
                 is_hidden: Some(true),
+                expression: None,
+                data_type: None,
             }],
             jerarquias: vec![],
         };
@@ -520,6 +664,217 @@ mod tests {
 
         assert_eq!(avisos.len(), 1);
         assert!(avisos[0].contains("anio"), "{avisos:?}");
+    }
+
+    #[test]
+    fn aplicar_agrega_una_columna_calculada() {
+        let mut model = modelo();
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![ColumnDoc::calculada(
+                "ventas",
+                "doble",
+                "total * 2",
+                "moneda",
+            )],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert!(avisos.is_empty(), "{avisos:?}");
+        let column = model
+            .table_by_name("ventas")
+            .and_then(|table| table.column_by_name("doble"))
+            .expect("la columna calculada");
+        assert!(column.is_calculated());
+        assert_eq!(column.expression(), Some("total * 2"));
+        assert_eq!(column.data_type, DataType::Moneda);
+        // El id sale por encima de los de la introspeccion: no pisa una columna ni se pisa
+        // con la proxima que la base agregue.
+        assert_eq!(column.id, ObjectId(12));
+    }
+
+    #[test]
+    fn una_columna_calculada_puede_usar_otra_calculada() {
+        let mut model = modelo();
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![
+                ColumnDoc::calculada("ventas", "doble", "total * 2", "moneda"),
+                ColumnDoc::calculada("ventas", "cuadruple", "doble * 2", "moneda"),
+            ],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert!(avisos.is_empty(), "{avisos:?}");
+        assert!(model
+            .table_by_name("ventas")
+            .and_then(|table| table.column_by_name("cuadruple"))
+            .is_some());
+    }
+
+    #[test]
+    fn una_columna_calculada_que_no_chequea_se_avisa() {
+        let mut model = modelo();
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![ColumnDoc::calculada(
+                "ventas",
+                "rota",
+                "no_existe * 2",
+                "moneda",
+            )],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert_eq!(avisos.len(), 1);
+        assert!(avisos[0].contains("rota"), "{avisos:?}");
+        assert!(model
+            .table_by_name("ventas")
+            .and_then(|table| table.column_by_name("rota"))
+            .is_none());
+    }
+
+    #[test]
+    fn una_columna_calculada_no_pisa_una_que_ya_existe() {
+        // La base manda. Una columna con ese nombre ya esta, y su valor sale de la tabla.
+        let mut model = modelo();
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![ColumnDoc::calculada("ventas", "mes", "total * 2", "texto")],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert_eq!(avisos.len(), 1);
+        assert!(avisos[0].contains("ya existe"), "{avisos:?}");
+        assert!(!model
+            .table_by_name("ventas")
+            .and_then(|table| table.column_by_name("mes"))
+            .expect("la columna")
+            .is_calculated());
+    }
+
+    #[test]
+    fn un_tipo_que_no_existe_avisa() {
+        let mut model = modelo();
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![ColumnDoc::calculada("ventas", "rara", "total * 2", "magico")],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert_eq!(avisos.len(), 1);
+        assert!(avisos[0].contains("magico"), "{avisos:?}");
+    }
+
+    #[test]
+    fn una_columna_calculada_sin_tipo_queda_como_texto() {
+        let mut model = modelo();
+        let mut column_doc = ColumnDoc::calculada("ventas", "sin_tipo", "total * 2", "texto");
+        column_doc.data_type = None;
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![column_doc],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert!(avisos.is_empty(), "{avisos:?}");
+        let column = model
+            .table_by_name("ventas")
+            .and_then(|table| table.column_by_name("sin_tipo"))
+            .expect("la columna");
+        assert_eq!(column.data_type, DataType::Text);
+    }
+
+    #[test]
+    fn una_medida_del_documento_puede_sumar_una_columna_calculada_del_documento() {
+        // Las columnas se aplican ANTES que las medidas: la columna no existe en la base
+        // hasta que este documento la crea, y la medida que la suma tiene que encontrarla.
+        let mut model = modelo();
+        let documento = ModelDoc {
+            measures: vec![MeasureDoc::new("Doble", "SUM('ventas'[doble])")],
+            columns: vec![ColumnDoc::calculada("ventas", "doble", "total * 2", "moneda")],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert!(avisos.is_empty(), "{avisos:?}");
+        assert_eq!(model.measures.len(), 1);
+    }
+
+    #[test]
+    fn una_columna_calculada_que_usa_una_medida_se_avisa() {
+        // Una medida no tiene valor fila a fila. El chequeo lo permite con un aviso, y una
+        // columna que la use no puede dar valor nunca: mejor decirlo al aplicar.
+        let mut model = modelo();
+        model
+            .measures
+            .push(Measure::new(ObjectId(100), "TotalVentas", "SUM('ventas'[total])"));
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![ColumnDoc::calculada("ventas", "rota", "[TotalVentas] + 1", "moneda")],
+            jerarquias: vec![],
+        };
+        let avisos = documento.apply(&mut model);
+
+        assert_eq!(avisos.len(), 1);
+        assert!(avisos[0].contains("rota"), "{avisos:?}");
+        assert!(avisos[0].contains("medida"), "{avisos:?}");
+        assert!(model
+            .table_by_name("ventas")
+            .and_then(|table| table.column_by_name("rota"))
+            .is_none());
+    }
+
+    #[test]
+    fn una_columna_calculada_honra_sort_by_y_hidden() {
+        let mut model = modelo();
+        let mut column_doc = ColumnDoc::calculada("ventas", "doble", "total * 2", "moneda");
+        column_doc.sort_by = Some("mes".to_string());
+        column_doc.is_hidden = Some(true);
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![column_doc],
+            jerarquias: vec![],
+        };
+        documento.apply(&mut model);
+
+        let column = model
+            .table_by_name("ventas")
+            .and_then(|table| table.column_by_name("doble"))
+            .expect("la columna");
+        assert_eq!(column.sort_by, Some(ObjectId(11)));
+        assert!(column.is_hidden);
+    }
+
+    #[test]
+    fn una_columna_calculada_da_la_vuelta_por_disco() {
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![ColumnDoc::calculada(
+                "ventas",
+                "anio",
+                "YEAR('ventas'[fecha])",
+                "entero",
+            )],
+            jerarquias: vec![],
+        };
+        let file = File {
+            measure: vec![],
+            column: documento.columns.clone(),
+            jerarquia: vec![],
+        };
+        let text = toml::to_string_pretty(&file).expect("serializa");
+        assert!(text.contains("expression"));
+        assert!(text.contains("data_type"));
+
+        let back: File = toml::from_str(&text).expect("vuelve a parsear");
+        assert_eq!(back.column, documento.columns);
     }
 
     #[test]
@@ -547,6 +902,8 @@ mod tests {
                 column: "mes".to_string(),
                 sort_by: None,
                 is_hidden: Some(true),
+                expression: None,
+                data_type: None,
             }],
             jerarquias: vec![],
         };

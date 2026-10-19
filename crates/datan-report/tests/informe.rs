@@ -1049,33 +1049,72 @@ fn el_top_n_cuesta_dos_lecturas() {
 
 /// La columna calculada de la suite: `bruto = qty * 2` sobre `fact_sales`.
 const FACT_BRUTO: ObjectId = ObjectId(40);
-/// La medida que la agrega. Fuerza el camino del interprete: la columna no tiene nombre
+/// Una calculada que usa DOS columnas fisicas. Es la que cuida el alineado por posicion.
+const FACT_IMPORTE: ObjectId = ObjectId(41);
+/// La medida que agrega `bruto`. Fuerza el camino del interprete: la columna no tiene nombre
 /// fisico que el SQL pueda leer.
 const BRUTO_MEASURE: ObjectId = ObjectId(200);
+const IMPORTE_MEASURE: ObjectId = ObjectId(201);
 
-/// El modelo del testkit con una columna calculada encima de la tabla de hechos.
+/// El modelo del testkit con columnas calculadas encima de la tabla de hechos.
 fn modelo_con_calculada() -> datan_model::Model {
     let mut model = model();
-    model
+    let fact = model
         .tables
         .iter_mut()
         .find(|table| table.name == "fact_sales")
-        .expect("la tabla de hechos")
-        .columns
-        .push(Column::calculated(
-            FACT_BRUTO,
-            "bruto",
-            DataType::Integer,
-            "'fact_sales'[qty] * 2",
-        ));
+        .expect("la tabla de hechos");
+    fact.columns.push(Column::calculated(
+        FACT_BRUTO,
+        "bruto",
+        DataType::Integer,
+        "'fact_sales'[qty] * 2",
+    ));
+    fact.columns.push(Column::calculated(
+        FACT_IMPORTE,
+        "importe",
+        DataType::Moneda,
+        "'fact_sales'[qty] * 'fact_sales'[amount]",
+    ));
+    model.measures.push(Measure::new(
+        BRUTO_MEASURE,
+        "Bruto",
+        "SUM('fact_sales'[bruto])",
+    ));
+    model.measures.push(Measure::new(
+        IMPORTE_MEASURE,
+        "Importe",
+        "SUM('fact_sales'[importe])",
+    ));
     model
-        .measures
-        .push(Measure::new(
-            BRUTO_MEASURE,
-            "Bruto",
-            "SUM('fact_sales'[bruto])",
-        ));
-    model
+}
+
+#[test]
+fn una_columna_calculada_de_dos_columnas_cruza_las_filas_por_posicion() {
+    // `importe = qty * amount` obliga al interprete a leer DOS columnas de la base y
+    // cruzarlas por posicion. Si `DuckSource` no pide el mismo orden en las dos lecturas, el
+    // producto sale cruzado y el total no coincide con el SQL. El orden lo fija la clave de
+    // la tabla; este test cuida que la cuenta siga dando igual que en SQL.
+    let engine = engine().expect("motor");
+    let model = modelo_con_calculada();
+    let source = DuckSource::new(&engine, &model, "");
+    let informe = Report::new(model).with_measures(vec![IMPORTE_MEASURE]);
+
+    let obtenido: f64 = informe
+        .totals(&engine, Some(&source))
+        .expect("corre")
+        .first()
+        .expect("un valor")
+        .parse()
+        .expect("un numero");
+    let esperado: f64 = engine
+        .scalar("SELECT SUM(qty * amount)::text FROM fact_sales", 0)
+        .expect("sql")
+        .expect("un valor")
+        .parse()
+        .expect("un numero");
+
+    assert_eq!(obtenido, esperado);
 }
 
 #[test]

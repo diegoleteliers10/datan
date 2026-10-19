@@ -174,4 +174,100 @@ fn main() {
             }
         }
     }
+
+    // --- Columnas calculadas ---
+    //
+    // Una columna calculada no esta en la base: la declara el modelo del usuario y el motor
+    // la evalua FILA A FILA. Se verifica contra la base por SQL crudo, que es un camino
+    // independiente: el mismo numero tiene que salir de los dos lados.
+    //
+    // Las columnas de esta seccion se declaran EN MEMORIA y no en el archivo del usuario: es
+    // una verificacion, y el archivo es del usuario.
+    let mut con_calculadas = model.clone();
+    let demo = model_doc::ModelDoc {
+        measures: vec![
+            model_doc::MeasureDoc::new("Cantidad", "SUM('product_boleta'[quantity])"),
+            model_doc::MeasureDoc::new("Importe", "SUM('product_boleta'[importe])"),
+        ],
+        columns: vec![
+            model_doc::ColumnDoc::calculada(
+                "product_boleta",
+                "importe",
+                "'product_boleta'[quantity] * 'product_boleta'[precio_unitario]",
+                "entero",
+            ),
+            model_doc::ColumnDoc::calculada(
+                "product_boleta",
+                "tamano",
+                "IF('product_boleta'[quantity] > 2, \"Grande\", \"Chico\")",
+                "texto",
+            ),
+        ],
+        jerarquias: vec![],
+    };
+    let avisos = demo.apply(&mut con_calculadas);
+    for aviso in &avisos {
+        println!("\nAVISO: {aviso}");
+    }
+
+    let source = datan_report::source::DuckSource::new(&engine, &con_calculadas, "pg");
+    let cantidad = con_calculadas
+        .measures
+        .iter()
+        .find(|m| m.name == "Cantidad")
+        .map(|m| m.id);
+    let importe = con_calculadas
+        .measures
+        .iter()
+        .find(|m| m.name == "Importe")
+        .map(|m| m.id);
+    let tamano = con_calculadas
+        .table_by_name("product_boleta")
+        .and_then(|table| table.column_by_name("tamano"))
+        .map(|column| column.id);
+
+    // El total de una medida sobre una columna calculada, contra el mismo calculo en SQL.
+    if let Some(importe) = importe {
+        let informe = Report::new(con_calculadas.clone())
+            .attached_to("pg")
+            .with_measures(vec![importe]);
+        let obtenido = informe
+            .totals(&engine, Some(&source))
+            .map(|values| values.first().cloned().unwrap_or_default());
+        let esperado = engine
+            .scalar(
+                "SELECT SUM(quantity * precio_unitario)::text FROM pg.product_boleta",
+                0,
+            )
+            .ok()
+            .flatten();
+        println!("\n--- total de `Importe` = SUM(quantity * precio_unitario) ---");
+        println!("  motor: {obtenido:?}");
+        println!("  SQL:   {esperado:?}");
+    }
+
+    // Agrupar por una calculada de texto, contra un `CASE` en SQL. Es el chequeo fuerte: no
+    // mira un total sino la particion entera de las filas.
+    if let (Some(tamano), Some(cantidad)) = (tamano, cantidad) {
+        let informe = Report::new(con_calculadas.clone())
+            .attached_to("pg")
+            .with_dimensions(vec![tamano])
+            .with_measures(vec![cantidad]);
+        println!("\n--- por `tamano` = IF(quantity > 2, Grande, Chico) ---");
+        match informe.execute(&engine, Some(&source)) {
+            Ok(matrix) => {
+                matrix.print(10);
+                let esperado = engine
+                    .render_rows(
+                        "SELECT CASE WHEN quantity > 2 THEN 'Grande' ELSE 'Chico' END, \
+                         SUM(quantity)::text FROM pg.product_boleta GROUP BY 1 ORDER BY 1",
+                    )
+                    .unwrap_or_default();
+                for row in esperado {
+                    println!("  SQL: {} {}", row[0], row[1]);
+                }
+            }
+            Err(error) => println!("  ERROR: {error}"),
+        }
+    }
 }
