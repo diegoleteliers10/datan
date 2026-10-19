@@ -1661,6 +1661,11 @@ la jerarquia mas comun que un informe necesita y que la base no declara.
   parece valido.
 - No hay editor en la app: se escriben en el TOML, como las jerarquias. Un panel de
   propiedades es la fase que falta para crearlas con el mouse.
+- `informe_postgres` aplica el documento del usuario antes de resolver jerarquias, igual que
+  la app. Sin eso, una jerarquia sobre una calculada decia que la columna no estaba, y el
+  chequeo verificaba un modelo que no era el del producto. Tambien pasa el origen de DuckDB
+  en todas las consultas: una calculada obliga al interprete, y el bin fallaba por no tener
+  origen.
 
 ### Resultado
 

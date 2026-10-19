@@ -40,7 +40,32 @@ fn main() {
     let introspection =
         introspect(&engine, &Source::new("pg"), Some(&mut catalog), Some("product_boleta"))
             .expect("modelo");
-    let model = introspection.model;
+    let mut model = introspection.model;
+
+    // El documento del usuario se aplica ENCIMA, igual que en la app. Sin esto, una jerarquia
+    // o una medida declaradas en el archivo no existen para este bin, y una jerarquia sobre
+    // una columna calculada no resolveria: el chequeo diria que la columna no esta, que es
+    // justo lo contrario de lo que pasa en la app.
+    let user_doc = model_doc::ModelDoc::load(&database).expect("el modelo del usuario");
+    let doc_avisos = user_doc.apply(&mut model);
+    println!("--- modelo del usuario ---");
+    println!(
+        "  {} medidas, {} columnas, {} jerarquias",
+        user_doc.measures.len(),
+        user_doc.columns.len(),
+        user_doc.jerarquias.len()
+    );
+    for aviso in &doc_avisos {
+        println!("  AVISO: {aviso}");
+    }
+    if doc_avisos.is_empty() {
+        println!("  sin avisos");
+    }
+
+    // El interprete lee de DuckDB las medidas que no se bajan a SQL. Se pasa en TODAS las
+    // consultas: una columna calculada obliga a ese camino, y un informe sin origen falla en
+    // vez de dar un numero. Es lo mismo que hace la app en `run_report`.
+    let source = datan_report::source::DuckSource::new(&engine, &model, "pg");
 
     // Las dimensiones son las columnas de texto de las dimensiones que no son clave. Las
     // medidas, las de suma sobre los hechos.
@@ -80,7 +105,7 @@ fn main() {
     println!("\nConsultas necesarias: {}", report.query_count().unwrap_or(0));
 
     // 1. El informe entero.
-    match report.execute(&engine, None) {
+    match report.execute(&engine, Some(&source)) {
         Ok(matrix) => {
             println!("\n--- informe completo ---");
             matrix.print(12);
@@ -92,7 +117,7 @@ fn main() {
                     .map(|(_, c)| c.name.clone())
                     .unwrap_or_default();
                 let value = matrix.cell(0, 0).unwrap_or_default().to_string();
-                let filtered = drilled.execute(&engine, None).expect("filtra");
+                let filtered = drilled.execute(&engine, Some(&source)).expect("filtra");
                 println!("\n--- pinchando {} = {value} ---", name);
                 filtered.print(12);
             }
@@ -102,7 +127,7 @@ fn main() {
 
     // El drill, de punta a punta: cada nivel que el usuario declaro como jerarquia, como
     // dimension unica de su propio informe. Es lo que hacen los botones de bajar y subir.
-    let doc = model_doc::ModelDoc::load(&database).expect("el modelo del usuario");
+    let doc = &user_doc;
     if doc.jerarquias.is_empty() {
         println!("\nSin jerarquias declaradas en el modelo del usuario.");
         return;
@@ -127,7 +152,7 @@ fn main() {
                 .attached_to("pg")
                 .with_dimensions(vec![*nivel])
                 .with_measures(medida.clone());
-            match informe.execute(&engine, None) {
+            match informe.execute(&engine, Some(&source)) {
                 Ok(matrix) => matrix.print(4),
                 Err(error) => println!("  ERROR: {error}"),
             }
@@ -168,7 +193,7 @@ fn main() {
                     count: 1,
                     abajo,
                 });
-            match informe.execute(&engine, None) {
+            match informe.execute(&engine, Some(&source)) {
                 Ok(matrix) => matrix.print(10),
                 Err(error) => println!("  ERROR: {error}"),
             }
@@ -202,6 +227,20 @@ fn main() {
                 "IF('product_boleta'[quantity] > 2, \"Grande\", \"Chico\")",
                 "texto",
             ),
+            // La jerarquia de fecha que la base no declara: el ano y el mes de la boleta.
+            // Es el caso de uso que motivo las columnas calculadas.
+            model_doc::ColumnDoc::calculada(
+                "boleta",
+                "anio_demo",
+                "YEAR('boleta'[fecha])",
+                "entero",
+            ),
+            model_doc::ColumnDoc::calculada(
+                "boleta",
+                "mes_demo",
+                "MONTH('boleta'[fecha])",
+                "entero",
+            ),
         ],
         jerarquias: vec![],
     };
@@ -210,7 +249,7 @@ fn main() {
         println!("\nAVISO: {aviso}");
     }
 
-    let source = datan_report::source::DuckSource::new(&engine, &con_calculadas, "pg");
+    let demo_source = datan_report::source::DuckSource::new(&engine, &con_calculadas, "pg");
     let cantidad = con_calculadas
         .measures
         .iter()
@@ -232,7 +271,7 @@ fn main() {
             .attached_to("pg")
             .with_measures(vec![importe]);
         let obtenido = informe
-            .totals(&engine, Some(&source))
+            .totals(&engine, Some(&demo_source))
             .map(|values| values.first().cloned().unwrap_or_default());
         let esperado = engine
             .scalar(
@@ -254,13 +293,45 @@ fn main() {
             .with_dimensions(vec![tamano])
             .with_measures(vec![cantidad]);
         println!("\n--- por `tamano` = IF(quantity > 2, Grande, Chico) ---");
-        match informe.execute(&engine, Some(&source)) {
+        match informe.execute(&engine, Some(&demo_source)) {
             Ok(matrix) => {
                 matrix.print(10);
                 let esperado = engine
                     .render_rows(
                         "SELECT CASE WHEN quantity > 2 THEN 'Grande' ELSE 'Chico' END, \
                          SUM(quantity)::text FROM pg.product_boleta GROUP BY 1 ORDER BY 1",
+                    )
+                    .unwrap_or_default();
+                for row in esperado {
+                    println!("  SQL: {} {}", row[0], row[1]);
+                }
+            }
+            Err(error) => println!("  ERROR: {error}"),
+        }
+    }
+
+    // La jerarquia de fecha, de punta a punta: una calculada sobre la tabla de la BOLETA,
+    // agrupada desde los hechos por el camino de la relacion. Contra `EXTRACT` en SQL, que es
+    // el mismo calculo por otro camino.
+    if let Some(cantidad) = cantidad
+        && let Some(anio) = con_calculadas
+            .table_by_name("boleta")
+            .and_then(|table| table.column_by_name("anio_demo"))
+            .map(|column| column.id)
+    {
+        let informe = Report::new(con_calculadas.clone())
+            .attached_to("pg")
+            .with_dimensions(vec![anio])
+            .with_measures(vec![cantidad]);
+        println!("\n--- por `boleta[anio_demo]` = YEAR(fecha) ---");
+        match informe.execute(&engine, Some(&demo_source)) {
+            Ok(matrix) => {
+                matrix.print(10);
+                let esperado = engine
+                    .render_rows(
+                        "SELECT EXTRACT(YEAR FROM b.fecha)::text, SUM(pb.quantity)::text \
+                         FROM pg.product_boleta pb JOIN pg.boleta b ON b.id = pb.boleta_id \
+                         GROUP BY 1 ORDER BY 1",
                     )
                     .unwrap_or_default();
                 for row in esperado {
