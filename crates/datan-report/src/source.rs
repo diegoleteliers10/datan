@@ -54,6 +54,12 @@ impl ColumnView for DuckColumn {
 pub struct DuckSource<'a> {
     engine: &'a Engine,
     sources: SourceMap,
+    /// Las columnas clave de cada tabla, con su nombre fisico, en orden.
+    ///
+    /// Es lo que hace que dos lecturas de la MISMA tabla se puedan alinear: el interprete
+    /// pide una columna por vez, y dos `SELECT` sueltos no tienen por que devolver las filas
+    /// en el mismo orden. Con un `ORDER BY` sobre la clave, si lo tienen.
+    keys: HashMap<ObjectId, Vec<String>>,
     columns: Mutex<HashMap<ObjectId, Arc<DuckColumn>>>,
     lengths: Mutex<HashMap<ObjectId, usize>>,
 }
@@ -63,11 +69,42 @@ impl<'a> DuckSource<'a> {
     /// cuenta que hace el lowering, y tiene que ser la misma: los dos caminos leen las mismas
     /// tablas.
     pub fn new(engine: &'a Engine, model: &Model, qualifier: &str) -> Self {
+        let sources = SourceMap::from_model(model).with_qualifier(qualifier);
+        let mut keys = HashMap::new();
+        for table in &model.tables {
+            let names: Vec<String> = table
+                .key_columns
+                .iter()
+                .filter_map(|key| sources.column(*key).ok().map(|(physical, _)| physical.to_string()))
+                .collect();
+            if !names.is_empty() {
+                keys.insert(table.id, names);
+            }
+        }
         Self {
             engine,
-            sources: SourceMap::from_model(model).with_qualifier(qualifier),
+            sources,
+            keys,
             columns: Mutex::new(HashMap::new()),
             lengths: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// El `ORDER BY` que alinea las lecturas de una tabla, o vacio si no tiene clave.
+    ///
+    /// Sin clave no hay forma de pedir dos veces el mismo orden, y el interprete alinea por
+    /// POSICION: dos columnas leidas en orden distinto se cruzan y dan un numero que parece
+    /// valido. Una tabla sin clave primaria en el catalogo no lo puede evitar.
+    fn order_by(&self, table: ObjectId) -> String {
+        match self.keys.get(&table) {
+            Some(keys) => format!(
+                " ORDER BY {}",
+                keys.iter()
+                    .map(|key| quote_identifier(key))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => String::new(),
         }
     }
 
@@ -79,8 +116,9 @@ impl<'a> DuckSource<'a> {
     fn read_column(&self, column: ObjectId) -> Option<DuckColumn> {
         let (physical, table) = self.sources.column(column).ok()?;
         let (qualified, _) = self.sources.qualified(table).ok()?;
+        let order = self.order_by(table);
         let sql = format!(
-            "SELECT {} FROM {}",
+            "SELECT {} FROM {}{order}",
             quote_identifier(physical),
             quote_qualified(&qualified)
         );
@@ -95,10 +133,12 @@ impl<'a> DuckSource<'a> {
         }
 
         // Un tipo que quedo vacio es una columna que no se supo leer. Se reintenta como
-        // texto antes de devolver nada.
+        // texto antes de devolver nada. El `ORDER BY` va otra vez: si no, esta columna
+        // quedaria alineada distinto que las demas y el cruce por posicion daria un numero
+        // equivocado.
         if batches.iter().all(|batch| batch.num_rows() == 0) {
             let sql = format!(
-                "SELECT CAST({} AS VARCHAR) FROM {}",
+                "SELECT CAST({} AS VARCHAR) FROM {}{order}",
                 quote_identifier(physical),
                 quote_qualified(&qualified)
             );
@@ -270,7 +310,22 @@ fn read_array(array: &dyn Array, out: &mut Vec<Scalar>) {
 mod tests {
     use super::*;
     use datan_dax_eval::{FilterContext, FilterValue, Interpreter, extract_atoms};
-    use datan_testkit::{engine, model, PRODUCT_REGION};
+    use datan_testkit::{engine, model, PRODUCT, PRODUCT_REGION};
+
+    #[test]
+    fn el_orden_de_lectura_sale_de_la_clave_de_la_tabla() {
+        // Dos lecturas de la misma tabla se alinean por POSICION. Sin un `ORDER BY`, dos
+        // `SELECT` sueltos pueden devolver las filas en distinto orden y el cruce da un
+        // numero que parece valido. La clave primaria es el orden que si se repite.
+        let engine = engine().expect("motor");
+        let model = model();
+        let source = DuckSource::new(&engine, &model, "");
+
+        assert_eq!(source.order_by(PRODUCT), " ORDER BY \"product_id\"");
+        // La tabla de hechos del fixture no declara clave: no hay orden que pedir, y el
+        // origen lo dice con la cadena vacia en vez de inventar uno.
+        assert_eq!(source.order_by(datan_testkit::FACT), "");
+    }
 
     /// El interprete, con DuckDB detras, ve la misma columna que la memoria materializa:
     /// seis productos, tres regiones, cuarenta ventas con cinco nulos.
