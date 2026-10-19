@@ -106,6 +106,10 @@ pub struct ColumnDoc {
 
 impl ColumnDoc {
     /// Una columna calculada: no esta en la base, la define el documento.
+    ///
+    /// La usa el bin de verificacion `informe_postgres`, que arma documentos a mano. Este
+    /// binario no crea columnas calculadas todavia: la app solo las lee del archivo.
+    #[allow(dead_code)]
     pub fn calculada(
         table: impl Into<String>,
         column: impl Into<String>,
@@ -179,12 +183,6 @@ impl RelationshipDoc {
         self
     }
 
-    pub fn activa(&self) -> bool {
-        !self
-            .role
-            .as_deref()
-            .is_some_and(|role| role.eq_ignore_ascii_case("inactiva"))
-    }
 }
 
 /// El documento. Se lee, se edita y se escribe entero: es un archivo de decenas de lineas.
@@ -932,7 +930,7 @@ mod tests {
 
         let back: File = toml::from_str(&text).expect("vuelve a parsear");
         assert_eq!(back.relacion, documento.relaciones);
-        assert!(!back.relacion[0].activa());
+        assert_eq!(back.relacion[0].role.as_deref(), Some("inactiva"));
     }
 
     fn doc(measures: Vec<MeasureDoc>) -> ModelDoc {

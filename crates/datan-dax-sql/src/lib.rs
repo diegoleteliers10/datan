@@ -874,9 +874,17 @@ fn lower_filter(
             };
             let rendered: Vec<String> = values.iter().map(render_value).collect();
             if rendered.is_empty() {
-                // Un `IN` vacio no es `FALSE` en DAX: un filtro vacio deja pasar todo. Se
-                // escribe el caso explicito para que el SQL signifique lo mismo.
-                return Ok("1 = 1".to_string());
+                // Un filtro sin valores no deja pasar nada, salvo `<>`: negar el vacio es no
+                // negar nada. Es la regla que aplica el interprete en `matches`, y un filtro
+                // que da todas las filas por SQL y ninguna por el interprete es la peor
+                // clase de divergencia. `1 = 0` se pliega sin mirar la tabla.
+                return Ok(
+                    match filter.operator {
+                        datan_dax_eval::FilterOperator::NotEqual => "1 = 1",
+                        _ => "1 = 0",
+                    }
+                    .to_string(),
+                );
             }
             if matches!(filter.operator, datan_dax_eval::FilterOperator::In) {
                 // `IN` con uno o varios valores, siempre entre parentesis. Con UN valor

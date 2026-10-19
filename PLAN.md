@@ -1833,3 +1833,23 @@ dimension se guardaban en el mismo archivo: el segundo pisaba al primero sin avi
 334 tests. La app arranca en 12 s con 157 MB RSS y sin errores en el log. El campo de
 renombrar no se pudo abrir sin captura de pantalla: la logica del nombre y el movimiento del
 archivo estan cubiertos por tests, el foco y el Enter no.
+
+## Correcciones: filtro vacio y codigo muerto
+
+- **`IN` sin valores.** El SQL lo bajaba como `1 = 1` y el interprete como falso: el mismo
+  informe daba todas las filas por un camino y ninguna por el otro. Ahora el SQL usa la regla
+  del interprete: sin valores no pasa nada, salvo `<>`, donde negar el vacio es no negar nada.
+  El estado se alcanza de verdad: `KEEPFILTERS` intersecta dos contextos que se contradicen y
+  deja ese `IN` como marca. Test nuevo: dos contextos contradictorios dan cero filas por los
+  dos caminos.
+- `RelationshipDoc::activa` duplicaba la regla de `parse_role` y no la llamaba nadie. Se
+  quito; el test de ida y vuelta mira el rol escrito.
+- `ColumnDoc::calculada` solo la usa el bin de verificacion `informe_postgres`. Queda con
+  `#[allow(dead_code)]` y el motivo escrito: este binario no crea calculadas, solo las lee.
+- El test de subtotales no miraba la segunda dimension en el camino del interprete. Ahora la
+  mira.
+- `cargo check --workspace --all-targets` queda sin avisos.
+
+### Resultado
+
+335 tests. Conformance: 0 divergencias.

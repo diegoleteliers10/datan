@@ -205,11 +205,10 @@ impl Report {
     /// no es pedir dos filtros que se intersectan, que es lo que daria el conjunto vacio. La
     /// union vive dentro del filtro (`IN`), y el `AND` entre columnas distintas sigue igual.
     ///
-    /// Un conjunto VACIO quita el filtro en vez de dejar un `IN` sin valores. Los dos caminos
-    /// no coinciden con ese `IN`: el SQL lo baja como `1 = 1`, que pasa todo, y el interprete
-    /// lo evalua como falso, que no pasa nada. Un informe que da todas las filas por SQL y
-    /// ninguna por el interprete es la peor clase de divergencia, asi que el estado no se
-    /// puede construir.
+    /// Un conjunto VACIO quita el filtro en vez de dejar un `IN` sin valores: para el usuario,
+    /// destildar el ultimo valor de un slicer es "sin filtro", no "ningun dato". El `IN` sin
+    /// valores existe igual, porque `KEEPFILTERS` lo produce al intersectar dos contextos que
+    /// se contradicen, y ahi SI significa "ninguna fila": los dos caminos lo bajan asi.
     pub fn filtered_to(&self, column: ObjectId, values: Vec<FilterValue>) -> Self {
         let mut next = self.clone();
         next.filters = next.filters.without_column(column);

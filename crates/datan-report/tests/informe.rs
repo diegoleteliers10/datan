@@ -550,8 +550,8 @@ fn un_filtro_con_varios_valores_da_la_union_y_sobrevive_a_guardar() {
 
 #[test]
 fn quitar_todos_los_valores_deja_el_informe_sin_filtro() {
-    // Un conjunto vacio es "sin filtro", no un `IN ()`. Los dos caminos no coinciden con ese
-    // `IN`: el SQL lo baja como `1 = 1` y el interprete lo evalua como falso.
+    // Un conjunto vacio es "sin filtro", no un `IN ()`: para el usuario, destildar el ultimo
+    // valor de un slicer no puede vaciar el informe.
     let model = model();
     let report = Report::new(model)
         .with_dimensions(vec![ObjectId(21)])
@@ -565,6 +565,38 @@ fn quitar_todos_los_valores_deja_el_informe_sin_filtro() {
     assert_eq!(con_filtro.execute(&engine, None).expect("corre").row_count(), 1);
     let vuelto = con_filtro.filtered_to(ObjectId(21), vec![]);
     assert_eq!(vuelto.execute(&engine, None).expect("corre").row_count(), 3);
+}
+
+#[test]
+fn dos_filtros_que_se_contradicen_no_dejan_pasar_ninguna_fila() {
+    // `KEEPFILTERS` intersecta dos contextos y, cuando no comparten ningun valor, deja un
+    // `IN` sin valores como marca de contradiccion. Ese `IN` SI significa "ninguna fila":
+    // la region no puede ser Norte y Este a la vez. El SQL lo plegaba como `1 = 1` y el
+    // informe daba todas las filas por SQL y ninguna por el interprete.
+    let model = model();
+    let mut report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")]);
+
+    let norte = datan_dax_eval::FilterContext::default()
+        .with(datan_dax_eval::Filter::in_values(
+            ObjectId(21),
+            vec![FilterValue::Text("Norte".to_string())],
+        ));
+    let este = datan_dax_eval::FilterContext::default()
+        .with(datan_dax_eval::Filter::in_values(
+            ObjectId(21),
+            vec![FilterValue::Text("Este".to_string())],
+        ));
+    report.filters = norte.intersect(&este);
+
+    let engine = engine().expect("motor");
+    let por_sql = report.execute(&engine, None).expect("corre");
+    assert_eq!(por_sql.row_count(), 0, "SQL");
+
+    let source = memory_source();
+    let por_interprete = report.execute(&engine, Some(&source)).expect("corre");
+    assert_eq!(por_interprete.row_count(), 0, "interprete");
 }
 
 #[test]
@@ -794,6 +826,7 @@ fn los_subtotales_cuelgan_de_su_grupo_y_el_total_va_al_final() {
     assert_eq!(matrix.row_count(), esperado.len());
     for (row, (region, categoria, qty, kind)) in esperado.iter().enumerate() {
         assert_eq!(matrix.cell(row, 0), Some(*region), "interprete fila {row}");
+        assert_eq!(matrix.cell(row, 1), Some(*categoria), "interprete fila {row}");
         assert_eq!(matrix.cell(row, 2), Some(*qty), "interprete fila {row}");
         assert_eq!(&matrix.row_kind(row), kind, "interprete fila {row}");
     }
