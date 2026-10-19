@@ -310,6 +310,31 @@ pub fn format_date(day: i32) -> String {
     format!("{year:04}-{month:02}-{d:02}")
 }
 
+/// El dia desde 1970 que representa un texto, en las dos formas en que un dia llega a la
+/// pantalla.
+///
+/// El interprete entrega el dia desde 1970 y el SQL entrega `YYYY-MM-DD`, que es el literal
+/// que DuckDB escribe. Inversa de [`format_date`]: una celda de fecha que se pincha tiene que
+/// leerse igual venga de donde venga. Sin esto, una fecha de SQL no parseaba como numero y
+/// caia al dia 0, que es 1970: el informe quedaba vacio y sin error.
+///
+/// Una fecha que no existe (`2026-02-30`) no es un dia: devuelve `None`.
+pub fn parse_day(text: &str) -> Option<i32> {
+    let text = text.trim();
+    if let Ok(day) = text.parse::<i32>() {
+        return Some(day);
+    }
+    let (year, rest) = text.split_once('-')?;
+    let (month, day) = rest.split_once('-')?;
+    let year: i32 = year.parse().ok()?;
+    let month: u32 = month.parse().ok()?;
+    let day: u32 = day.parse().ok()?;
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(month_start((year, month)) + (day - 1) as i32)
+}
+
 /// Suma `delta` meses a `(year, month)`, normalizando el mes.
 fn add_months_index(year: i32, month: u32, delta: i64) -> (i32, u32) {
     let total = year as i64 * 12 + (month as i64 - 1) + delta;
@@ -347,6 +372,39 @@ mod tests {
 
     /// 2024-01-01 es el dia 19723 desde 1970-01-01.
     const Y2024: i32 = 19723;
+
+    #[test]
+    fn un_dia_se_lee_en_las_dos_formas() {
+        // La que escribe el interprete y la que escribe el SQL son el mismo dia.
+        assert_eq!(parse_day("19723"), Some(Y2024));
+        assert_eq!(parse_day("2024-01-01"), Some(Y2024));
+        assert_eq!(parse_day(" 2024-01-01 "), Some(Y2024));
+    }
+
+    #[test]
+    fn el_dia_que_vuelve_es_el_que_se_escribio() {
+        for day in [0, 1, Y2024, 20_000, 20_700] {
+            let texto = format_date(day);
+            assert_eq!(parse_day(&texto), Some(day), "{texto}");
+        }
+    }
+
+    #[test]
+    fn lo_que_no_es_un_dia_no_es_un_dia() {
+        assert_eq!(parse_day(""), None);
+        assert_eq!(parse_day("ayer"), None);
+        assert_eq!(parse_day("2026-13-01"), None, "no hay mes 13");
+        assert_eq!(parse_day("2026-02-30"), None, "2026 no es bisiesto");
+        assert_eq!(parse_day("2026-00-10"), None, "no hay mes 0");
+        assert_eq!(parse_day("2026-01-00"), None, "no hay dia 0");
+        assert_eq!(parse_day("2026-01"), None);
+    }
+
+    #[test]
+    fn el_ano_bisiesto_tiene_el_29_de_febrero() {
+        assert!(parse_day("2024-02-29").is_some());
+        assert_eq!(parse_day("2024-02-29"), parse_day("2024-03-01").map(|day| day - 1));
+    }
 
     fn at(offset_from_2024: i32) -> i32 {
         Y2024 + offset_from_2024

@@ -750,13 +750,26 @@ impl Matrix {
     pub fn drill(&self, report: &Report, row: usize, column: usize) -> Option<Report> {
         let dimension = self.dimension_index(column)?;
         let column_id = *report.dimensions.get(dimension)?;
-        let value = self.cell(row, column)?.to_string();
-        let filter = match self.headers[column].data_type {
-            DataType::Text => FilterValue::Text(value),
-            DataType::Date => FilterValue::Date(value.parse().ok()?),
-            _ => FilterValue::Integer(value.parse().ok()?),
-        };
+        let value = self.cell(row, column)?;
+        let filter = self.valor_de_celda(column, value)?;
         Some(report.filtered_by(column_id, filter))
+    }
+
+    /// El valor de filtro de una celda de dimension, segun el tipo de su columna.
+    ///
+    /// Un dia llega como el numero desde 1970 por el interprete y como `YYYY-MM-DD` por el
+    /// SQL: `parse_day` lee las dos. Leerlo solo como numero dejaba el filtro de una fecha
+    /// en el dia 0 y la matriz vacia, sin error.
+    pub fn valor_de_celda(&self, column: usize, texto: &str) -> Option<FilterValue> {
+        let header = self.headers.get(column)?;
+        if !header.is_dimension() {
+            return None;
+        }
+        match header.data_type {
+            DataType::Text => Some(FilterValue::Text(texto.to_string())),
+            DataType::Date => Some(FilterValue::Date(datan_dax_eval::parse_day(texto)?)),
+            _ => Some(FilterValue::Integer(texto.parse().ok()?)),
+        }
     }
 }
 

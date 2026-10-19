@@ -47,7 +47,7 @@ pub use modifiers::{Modifier, ModifierError, apply_modifiers};
 pub use cycle::has_bidirectional_cycle;
 pub use time::{
     CalendarUnit, DateRange, TimeError, TimeFunction, date_column, filters, format_date,
-    shift,
+    parse_day, shift,
 };
 
 use datan_dax_check::{Checked, check};

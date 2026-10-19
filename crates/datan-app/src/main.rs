@@ -815,8 +815,10 @@ impl Datan {
                 }
                 // La pastilla de una fecha guarda el DIA desde 1970, que es lo que escribio
                 // `valor_legible`. Leerla como texto daba un filtro que nunca coincide.
+                // La pastilla de una fecha guarda lo que se pincho, y eso llega como dia
+                // desde 1970 o como `YYYY-MM-DD`. `parse_day` lee las dos.
                 DataType::Date => {
-                    datan_dax_eval::FilterValue::Date(filter.value.parse().unwrap_or(0))
+                    datan_dax_eval::FilterValue::Date(datan_dax_eval::parse_day(&filter.value).unwrap_or(0))
                 }
                 _ => datan_dax_eval::FilterValue::Text(filter.value.to_string()),
             };

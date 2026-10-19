@@ -6,8 +6,8 @@
 //! y que pinchar una celda cambie el filtro de todas las medidas a la vez.
 
 use datan_dax_eval::FilterValue;
-use datan_model::{Measure, ObjectId};
-use datan_report::{Matrix, Report, RowKind};
+use datan_model::{DataType, Measure, ObjectId};
+use datan_report::{Header, Matrix, Report, RowKind};
 use datan_testkit::{engine, memory_source, model, Y2024};
 
 fn measure(id: &str) -> ObjectId {
@@ -838,4 +838,45 @@ fn el_subtotal_no_es_un_valor_para_filtrar() {
             "fila {row}"
         );
     }
+}
+
+#[test]
+fn pinchar_una_celda_de_fecha_filtra_por_ese_dia() {
+    // El SQL entrega la fecha como `YYYY-MM-DD` y el interprete como el dia desde 1970.
+    // Leerla como numero nada mas dejaba el filtro en el dia 0 y la matriz vacia, sin error
+    // y sin aviso. La celda se lee en las dos formas.
+    let columna = ObjectId(21);
+    let report = Report::new(model())
+        .with_dimensions(vec![columna])
+        .with_measures(vec![measure("Qty")]);
+    let matrix = Matrix {
+        headers: vec![Header {
+            label: "ventas[fecha]".to_string(),
+            column: columna,
+            measure: None,
+            data_type: DataType::Date,
+        }],
+        rows: vec![vec!["2024-01-01".to_string()]],
+        kinds: Vec::new(),
+        truncated: false,
+    };
+
+    let filtrado = matrix.drill(&report, 0, 0).expect("pinchar filtra");
+    let filtro = filtrado
+        .filters
+        .filters_on(columna)
+        .first()
+        .expect("hay un filtro");
+    let Some(FilterValue::Date(dia)) = filtro.values().first() else {
+        panic!("el filtro es un dia: {:?}", filtro.values());
+    };
+    assert_eq!(*dia, Y2024);
+
+    // La otra forma del MISMO dia es el mismo filtro.
+    assert_eq!(
+        matrix.valor_de_celda(0, &Y2024.to_string()),
+        Some(FilterValue::Date(Y2024))
+    );
+    // Y una columna de medida no es una celda que se pueda filtrar.
+    assert_eq!(matrix.valor_de_celda(1, "10"), None);
 }
