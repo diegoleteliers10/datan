@@ -1357,19 +1357,7 @@ impl Datan {
             let Some(definition) = report.model.column(filter.column) else {
                 continue;
             };
-            let value = match definition.1.data_type {
-                DataType::Integer | DataType::Moneda | DataType::Decimal => {
-                    datan_dax_eval::FilterValue::Integer(filter.value.parse().unwrap_or(0))
-                }
-                // La pastilla de una fecha guarda el DIA desde 1970, que es lo que escribio
-                // `valor_legible`. Leerla como texto daba un filtro que nunca coincide.
-                // La pastilla de una fecha guarda lo que se pincho, y eso llega como dia
-                // desde 1970 o como `YYYY-MM-DD`. `parse_day` lee las dos.
-                DataType::Date => {
-                    datan_dax_eval::FilterValue::Date(datan_dax_eval::parse_day(&filter.value).unwrap_or(0))
-                }
-                _ => datan_dax_eval::FilterValue::Text(filter.value.to_string()),
-            };
+            let value = valor_de_filtro(definition.1.data_type, &filter.value);
             match por_columna
                 .iter_mut()
                 .find(|(column, _)| *column == filter.column)
@@ -1673,6 +1661,28 @@ fn run_report(
 /// La pastilla guarda TEXTO, y de ahi sale el filtro al reconstruir. Un valor de fecha sale
 /// como el dia desde 1970, que es lo que la pastilla muestra hoy: la barra de periodo no crea
 /// pastillas, crea el rango.
+/// El valor de una pastilla de filtro, segun el tipo de su columna.
+///
+/// El rotulo del renglon en blanco no es texto: es una clave SIN valor. Leerlo como
+/// `Text("(en blanco)")` daba un filtro que no coincide con ninguna fila, y el clic sobre ese
+/// renglon vaciaba el informe.
+fn valor_de_filtro(data_type: DataType, value: &str) -> datan_dax_eval::FilterValue {
+    if value == datan_report::ETIQUETA_EN_BLANCO {
+        return datan_dax_eval::FilterValue::Blank;
+    }
+    match data_type {
+        DataType::Integer | DataType::Moneda | DataType::Decimal => {
+            datan_dax_eval::FilterValue::Integer(value.parse().unwrap_or(0))
+        }
+        // La pastilla de una fecha guarda lo que se pincho, y eso llega como dia desde 1970
+        // o como `YYYY-MM-DD`. `parse_day` lee las dos formas.
+        DataType::Date => {
+            datan_dax_eval::FilterValue::Date(datan_dax_eval::parse_day(value).unwrap_or(0))
+        }
+        _ => datan_dax_eval::FilterValue::Text(value.to_string()),
+    }
+}
+
 fn valor_legible(value: &datan_dax_eval::FilterValue) -> String {
     use datan_dax_eval::FilterValue;
     match value {
@@ -1681,7 +1691,7 @@ fn valor_legible(value: &datan_dax_eval::FilterValue) -> String {
         FilterValue::Decimal(number) => number.to_string(),
         FilterValue::Date(day) => day.to_string(),
         FilterValue::Boolean(flag) => flag.to_string(),
-        FilterValue::Blank => "(en blanco)".to_string(),
+        FilterValue::Blank => datan_report::ETIQUETA_EN_BLANCO.to_string(),
     }
 }
 
@@ -3128,8 +3138,17 @@ impl Datan {
                         return;
                     }
                     view.recordar();
+                    // Los ajustes son POR VISUAL, y el total no es dibujo: cambia la matriz.
+                    // Si el visual que se deja y el que se toma no coinciden en el, hay que
+                    // volver a correr el informe o la tabla nueva aparece con la decision de
+                    // la anterior. Cambiar de tabla a barras no cuesta una consulta.
+                    let antes = view.formato_actual().total_general;
                     view.visual = key.to_string();
-                    cx.notify();
+                    if view.formato_actual().total_general != antes {
+                        view.refresh(cx);
+                    } else {
+                        cx.notify();
+                    }
                 }),
             ));
         }
@@ -4634,8 +4653,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomKind, BinaryOp, HISTORIAL_MAX, Historial, Selection, Shape, Vista, forma_aditiva, hit,
-        nombre_nuevo,
+        AtomKind, BinaryOp, DataType, HISTORIAL_MAX, Historial, Selection, Shape, Vista,
+        forma_aditiva, hit, nombre_nuevo, valor_de_filtro,
     };
 
     /// Una vista con lo unico que distingue un paso de otro en estos tests: el visual.
@@ -4652,6 +4671,28 @@ mod tests {
             date_months: None,
             formatos: Default::default(),
         }
+    }
+
+    #[test]
+    fn el_renglon_en_blanco_filtra_por_blanco_y_no_por_su_rotulo() {
+        // El rotulo es lo que se PINTA. Como filtro tiene que volver a ser una clave sin
+        // valor: el texto "(en blanco)" no existe como categoria y el informe se vaciaria.
+        assert_eq!(
+            valor_de_filtro(DataType::Text, datan_report::ETIQUETA_EN_BLANCO),
+            datan_dax_eval::FilterValue::Blank
+        );
+        assert_eq!(
+            valor_de_filtro(DataType::Integer, datan_report::ETIQUETA_EN_BLANCO),
+            datan_dax_eval::FilterValue::Blank
+        );
+        assert_eq!(
+            valor_de_filtro(DataType::Text, "Norte"),
+            datan_dax_eval::FilterValue::Text("Norte".to_string())
+        );
+        assert_eq!(
+            valor_de_filtro(DataType::Integer, "60"),
+            datan_dax_eval::FilterValue::Integer(60)
+        );
     }
 
     #[test]
@@ -4896,4 +4937,5 @@ mod drill_tests {
             "una dimension ajena no taladra"
         );
     }
+
 }

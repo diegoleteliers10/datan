@@ -1887,6 +1887,11 @@ archivo estan cubiertos por tests, el foco y el Enter no.
   asi. El archivo guarda `Blank` y lo lee como `Blank`.
 - `(en blanco)` queda como valor reservado: una categoria con ese nombre literal se filtra
   como blanco.
+- La pastilla de filtro vuelve a `Blank`: el rotulo se PINTA, no se filtra. Leerlo como
+  `Text("(en blanco)")` daba un filtro que no coincide con ninguna fila, y el clic sobre el
+  renglon vaciaba el informe. La conversion vive en `valor_de_filtro`, con test.
+- Los ajustes son por visual y el total cambia la MATRIZ, no el dibujo: al cambiar de visual,
+  si el total del que se deja y el del que se toma difieren, el informe se vuelve a correr.
 
 ## Fase UI-18: tema del sistema
 
