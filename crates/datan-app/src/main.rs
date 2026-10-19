@@ -2610,7 +2610,7 @@ impl Datan {
         // color de un boton y nada mas: tres botones que pintaban lo mismo.
         let grafico = matches!(
             self.visual.as_str(),
-            "Todo" | "Barras" | "Columnas" | "Lineas" | "Area" | "Anillo"
+            "Todo" | "Barras" | "Columnas" | "Lineas" | "Area" | "Anillo" | "Dispersion"
         );
         // La tabla vive con los dos visuales que la incluyen. En los demas el lienzo es el
         // grafico y nada mas.
@@ -2633,9 +2633,58 @@ impl Datan {
                     valor,
                 })
                 .collect();
-            // Un punto no es un grafico: una sola barra al borde de un eje vacio dice menos
-            // que el numero que ya esta en la tarjeta.
-            if puntos.len() > 1 {
+            // La dispersion usa DOS medidas, una en cada eje. La primera es el X y la
+            // segunda el Y.
+            let nube: Vec<(f64, f64)> = if self.visual == "Dispersion" {
+                matrix
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(indice, _)| matrix.row_kind(*indice) == RowKind::Data)
+                    .filter_map(|(_, row)| {
+                        let x = row.get(dim_count)?.parse::<f64>().ok()?;
+                        let y = row.get(dim_count + 1)?.parse::<f64>().ok()?;
+                        Some((x, y))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            if self.visual == "Dispersion" && self.selection.measures.len() < 2 {
+                // Sin dos medidas no hay dos ejes, y una linea recta de puntos no dice nada.
+                canvas = canvas.child(card_aviso(
+                    &theme,
+                    "Dispersion necesita dos medidas, una en cada eje.",
+                    formato,
+                ));
+            } else if self.visual == "Dispersion" && !nube.is_empty() {
+                let medida = (0..2)
+                    .filter_map(|offset| matrix.header(dim_count + offset).map(|h| h.label.clone()))
+                    .collect::<Vec<_>>()
+                    .join(" vs ");
+                let dimension = self
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.model.column(self.selection.dimensions[0]))
+                    .map(|(_, column)| column.name.clone())
+                    .unwrap_or_default();
+                canvas = canvas.child(card_grafico(
+                    &theme,
+                    &Grafico {
+                        tipo: &self.visual,
+                        puntos: &puntos,
+                        nube: &nube,
+                        medida: &medida,
+                        dimension: &dimension,
+                        dimension_id: self.selection.dimensions[0],
+                        filas: matrix.row_count(),
+                        formato,
+                        alto: tabla.then_some(tokens::ALTO_GRAFICO),
+                    },
+                    cx,
+                ));
+            } else if self.visual != "Dispersion" && puntos.len() > 1 {
                 let medida = matrix
                     .header(dim_count)
                     .map(|h| h.label.clone())
@@ -2651,6 +2700,7 @@ impl Datan {
                     &Grafico {
                         tipo: &self.visual,
                         puntos: &puntos,
+                        nube: &[],
                         medida: &medida,
                         dimension: &dimension,
                         dimension_id: self.selection.dimensions[0],
@@ -2776,7 +2826,7 @@ impl Datan {
             ("Lineas", "Lineas", IconName::ChartLine, true),
             ("Area", "Area", IconName::ChartArea, true),
             ("Anillo", "Anillo", IconName::ChartPie, true),
-            ("Dispersion", "Dispersion", IconName::ChartScatter, false),
+            ("Dispersion", "Dispersion", IconName::ChartScatter, true),
             ("Tabla", "Tabla", IconName::Table, true),
         ];
         let mut viz_buttons = div().flex().flex_wrap().gap_1();
@@ -2807,16 +2857,19 @@ impl Datan {
         let visual = self.visual.as_str();
         let editable = !self.lectura;
         let mut propiedades = div().flex().flex_col().gap_1();
-        propiedades = propiedades.child(components::interruptor(
-            &theme,
-            "prop-titulo",
-            "Titulo",
-            formato.titulo,
-            editable,
-            cx.listener(|view, _event, _window, cx| {
-                view.ajustar_formato(|formato| formato.titulo = !formato.titulo, cx);
-            }),
-        ));
+        // La tabla no lleva titulo de tarjeta: el interruptor no gobernaria nada.
+        if visual != "Tabla" {
+            propiedades = propiedades.child(components::interruptor(
+                &theme,
+                "prop-titulo",
+                "Titulo",
+                formato.titulo,
+                editable,
+                cx.listener(|view, _event, _window, cx| {
+                    view.ajustar_formato(|formato| formato.titulo = !formato.titulo, cx);
+                }),
+            ));
+        }
         propiedades = propiedades.child(components::interruptor(
             &theme,
             "prop-fondo",
@@ -2842,7 +2895,7 @@ impl Datan {
         }
         // El eje de valores es el de los graficos del sistema. Las barras horizontales no
         // tienen eje: tienen la etiqueta pegada a la barra.
-        if matches!(visual, "Columnas" | "Lineas" | "Area") {
+        if matches!(visual, "Columnas" | "Lineas" | "Area" | "Dispersion") {
             propiedades = propiedades.child(components::interruptor(
                 &theme,
                 "prop-eje",
@@ -3660,6 +3713,8 @@ struct Grafico<'a> {
     /// La clave del tipo elegido.
     tipo: &'a str,
     puntos: &'a [Punto],
+    /// Los puntos de una dispersion: (x, y) por categoria. Vacio en los demas graficos.
+    nube: &'a [(f64, f64)],
     /// El nombre de la medida, para el titulo.
     medida: &'a str,
     /// El nombre de la dimension, para el titulo.
@@ -3684,6 +3739,7 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
     let Grafico {
         tipo,
         puntos,
+        nube,
         medida,
         dimension,
         dimension_id,
@@ -3726,6 +3782,10 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
         // sistema no avisa que barra se toco, y filtrar por categoria desde el grafico es una
         // funcion que ya existe.
         "Barras" | "Todo" => barras(theme, puntos, dimension_id, formato.etiquetas, cx),
+        // El titulo dice las dos medidas, y el dibujo las cruza. Cada punto es una
+        // categoria: pinchar el punto no filtra, porque un canvas no dice que punto se toco
+        // y el filtro por categoria ya esta en la tabla y en las barras.
+        "Dispersion" => dispersion(theme, nube, formato.eje),
         _ => div()
             .flex()
             .flex_1()
@@ -3750,6 +3810,133 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
         None => tarjeta.flex_1(),
     };
     tarjeta.into_any_element()
+}
+
+/// Una tarjeta con un aviso, para el visual que no puede dibujar todavia.
+fn card_aviso(
+    theme: &Theme,
+    texto: impl Into<SharedString>,
+    formato: datan_report::saved::SavedFormato,
+) -> AnyElement {
+    components::superficie(theme, formato.fondo)
+        .mx_3()
+        .mt_3()
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(components::nota(theme, texto))
+        .into_any_element()
+}
+
+/// Una dispersion: cada categoria es un punto, con una medida en cada eje.
+///
+/// Los dos ejes se escalan al minimo y al maximo de los datos. Un eje que arranca en cero
+/// junta todos los puntos contra la izquierda el dia que las dos medidas tienen un piso alto,
+/// que es el caso de casi cualquier tabla de hechos.
+fn dispersion(theme: &Theme, nube: &[(f64, f64)], eje: bool) -> AnyElement {
+    let extremos = |valores: &mut dyn Iterator<Item = f64>| {
+        valores.fold(None::<(f64, f64)>, |acc, valor| {
+            Some(match acc {
+                None => (valor, valor),
+                Some((lo, hi)) => (lo.min(valor), hi.max(valor)),
+            })
+        })
+    };
+    let (min_x, max_x) = extremos(&mut nube.iter().map(|punto| punto.0)).unwrap_or((0.0, 1.0));
+    let (min_y, max_y) = extremos(&mut nube.iter().map(|punto| punto.1)).unwrap_or((0.0, 1.0));
+    let span_x = (max_x - min_x).max(f64::MIN_POSITIVE);
+    let span_y = (max_y - min_y).max(f64::MIN_POSITIVE);
+    let datos: Vec<(f32, f32)> = nube
+        .iter()
+        .map(|punto| {
+            (
+                ((punto.0 - min_x) / span_x) as f32,
+                1.0 - ((punto.1 - min_y) / span_y) as f32,
+            )
+        })
+        .collect();
+    let color = tokens::serie_unica();
+    let rejilla = theme.chart_grid;
+
+    let dibujo = canvas(
+        move |_bounds, _window, _cx| (),
+        move |bounds, (), window, _cx| {
+            // Un margen de 6 px: un punto en el borde del canvas se ve cortado a la mitad.
+            let margen = px(6.);
+            let ancho = (bounds.size.width - margen * 2.0).max(px(1.));
+            let alto = (bounds.size.height - margen * 2.0).max(px(1.));
+            let x = |t: f32| bounds.origin.x + margen + ancho * t;
+            let y = |t: f32| bounds.origin.y + margen + alto * t;
+
+            if eje {
+                let mut trazo = PathBuilder::stroke(px(1.));
+                for i in 0..=4 {
+                    let t = i as f32 / 4.0;
+                    trazo.move_to(point(x(0.0), y(t)));
+                    trazo.line_to(point(x(1.0), y(t)));
+                    trazo.move_to(point(x(t), y(0.0)));
+                    trazo.line_to(point(x(t), y(1.0)));
+                }
+                if let Ok(path) = trazo.build() {
+                    window.paint_path(path, rejilla);
+                }
+            }
+
+            for (tx, ty) in &datos {
+                window.paint_quad(
+                    fill(
+                        Bounds::new(
+                            point(x(*tx) - px(4.0), y(*ty) - px(4.0)),
+                            size(px(8.0), px(8.0)),
+                        ),
+                        color,
+                    )
+                    .corner_radii(Corners::all(px(4.0))),
+                );
+            }
+        },
+    )
+    .h(px(tokens::ALTO_DISPERSION))
+    .w_full();
+
+    let rotulo = |texto: String| {
+        div()
+            .text_size(px(tokens::LETRA_NOTA))
+            .text_color(theme.muted_foreground)
+            .child(texto)
+    };
+    let margen_eje = 64.0;
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(margen_eje - 8.0))
+                        .h(px(tokens::ALTO_DISPERSION))
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_col()
+                        .justify_between()
+                        .child(rotulo(format_value(max_y)))
+                        .child(rotulo(format_value(min_y))),
+                )
+                .child(div().flex_1().child(dibujo)),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .pl(px(margen_eje))
+                .child(rotulo(format_value(min_x)))
+                .child(rotulo(format_value(max_x))),
+        )
+        .into_any_element()
 }
 
 /// El dibujo de un grafico del sistema, segun el tipo elegido.

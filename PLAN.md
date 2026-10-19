@@ -1726,3 +1726,28 @@ El panel de Propiedades era una lista de lectura: "Titulo", "Ancho: completo", "
 316 tests. La app arranca en 12 s con 157 MB RSS y sin errores en el log. La captura de
 pantalla sigue sin funcionar en esta maquina (`could not create image from display`), asi que
 el panel esta verificado por compilacion y por el archivo, no por imagen.
+
+## Fase UI-12: dispersion
+
+El octavo tipo de la referencia estaba dibujado y apagado: el mosaico decia "Dispersion" y no
+se podia elegir. Un tipo que falta sin decirlo se busca y no se encuentra.
+
+- `Dispersion` pone la primera medida en X y la segunda en Y. Un punto por fila de dato, sin
+  subtotales ni gran total.
+- Con una sola medida no hay dos ejes: una tarjeta lo dice. Una linea recta de puntos no dice
+  nada.
+- Los dos ejes se escalan al minimo y al maximo de los datos, no a cero. Un eje desde cero
+  junta todos los puntos contra el borde el dia que las dos medidas tienen un piso alto.
+- El ajuste "Eje" de propiedades enciende y apaga la rejilla de la dispersion, como en los
+  demas graficos.
+- La dispersion no filtra al clic: un canvas no dice que punto se toco. El filtro por
+  categoria sigue en la tabla, en las barras y en la leyenda del anillo.
+- Los puntos no llevan etiqueta: dos puntos cercanos no se distinguen por su categoria. Es la
+  diferencia con Power BI, que resuelve esto con un tooltip por punto.
+
+Ademas, el interruptor "Titulo" ya no se dibuja en `Tabla`: la tabla no tiene titulo de
+tarjeta y el interruptor no gobernaba nada.
+
+### Resultado
+
+316 tests. La app arranca en 12 s con 137 MB RSS y sin errores en el log.

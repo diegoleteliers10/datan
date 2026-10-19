@@ -55,6 +55,11 @@ pub const ALTO_FILA: f32 = 26.0;
 /// Cuatro por fila en el panel, con la etiqueta mas larga adentro ("Dispersion") sin
 /// recortar: un nombre cortado por el borde se lee como un defecto.
 pub const ANCHO_MOSAICO: f32 = 58.0;
+/// El alto del area de dibujo de una dispersion.
+///
+/// Un canvas se mide por lo que le pide el estilo: sin alto propio hereda cero y los puntos
+/// caen todos en el mismo lugar. Este alto es el del dibujo, no el de la tarjeta.
+pub const ALTO_DISPERSION: f32 = 190.0;
 /// El ancho de la pista de un interruptor.
 ///
 /// La pista y el boton de adentro se miden juntos: 28 de pista con 2 de relleno deja un
