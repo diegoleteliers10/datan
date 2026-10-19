@@ -97,6 +97,21 @@ enum State {
     Broken(String),
 }
 
+/// El modo "conectar dos columnas" de la barra lateral.
+///
+/// Un dialogo de relaciones pide dos desplegables y un boton. Dos clics sobre las columnas
+/// que ya estan en el panel dicen lo mismo y no abren nada. El estado es explicito para que
+/// el primer clic no tenga que guardar una columna "a medias" en otro campo.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Conexion {
+    #[default]
+    Apagada,
+    /// Esperando la primera columna.
+    PrimerLado,
+    /// Ya hay una columna. El siguiente clic elige la otra.
+    SegundoLado(ObjectId),
+}
+
 /// La vista.
 struct Datan {
     state: State,
@@ -163,6 +178,8 @@ struct Datan {
     top_n: Option<datan_report::TopN>,
     database: Option<String>,
     scroll: UniformListScrollHandle,
+    /// El modo de conectar dos columnas, si esta encendido.
+    conexion: Conexion,
 }
 
 impl Datan {
@@ -198,6 +215,7 @@ impl Datan {
             top_n: None,
             database: None,
             scroll: UniformListScrollHandle::default(),
+            conexion: Conexion::Apagada,
         }
     }
 
@@ -422,6 +440,104 @@ impl Datan {
                 .with_measures(self.selection.measures.clone()),
         );
         self.toggle(id, true, cx);
+    }
+
+    /// Enciende o apaga el modo de conectar dos columnas.
+    fn comenzar_conexion(&mut self, cx: &mut Context<Self>) {
+        if self.lectura {
+            self.stats = Some("modo Lectura: el modelo no se toca".to_string());
+            cx.notify();
+            return;
+        }
+        self.conexion = match self.conexion {
+            Conexion::Apagada => {
+                self.stats = Some("elige la primera columna de la relacion".to_string());
+                Conexion::PrimerLado
+            }
+            Conexion::PrimerLado | Conexion::SegundoLado(_) => {
+                self.stats = None;
+                Conexion::Apagada
+            }
+        };
+        cx.notify();
+    }
+
+    /// Crea la relacion entre dos columnas y la guarda en el documento del modelo.
+    fn conectar(&mut self, primera: ObjectId, segunda: ObjectId, cx: &mut Context<Self>) {
+        let Some(report) = self.report.clone() else {
+            return;
+        };
+        let (Some((tabla_a, columna_a)), Some((tabla_b, columna_b))) =
+            (report.model.column(primera), report.model.column(segunda))
+        else {
+            self.conexion = Conexion::Apagada;
+            cx.notify();
+            return;
+        };
+        if primera == segunda {
+            self.stats = Some("una relacion une dos columnas distintas".to_string());
+            cx.notify();
+            return;
+        }
+        // El lado UNO es el que tiene la columna como clave. Cuando ninguna lo es, el par no
+        // tiene direccion clara y se avisa en vez de inventarla: una relacion al reves manda
+        // los filtros por el camino equivocado sin dar ningun error.
+        let es_clave =
+            |table: &datan_model::Table, column: &datan_model::Column| {
+                table.key_columns.contains(&column.id)
+            };
+        let (from, to) = if es_clave(tabla_a, columna_a) {
+            ((tabla_a, columna_a), (tabla_b, columna_b))
+        } else if es_clave(tabla_b, columna_b) {
+            ((tabla_b, columna_b), (tabla_a, columna_a))
+        } else {
+            self.stats = Some(format!(
+                "ni {}[{}] ni {}[{}] son clave de su tabla: la relacion no tiene lado UNO",
+                tabla_a.name, columna_a.name, tabla_b.name, columna_b.name
+            ));
+            self.conexion = Conexion::Apagada;
+            cx.notify();
+            return;
+        };
+        let Some(database) = self.database.clone() else {
+            return;
+        };
+        let mut doc = match model_doc::ModelDoc::load(&database) {
+            Ok(doc) => doc,
+            Err(error) => {
+                self.stats = Some(format!("{error}"));
+                self.conexion = Conexion::Apagada;
+                cx.notify();
+                return;
+            }
+        };
+        doc.upsert_relationship(model_doc::RelationshipDoc::new(
+            from.0.name.clone(),
+            from.1.name.clone(),
+            to.0.name.clone(),
+            to.1.name.clone(),
+        ));
+        if let Err(error) = doc.save(&database) {
+            self.stats = Some(format!("{error}"));
+            self.conexion = Conexion::Apagada;
+            cx.notify();
+            return;
+        }
+
+        let mut model = report.model.clone();
+        self.model_warnings = doc.apply(&mut model);
+        self.report = Some(
+            Report::new(model)
+                .attached_to(&report.qualifier)
+                .with_dimensions(self.selection.dimensions.clone())
+                .with_measures(self.selection.measures.clone()),
+        );
+        self.stats = Some(format!(
+            "relacion {}[{}] a {}[{}]",
+            from.0.name, from.1.name, to.0.name, to.1.name
+        ));
+        self.conexion = Conexion::Apagada;
+        self.refresh(cx);
     }
 
     /// Cambia el rol de una relationship y lo guarda en el documento del modelo.
@@ -883,6 +999,27 @@ impl Datan {
 
     /// Cambia una dimension o medida de la seleccion y vuelve a correr el informe.
     fn toggle(&mut self, column: ObjectId, is_measure: bool, cx: &mut Context<Self>) {
+        // Conectar dos columnas manda sobre la seleccion: el usuario esta armando el modelo,
+        // no el informe, y un clic que ademas cambiara la matriz seria dos acciones a la vez.
+        if self.conexion != Conexion::Apagada {
+            if is_measure {
+                self.stats =
+                    Some("una relacion une columnas, no medidas".to_string());
+                cx.notify();
+                return;
+            }
+            match self.conexion {
+                Conexion::Apagada => {}
+                Conexion::PrimerLado => {
+                    self.conexion = Conexion::SegundoLado(column);
+                    self.stats = Some("elige la segunda columna".to_string());
+                    cx.notify();
+                }
+                Conexion::SegundoLado(primera) => self.conectar(primera, column, cx),
+            }
+            return;
+        }
+
         if is_measure {
             // El Top N ordena por UNA medida. Cuando esa medida sale de la seleccion, el
             // recorte no tiene por que ordenar y se suelta: dejarlo puesto seria un ajuste
@@ -2876,22 +3013,34 @@ impl Datan {
     /// y se guarda en el documento del modelo.
     fn render_relaciones(&self, model: &Model, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let mut list = div().flex_col().gap_1().mt_2();
-        if model.relationships.is_empty() {
-            list = list.child(div().px_2().pt_2().child(components::nota(
+        let conectando = self.conexion != Conexion::Apagada;
+        let mut list = div()
+            .flex_col()
+            .gap_1()
+            .mt_2()
+            .child(div().px_2().pt_2().child(components::nota(&theme, "Relaciones")));
+
+        // En modo Lectura no se dibuja: no hay nada que conectar.
+        if !self.lectura {
+            list = list.child(div().px_2().child(components::fila_dato(
                 &theme,
-                "Relaciones",
+                "rel-conectar",
+                if conectando {
+                    "Cancelar"
+                } else {
+                    "Conectar dos columnas"
+                },
+                conectando,
+                cx.listener(|view, _event, _window, cx| view.comenzar_conexion(cx)),
             )));
-            list = list.child(div().px_2().pb_2().child(components::nota(
+        }
+
+        if model.relationships.is_empty() {
+            return list.child(div().px_2().pb_2().child(components::nota(
                 &theme,
                 "la base no declara ninguna",
             )));
-            return list;
         }
-        list = list.child(div().px_2().pt_2().child(components::nota(
-            &theme,
-            "Relaciones",
-        )));
 
         for relating in &model.relationships {
             let (Some((from_table, from_column)), Some((to_table, to_column))) = (
@@ -2906,9 +3055,7 @@ impl Datan {
             let origen = format!("{}[{}]", from_table.name, from_column.name);
             let destino = format!("a {}[{}]", to_table.name, to_column.name);
             let row = div()
-                .id(ElementId::Name(
-                    format!("rel-{}-{}", from.0, to.0).into(),
-                ))
+                .id(ElementId::Name(format!("rel-{}-{}", from.0, to.0).into()))
                 .flex()
                 .items_center()
                 .gap_1()
@@ -2953,11 +3100,13 @@ impl Datan {
             if self.lectura {
                 list = list.child(row);
             } else {
-                list = list.child(row.cursor_pointer().hover(|style| style.bg(theme.list_hover)).on_click(
-                    cx.listener(move |view, _event, _window, cx| {
-                        view.toggle_relationship(from, to, cx);
-                    }),
-                ));
+                list = list.child(
+                    row.cursor_pointer()
+                        .hover(|style| style.bg(theme.list_hover))
+                        .on_click(cx.listener(move |view, _event, _window, cx| {
+                            view.toggle_relationship(from, to, cx);
+                        })),
+                );
             }
         }
         list
