@@ -1692,7 +1692,11 @@ la tabla 2 que agrupa". Hasta ahora no habia forma de arreglarlo desde la app.
   validar y se aplica igual: negar la relacion dejaria el informe sin ninguna salida.
 - El interruptor de la app cambia el rol y lo guarda en el documento ANTES de tocar la vista,
   igual que al crear una medida. Una relacion que vive solo en pantalla se pierde al cerrar.
-- En modo Lectura el rol se ve y no se toca.
+- El boton "Conectar dos columnas" arma un modo de dos clics sobre el panel: la primera
+  columna elige un lado y la segunda cierra. El lado UNO es el que tiene la columna como
+  clave; si ninguna la tiene, se avisa y no se crea, porque una relacion al reves manda los
+  filtros por el camino equivocado sin dar error.
+- En modo Lectura el rol se ve y no se toca, y el boton no se dibuja.
 
 ### Resultado
 

@@ -930,6 +930,9 @@ impl Datan {
                 match built {
                     Ok((model, report, avisos, jerarquias)) => {
                         view.selection = suggested(&model);
+                        // El modo de conectar dos columnas es del modelo anterior: los ids
+                        // que tenia no existen en este.
+                        view.conexion = Conexion::Apagada;
                         view.report = Some(report);
                         view.model_warnings = avisos;
                         view.jerarquias = jerarquias;
