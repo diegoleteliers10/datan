@@ -109,6 +109,24 @@ pub struct Relationship {
     pub assume_referential_integrity: bool,
 }
 
+/// De donde sale el valor de una columna.
+///
+/// La distincion es un tipo, no un `Option<String>`: una columna con expresion y otra sin
+/// ella se tratan distinto en TODOS los consumidores, y un campo opcional deja que cada uno
+/// decida por su cuenta si una columna calculada tiene nombre fisico. Esa decision tomada dos
+/// veces es la clase de bug que solo aparece al ejecutar el SQL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnOrigin {
+    /// Una columna fisica. Su valor lo lee el origen de datos por su nombre.
+    Physical,
+    /// Una columna calculada: su valor sale de una expresion DAX evaluada fila a fila sobre
+    /// su propia tabla. El texto esta sin parsear, igual que el de una medida.
+    ///
+    /// A diferencia de una medida, que es una expresion por celda de grupo, esta es una
+    /// expresion por FILA. Es la `calculated column` de Power BI.
+    Calculated(String),
+}
+
 /// Una columna de una tabla del modelo.
 #[derive(Debug, Clone)]
 pub struct Column {
@@ -119,6 +137,7 @@ pub struct Column {
     /// de Power BI: rompe la afinidad de tipo.
     pub sort_by: Option<ObjectId>,
     pub is_hidden: bool,
+    pub origin: ColumnOrigin,
 }
 
 impl Column {
@@ -129,6 +148,33 @@ impl Column {
             data_type,
             sort_by: None,
             is_hidden: false,
+            origin: ColumnOrigin::Physical,
+        }
+    }
+
+    /// Una columna cuyo valor sale de una expresion DAX por fila.
+    pub fn calculated(
+        id: ObjectId,
+        name: impl Into<String>,
+        data_type: DataType,
+        expression: impl Into<String>,
+    ) -> Self {
+        Self {
+            origin: ColumnOrigin::Calculated(expression.into()),
+            ..Self::new(id, name, data_type)
+        }
+    }
+
+    /// Si su valor sale de una expresion en vez de una columna fisica.
+    pub fn is_calculated(&self) -> bool {
+        matches!(self.origin, ColumnOrigin::Calculated(_))
+    }
+
+    /// El texto DAX de la expresion, si la columna es calculada.
+    pub fn expression(&self) -> Option<&str> {
+        match &self.origin {
+            ColumnOrigin::Physical => None,
+            ColumnOrigin::Calculated(expression) => Some(expression.as_str()),
         }
     }
 }
@@ -479,5 +525,23 @@ mod tests {
         assert_eq!(DataType::Moneda.to_sql(), "BIGINT");
         assert!(DataType::Moneda.is_numeric());
         assert!(!DataType::Date.is_numeric());
+    }
+
+    #[test]
+    fn una_columna_normal_no_tiene_expresion() {
+        let column = Column::new(ObjectId(60), "total", DataType::Moneda);
+        assert!(!column.is_calculated());
+        assert_eq!(column.expression(), None);
+    }
+
+    #[test]
+    fn una_columna_calculada_guarda_su_expresion() {
+        let column = Column::calculated(ObjectId(61), "anio", DataType::Integer, "YEAR('ventas'[fecha])");
+        assert!(column.is_calculated());
+        assert_eq!(column.expression(), Some("YEAR('ventas'[fecha])"));
+        // Los demas campos quedan en su valor por defecto, como una columna normal.
+        assert_eq!(column.sort_by, None);
+        assert!(!column.is_hidden);
+        assert_eq!(column.data_type, DataType::Integer);
     }
 }

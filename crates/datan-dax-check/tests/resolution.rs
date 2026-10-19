@@ -4,7 +4,7 @@
 //! la semantica de DAX, no solo la implementacion.
 
 use datan_dax_check::{
-    CheckError, CheckedExpr, check, find_measure_cycle, model_is_valid,
+    CheckError, CheckedExpr, check, check_row, find_measure_cycle, model_is_valid,
 };
 use datan_model::{
     Cardinality, Column, DataType, FilterDirection, Measure, Model, ObjectId, Relationship,
@@ -340,4 +340,45 @@ fn los_corchetes_miguen_siempre_una_columna() {
     let quoted = check("['Qty']", &model).expect("chequea");
     assert!(matches!(plain.expr, CheckedExpr::Measure { .. }));
     assert!(matches!(quoted.expr, CheckedExpr::Measure { .. }));
+}
+
+#[test]
+fn en_contexto_de_fila_una_columna_de_esa_tabla_resuelve_sin_calificar() {
+    // Una columna calculada se evalua fila a fila sobre SU tabla. `SaleId` esta en
+    // `Fact Sales` y no tiene una medida con el mismo nombre, asi que sin calificar resuelve
+    // a la columna.
+    let model = model();
+    let checked = check_row("SaleId * 2", &model, ObjectId(1)).expect("chequea");
+    let CheckedExpr::Binary { left, .. } = &checked.expr else {
+        panic!("se esperaba una operacion, se obtuvo {:?}", checked.expr)
+    };
+    let CheckedExpr::Column { column, .. } = left.as_ref() else {
+        panic!("se esperaba una columna")
+    };
+    assert_eq!(*column, ObjectId(10));
+}
+
+#[test]
+fn en_contexto_de_fila_una_columna_de_otra_tabla_es_error() {
+    // `Price` vive en `Dim Product`. Dentro de una columna calculada sobre `Fact Sales` no
+    // hay fila de la dimension, y el mensaje dice exactamente eso.
+    let model = model();
+    let error = check_row("[Price] * 2", &model, ObjectId(1)).expect_err("deberia fallar");
+    assert!(
+        matches!(error, CheckError::ColumnOutsideRowContext { .. }),
+        "esperaba error de contexto de fila, se obtuvo {error}"
+    );
+}
+
+#[test]
+fn una_columna_calculada_acepta_una_referencia_calificada_y_una_funcion() {
+    // El caso de uso real: derivar un periodo de la fecha. La referencia calificada vale y
+    // la funcion escalar pasa como cualquier llamada.
+    let model = model();
+    let checked = check_row("YEAR('Fact Sales'[SaleDate])", &model, ObjectId(1)).expect("chequea");
+    let CheckedExpr::Call { name, args, .. } = &checked.expr else {
+        panic!("se esperaba una llamada, se obtuvo {:?}", checked.expr)
+    };
+    assert_eq!(name, "YEAR");
+    assert!(matches!(&args[0], CheckedExpr::Column { column, .. } if *column == ObjectId(14)));
 }

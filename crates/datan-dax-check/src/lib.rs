@@ -97,9 +97,28 @@ pub fn check(source: &str, model: &Model) -> Result<Checked, CheckError> {
 
 /// Parsea y chequea una expresion que ya viene en AST.
 pub fn check_expr(parsed: &Expr, model: &Model) -> Result<Checked, CheckError> {
+    checked_in(parsed, model, Context::Filter)
+}
+
+/// Parsea y chequea la expresion de una columna calculada.
+///
+/// El contexto es de FILA sobre su propia tabla, no de filtro. Es la diferencia entre una
+/// medida y una columna calculada: la columna se evalua fila a fila, asi que una columna
+/// desnuda de esa tabla resuelve sin calificar y la de otra tabla es un error. Es la misma
+/// regla que el cuerpo de un `SUMX`, aplicada a la expresion entera.
+pub fn check_row(source: &str, model: &Model, table: ObjectId) -> Result<Checked, CheckError> {
+    let parsed = datan_dax_syntax::parse(source).map_err(|error| CheckError::UnknownName {
+        name: format!("error de sintaxis: {error}"),
+        span: error.span,
+    })?;
+    checked_in(&parsed, model, Context::Row(table))
+}
+
+/// El chequeo comun a una medida y a una columna calculada: mismo modelo, distinto contexto.
+fn checked_in(parsed: &Expr, model: &Model, context: Context) -> Result<Checked, CheckError> {
     let mut checker = Checker {
         model,
-        context: Context::Filter,
+        context,
         variables: HashMap::new(),
         dependencies: BTreeSet::new(),
         diagnostics: Vec::new(),
