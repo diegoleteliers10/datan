@@ -38,13 +38,20 @@ impl SourceMap {
     /// vive en una tabla de DuckDB llamada `Dim Product`.
     ///
     /// Conveniente, y lo que hace el spike. En una app real el mapeo sale de la conexion.
+    ///
+    /// Una columna CALCULADA no entra al mapa de nombres: no tiene columna fisica que leer.
+    /// Asi `column()` falla en voz alta si el fast path la intenta bajar, en vez de generar un
+    /// `t0."Margen"` sobre una columna que no existe. El duenio si queda registrado: la
+    /// columna pertenece a su tabla, lo que no tiene es nombre fisico.
     pub fn from_model(model: &Model) -> Self {
         let mut map = Self::default();
         for table in &model.tables {
             map.tables.insert(table.id, table.name.clone());
             for column in &table.columns {
-                map.columns.insert(column.id, column.name.clone());
                 map.column_owners.insert(column.id, table.id);
+                if !column.is_calculated() {
+                    map.columns.insert(column.id, column.name.clone());
+                }
             }
         }
         map

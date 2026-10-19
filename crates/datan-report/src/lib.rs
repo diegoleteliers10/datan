@@ -263,7 +263,7 @@ impl Report {
             if atoms.outputs.is_empty() {
                 return Err(self.no_shape(members));
             }
-            let values: Vec<String> = if atoms.needs_interpreter() {
+            let values: Vec<String> = if self.por_el_interprete(atoms) {
                 let src = source.ok_or_else(|| ReportError::NoSource {
                     measure: members
                         .first()
@@ -272,7 +272,8 @@ impl Report {
                         .unwrap_or("?")
                         .to_string(),
                 })?;
-                let interpreter = Interpreter::new(&self.model, src);
+                let calculadas = datan_dax_eval::CalculatedSource::new(&self.model, src);
+                let interpreter = Interpreter::new(&self.model, &calculadas);
                 interpreter
                     .evaluate_totals(&atoms.atoms, &atoms.outputs, &self.filters)
                     .map_err(|e| ReportError::Interp(e.to_string()))?
@@ -437,6 +438,39 @@ impl Report {
         Ok(plans)
     }
 
+    /// Si esta lectura tiene que ir por el interprete.
+    ///
+    /// Ademas de los atomos que el fast path no sabe bajar, una columna CALCULADA solo la
+    /// resuelve el interprete: no tiene nombre fisico, `SourceMap` no la encuentra y el SQL
+    /// falla al ejecutarse. Decidirlo aqui, y no reaccionar al error, es lo que hace que la
+    /// matriz salga en vez de cortarse con un error de columna.
+    fn por_el_interprete(&self, atoms: &AtomSet) -> bool {
+        atoms.needs_interpreter() || self.usa_calculadas(atoms)
+    }
+
+    /// Si el plan toca una columna calculada en cualquier posicion: el agrupamiento, una hoja
+    /// de una medida o un filtro. Los tres acaban pidiendo un nombre fisico al `SourceMap`, y
+    /// los tres tienen que rutear por el interprete.
+    fn usa_calculadas(&self, atoms: &AtomSet) -> bool {
+        let calculada = |column: ObjectId| {
+            self.model
+                .column(column)
+                .is_some_and(|(_, definition)| definition.is_calculated())
+        };
+        atoms
+            .grouping
+            .iter()
+            .copied()
+            .chain(
+                atoms
+                    .atoms
+                    .iter()
+                    .flat_map(|atom| atom.referenced_columns()),
+            )
+            .chain(self.filters.filtered_columns())
+            .any(calculada)
+    }
+
     /// Corre el informe.
     ///
     /// `source` solo se usa para las medidas que caen al interprete. Sin el, un informe con
@@ -479,7 +513,7 @@ impl Report {
             let measure_columns = atoms.outputs.len();
             let produced = self.dimensions.len() + measure_columns;
 
-            let (cells, kinds_del_plan) = if atoms.needs_interpreter() {
+            let (cells, kinds_del_plan) = if self.por_el_interprete(atoms) {
                 let source = source.ok_or_else(|| ReportError::NoSource {
                     measure: members
                         .first()
@@ -487,7 +521,8 @@ impl Report {
                         .map(|id| self.measure_name(*id).unwrap_or("?").to_string())
                         .unwrap_or_else(|| "?".to_string()),
                 })?;
-                let interpreter = Interpreter::new(&self.model, source);
+                let calculadas = datan_dax_eval::CalculatedSource::new(&self.model, source);
+                let interpreter = Interpreter::new(&self.model, &calculadas);
                 if con_subtotales {
                     subtotales_del_interprete(&interpreter, atoms, &self.filters, &self.dimensions)?
                 } else {

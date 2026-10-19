@@ -101,6 +101,127 @@ pub trait DataSource {
     fn table_len(&self, table: ObjectId) -> usize;
 }
 
+/// Un origen que resuelve las columnas CALCULADAS del modelo sobre otro origen.
+///
+/// El interprete lee cada columna por su id y no le importa de donde sale el valor. Envolver
+/// el origen real deja que una columna calculada se comporte como una fisica en TODO el
+/// interprete: agrupar por ella, filtrarla, ordenarla y agregarla pasan por el mismo camino.
+/// Sin el envoltorio habria una rama paralela por cada uno de esos usos, y olvidar una es un
+/// fallo silencioso.
+///
+/// La expresion se evalua fila a fila sobre su tabla, se materializa una vez y se cachea. Una
+/// columna que el agrupamiento lee dos veces se calcula una sola vez.
+///
+/// # Como se compone
+///
+/// ```ignore
+/// let calculadas = CalculatedSource::new(&model, &source);
+/// let interprete = Interpreter::new(&model, &calculadas);
+/// ```
+pub struct CalculatedSource<'a> {
+    model: &'a Model,
+    inner: &'a dyn DataSource,
+    cache: std::sync::Mutex<HashMap<ObjectId, std::sync::Arc<dyn ColumnView>>>,
+    /// Las columnas calculadas en curso. Un ciclo `A -> B -> A` se corta aqui en vez de
+    /// desbordar la pila: las dos se estarian calculando a la vez.
+    in_progress: std::sync::Mutex<Vec<ObjectId>>,
+}
+
+impl<'a> CalculatedSource<'a> {
+    pub fn new(model: &'a Model, inner: &'a dyn DataSource) -> Self {
+        Self {
+            model,
+            inner,
+            cache: std::sync::Mutex::new(HashMap::new()),
+            in_progress: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Calcula la columna fila a fila. `None` si la expresion no chequea o hay un ciclo.
+    fn compute(&self, expression: &str, owner: ObjectId) -> Option<Vec<Scalar>> {
+        let checked = datan_dax_check::check_row(expression, self.model, owner).ok()?;
+        // Un interprete sobre ESTA capa: una columna calculada que referencia a otra pasa por
+        // la misma cache y el mismo guardia de ciclos.
+        let interpreter = Interpreter::new(self.model, self);
+        interpreter.evaluate_rows(&checked.expr, owner).ok()
+    }
+}
+
+impl DataSource for CalculatedSource<'_> {
+    fn column(&self, column: ObjectId) -> Option<std::sync::Arc<dyn ColumnView>> {
+        let (table, definition) = self.model.column(column)?;
+        let Some(expression) = definition.expression() else {
+            return self.inner.column(column);
+        };
+
+        if let Some(hit) = self.cache().get(&column) {
+            return Some(hit.clone());
+        }
+        if self.in_progress().contains(&column) {
+            return None;
+        }
+
+        self.in_progress().push(column);
+        let computed = self.compute(expression, table.id);
+        self.in_progress().pop();
+
+        let built: std::sync::Arc<dyn ColumnView> =
+            std::sync::Arc::new(CalculatedColumn { values: computed? });
+        self.cache().insert(column, built.clone());
+        Some(built)
+    }
+
+    fn table_len(&self, table: ObjectId) -> usize {
+        self.inner.table_len(table)
+    }
+}
+
+impl CalculatedSource<'_> {
+    fn cache(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<ObjectId, std::sync::Arc<dyn ColumnView>>> {
+        lock_recover(&self.cache)
+    }
+
+    fn in_progress(&self) -> std::sync::MutexGuard<'_, Vec<ObjectId>> {
+        lock_recover(&self.in_progress)
+    }
+}
+
+/// Una columna calculada ya materializada, una vez por columna.
+struct CalculatedColumn {
+    values: Vec<Scalar>,
+}
+
+impl ColumnView for CalculatedColumn {
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn value_at(&self, row: usize) -> Scalar {
+        self.values.get(row).cloned().unwrap_or(Scalar::Blank)
+    }
+
+    fn non_blank_count(&self) -> usize {
+        self.values.iter().filter(|value| !value.is_blank()).count()
+    }
+
+    fn distinct_count(&self) -> usize {
+        let distinct: BTreeSet<String> = self
+            .values
+            .iter()
+            .filter(|value| !value.is_blank())
+            .map(scalar_key)
+            .collect();
+        distinct.len()
+    }
+}
+
+/// Un candado emponzonado no puede tumbar el calculo de una columna.
+fn lock_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// El resultado de evaluar un conjunto de atomos en todas las celdas de grupo.
 ///
 /// Cada fila son los valores de agrupamiento seguidos de los valores de los atomos, en el
@@ -214,8 +335,9 @@ fn boolean_values(left: &Scalar, right: &Scalar, op: BinaryOp) -> Scalar {
 /// Una funcion escalar de DAX sobre valores ya calculados.
 ///
 /// Lo que no esta en la lista devuelve BLANK, que es lo que DAX hace con un argumento de tipo
-/// equivocado. La lista coincide con la de `Shape::Call`: la forma no se construye para una
-/// funcion que no este aqui.
+/// equivocado. La lista cubre lo que `Shape::Call` sabe construir MAS las funciones de parte
+/// de fecha, que solo hacen falta en contexto de fila: una columna calculada deriva el ano o
+/// el mes de una fecha, y `shape_of` no las usa porque a nivel de medida no significan nada.
 fn call_scalar(name: &str, args: &[Scalar]) -> Scalar {
     match (name, args) {
         // `DIVIDE(a, b)` da BLANK si `b` es cero o BLANK. Es exactamente la division binaria,
@@ -225,6 +347,14 @@ fn call_scalar(name: &str, args: &[Scalar]) -> Scalar {
             Scalar::Blank => alternate.clone(),
             value => value,
         },
+        // La parte de una fecha. Sobre un valor que no es fecha el resultado es BLANK, igual
+        // que `YEAR` de un texto en DAX.
+        ("YEAR", [Scalar::Date(day)]) => Scalar::Integer(crate::time::year_of(*day) as i64),
+        ("MONTH", [Scalar::Date(day)]) => Scalar::Integer(crate::time::month_of(*day) as i64),
+        ("DAY", [Scalar::Date(day)]) => Scalar::Integer(crate::time::day_of(*day) as i64),
+        ("QUARTER", [Scalar::Date(day)]) => {
+            Scalar::Integer(crate::time::quarter_of(*day) as i64)
+        }
         ("IF", [condition, yes, no]) => {
             if truthy(condition) {
                 yes.clone()
@@ -765,7 +895,21 @@ impl<'a> Interpreter<'a> {
             CheckedExpr::Binary { op, left, right, .. } => {
                 let left = self.eval_with(left, values, row)?;
                 let right = self.eval_with(right, values, row)?;
-                binary_numbers(&left, &right, *op)
+                if is_boolean_op(*op) {
+                    boolean_values(&left, &right, *op)
+                } else {
+                    binary_numbers(&left, &right, *op)
+                }
+            }
+            // Una funcion escalar sobre valores de fila: `IF`, `DIVIDE`, `YEAR` y las demas.
+            // Sin esta rama, una columna calculada con `IF` o con `YEAR(fecha)` no se podia
+            // evaluar fila a fila, que es justamente lo que una columna calculada hace.
+            CheckedExpr::Call { name, args, .. } => {
+                let args: Vec<Scalar> = args
+                    .iter()
+                    .map(|arg| self.eval_with(arg, values, row))
+                    .collect::<Result<_, _>>()?;
+                call_scalar(name, &args)
             }
             other => return Err(InterpError::Unsupported(format!("{other:?}"))),
         })
@@ -1091,6 +1235,24 @@ impl<'a> Interpreter<'a> {
             // Sin forma: una columna por atomo, en el orden de la tanda.
             None => result.values.clone(),
         })
+    }
+
+    /// El valor de una expresion en contexto de fila, para TODAS las filas de su tabla.
+    ///
+    /// Es lo que necesita una columna calculada: la misma evaluacion por fila que el cuerpo de
+    /// un iterador, aplicada a cada fila de la tabla en vez de a las filas de una celda. La
+    /// columna se materializa entera porque su valor se puede pedir en cualquier orden.
+    pub fn evaluate_rows(
+        &self,
+        expression: &CheckedExpr,
+        table: ObjectId,
+    ) -> Result<Vec<Scalar>, InterpError> {
+        let length = self.source.table_len(table);
+        let rows: Vec<usize> = (0..length).collect();
+        let values = self.materialize(expression, table, &rows)?;
+        (0..length)
+            .map(|row| self.eval_with(expression, &values, row))
+            .collect()
     }
 
     /// Los indices de fila de una tabla que sobreviven al contexto de filtro.

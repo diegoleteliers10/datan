@@ -39,15 +39,14 @@ pub use filter::{
     ColumnInfo, Filter, FilterContext, FilterOperator, FilterSource, FilterValue,
 };
 pub use interp::{
-    CellResult, ColumnView, DataSource, DateColumn, IntColumn, InterpError, Interpreter, MemorySource,
-    Scalar,
-    TextColumn,
+    CalculatedSource, CellResult, ColumnView, DataSource, DateColumn, IntColumn, InterpError,
+    Interpreter, MemorySource, Scalar, TextColumn,
 };
 pub use modifiers::{Modifier, ModifierError, apply_modifiers};
 pub use cycle::has_bidirectional_cycle;
 pub use time::{
-    CalendarUnit, DateRange, TimeError, TimeFunction, date_column, filters, format_date,
-    parse_day, shift,
+    CalendarUnit, DateRange, TimeError, TimeFunction, date_column, day_of, filters, format_date,
+    month_of, parse_day, quarter_of, shift, year_of,
 };
 
 use datan_dax_check::{Checked, check};

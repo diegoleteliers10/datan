@@ -310,6 +310,27 @@ pub fn format_date(day: i32) -> String {
     format!("{year:04}-{month:02}-{d:02}")
 }
 
+/// El ano de un dia. Es la parte de `YEAR(fecha)` en el contexto de fila de una columna
+/// calculada: derivar un ano de una fecha es la jerarquia de fecha mas comun que hay.
+pub fn year_of(day: i32) -> i32 {
+    civil_from_days(day).0
+}
+
+/// El mes de un dia, de 1 a 12.
+pub fn month_of(day: i32) -> i32 {
+    civil_from_days(day).1 as i32
+}
+
+/// El dia del mes, de 1 a 31.
+pub fn day_of(day: i32) -> i32 {
+    civil_from_days(day).2 as i32
+}
+
+/// El trimestre de un dia, de 1 a 4.
+pub fn quarter_of(day: i32) -> i32 {
+    (month_of(day) - 1) / 3 + 1
+}
+
 /// El dia desde 1970 que representa un texto, en las dos formas en que un dia llega a la
 /// pantalla.
 ///

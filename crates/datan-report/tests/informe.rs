@@ -6,7 +6,8 @@
 //! y que pinchar una celda cambie el filtro de todas las medidas a la vez.
 
 use datan_dax_eval::FilterValue;
-use datan_model::{DataType, Measure, ObjectId};
+use datan_model::{Column, DataType, Measure, ObjectId};
+use datan_report::source::DuckSource;
 use datan_report::{Header, Matrix, Report, RowKind, TopN};
 use datan_testkit::{engine, memory_source, model, Y2024};
 
@@ -1044,4 +1045,118 @@ fn el_top_n_cuesta_dos_lecturas() {
         .expect("cuenta");
 
     assert_eq!(dos, una * 2);
+}
+
+/// La columna calculada de la suite: `bruto = qty * 2` sobre `fact_sales`.
+const FACT_BRUTO: ObjectId = ObjectId(40);
+/// La medida que la agrega. Fuerza el camino del interprete: la columna no tiene nombre
+/// fisico que el SQL pueda leer.
+const BRUTO_MEASURE: ObjectId = ObjectId(200);
+
+/// El modelo del testkit con una columna calculada encima de la tabla de hechos.
+fn modelo_con_calculada() -> datan_model::Model {
+    let mut model = model();
+    model
+        .tables
+        .iter_mut()
+        .find(|table| table.name == "fact_sales")
+        .expect("la tabla de hechos")
+        .columns
+        .push(Column::calculated(
+            FACT_BRUTO,
+            "bruto",
+            DataType::Integer,
+            "'fact_sales'[qty] * 2",
+        ));
+    model
+        .measures
+        .push(Measure::new(
+            BRUTO_MEASURE,
+            "Bruto",
+            "SUM('fact_sales'[bruto])",
+        ));
+    model
+}
+
+#[test]
+fn una_columna_calculada_da_el_mismo_numero_que_su_expresion_a_mano() {
+    // `Bruto = SUM(bruto)` donde `bruto = qty * 2` tiene que dar el doble de `Qty`, fila a
+    // fila. La de la izquierda va por el interprete sobre `DuckSource`; la de la derecha por
+    // el fast path SQL. Es la comparacion que el arnes diferencial no puede hacer solo,
+    // porque una columna calculada no tiene una version SQL.
+    let engine = engine().expect("motor");
+    let model = modelo_con_calculada();
+    let source = DuckSource::new(&engine, &model, "");
+
+    let calculada = Report::new(model.clone())
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![BRUTO_MEASURE])
+        .execute(&engine, Some(&source))
+        .expect("corre");
+    let sql = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")])
+        .execute(&engine, None)
+        .expect("corre");
+
+    assert_eq!(calculada.row_count(), sql.row_count());
+    for row in 0..calculada.row_count() {
+        let bruto: f64 = calculada.cell(row, 1).unwrap_or("").parse().expect("bruto");
+        let qty: f64 = sql.cell(row, 1).unwrap_or("").parse().expect("qty");
+        assert_eq!(bruto, qty * 2.0, "fila {row}: {bruto} vs {qty}");
+    }
+}
+
+#[test]
+fn la_matriz_agrupa_por_una_columna_calculada() {
+    // Agrupar por `bruto` es agrupar por `qty`, con las claves al doble. Es la comprobacion
+    // de que `distinct_values` lee una columna calculada igual que una fisica.
+    //
+    // Las claves se comparan por numero y no por fila: `qty` tiene NULL, y un NULL en la
+    // dimension es una fila mas del SQL y ninguna del interprete. Esa diferencia es anterior
+    // a las columnas calculadas y no es lo que este test mira.
+    let engine = engine().expect("motor");
+    let model = modelo_con_calculada();
+    let source = DuckSource::new(&engine, &model, "");
+
+    let por_bruto = Report::new(model.clone())
+        .with_dimensions(vec![FACT_BRUTO])
+        .with_measures(vec![measure("Qty")])
+        .execute(&engine, Some(&source))
+        .expect("corre");
+    let por_qty = Report::new(model)
+        .with_dimensions(vec![ObjectId(11)])
+        .with_measures(vec![measure("Qty")])
+        .execute(&engine, None)
+        .expect("corre");
+
+    let mut esperado = std::collections::BTreeMap::new();
+    for row in 0..por_qty.row_count() {
+        if let Ok(key) = por_qty.cell(row, 0).unwrap_or("").parse::<i64>() {
+            esperado.insert(key * 2, por_qty.cell(row, 1).unwrap_or("").to_string());
+        }
+    }
+    let mut obtenido = std::collections::BTreeMap::new();
+    for row in 0..por_bruto.row_count() {
+        if let Ok(key) = por_bruto.cell(row, 0).unwrap_or("").parse::<i64>() {
+            obtenido.insert(key, por_bruto.cell(row, 1).unwrap_or("").to_string());
+        }
+    }
+
+    assert_eq!(obtenido, esperado);
+    assert!(!obtenido.is_empty());
+}
+
+#[test]
+fn una_columna_fisica_sigue_yendo_por_el_fast_path() {
+    // El ruteo por el interprete es solo para lo que toca una calculada. Sin esto, una
+    // columna calculada en el modelo mandaria TODOS los informes al interprete.
+    let model = modelo_con_calculada();
+    let consultas = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")])
+        .query_count()
+        .expect("cuenta");
+
+    assert_eq!(consultas, 1, "una dimension fisica es una consulta");
 }
