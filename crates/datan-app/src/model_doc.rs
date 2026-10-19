@@ -25,7 +25,10 @@
 
 use std::path::{Path, PathBuf};
 
-use datan_model::{Column, DataType, Measure, Model, ObjectId};
+use datan_model::{
+    Cardinality, Column, DataType, FilterDirection, Measure, Model, ObjectId, Relationship,
+    RelationshipRole,
+};
 use serde::{Deserialize, Serialize};
 
 /// El archivo, con las dos listas que el formato TOML exige en la raiz.
@@ -37,6 +40,8 @@ struct File {
     column: Vec<ColumnDoc>,
     #[serde(default)]
     jerarquia: Vec<JerarquiaDoc>,
+    #[serde(default)]
+    relacion: Vec<RelationshipDoc>,
 }
 
 /// Una medida del usuario.
@@ -118,12 +123,77 @@ impl ColumnDoc {
     }
 }
 
+/// Una relationship del documento.
+///
+/// Dos usos, y el mismo tipo para los dos: ajustar la que infirio el catalogo, o declarar una
+/// que el catalogo no puede ver. La introspeccion solo lee foreign keys, y una base con datos
+/// reales casi nunca las tiene completas: sin esto, agrupar por una dimension que no declara
+/// la constraint falla con "no hay relationship entre la tabla de hechos y la tabla 2".
+///
+/// `from` es el lado UNO (la clave de la dimension) y `to` el lado MUCHOS (la clave foranea
+/// de los hechos). Si estan al reves, el filtro propaga en la direccion equivocada y los
+/// numeros salen mal sin dar error.
+///
+/// ```toml
+/// [[relacion]]
+/// from_table = "catalogo_productos"
+/// from_column = "id"
+/// to_table = "product_boleta"
+/// to_column = "product_id"
+/// # Opcionales. Sin ellos, activa y de la dimension a los hechos.
+/// role = "activa"     # activa | inactiva
+/// direction = "simple" # simple | ambas | ninguna
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationshipDoc {
+    pub from_table: String,
+    pub from_column: String,
+    pub to_table: String,
+    pub to_column: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+}
+
+impl RelationshipDoc {
+    pub fn new(
+        from_table: impl Into<String>,
+        from_column: impl Into<String>,
+        to_table: impl Into<String>,
+        to_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            from_table: from_table.into(),
+            from_column: from_column.into(),
+            to_table: to_table.into(),
+            to_column: to_column.into(),
+            role: None,
+            direction: None,
+        }
+    }
+
+    /// La misma relacion, con el rol ya escrito como texto.
+    pub fn con_rol(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
+        self
+    }
+
+    pub fn activa(&self) -> bool {
+        !self
+            .role
+            .as_deref()
+            .is_some_and(|role| role.eq_ignore_ascii_case("inactiva"))
+    }
+}
+
 /// El documento. Se lee, se edita y se escribe entero: es un archivo de decenas de lineas.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelDoc {
     pub measures: Vec<MeasureDoc>,
     pub columns: Vec<ColumnDoc>,
     pub jerarquias: Vec<JerarquiaDoc>,
+    pub relaciones: Vec<RelationshipDoc>,
 }
 
 /// Una jerarquia del usuario: niveles ordenados de UNA misma tabla.
@@ -244,6 +314,7 @@ impl ModelDoc {
             measures: file.measure,
             columns: file.column,
             jerarquias: file.jerarquia,
+            relaciones: file.relacion,
         })
     }
 
@@ -261,6 +332,7 @@ impl ModelDoc {
             measure: self.measures.clone(),
             column: self.columns.clone(),
             jerarquia: self.jerarquias.clone(),
+            relacion: self.relaciones.clone(),
         };
         let text = toml::to_string_pretty(&file).map_err(|source| DocError::Write {
             path: path.to_path_buf(),
@@ -284,6 +356,24 @@ impl ModelDoc {
         {
             Some(existing) => *existing = measure,
             None => self.measures.push(measure),
+        }
+    }
+
+    /// Agrega una relationship, o reemplaza la que ya tiene ese par de columnas.
+    ///
+    /// Es lo que usa el interruptor de la app: la relacion ya existe (la infirio el catalogo)
+    /// y lo unico que cambia es el rol. Se guarda el par, no un id, para que el archivo siga
+    /// diciendo lo mismo si la introspeccion renumera.
+    pub fn upsert_relationship(&mut self, relationship: RelationshipDoc) {
+        let same = |existing: &RelationshipDoc| {
+            existing.from_table.eq_ignore_ascii_case(&relationship.from_table)
+                && existing.from_column.eq_ignore_ascii_case(&relationship.from_column)
+                && existing.to_table.eq_ignore_ascii_case(&relationship.to_table)
+                && existing.to_column.eq_ignore_ascii_case(&relationship.to_column)
+        };
+        match self.relaciones.iter_mut().find(|existing| same(existing)) {
+            Some(existing) => *existing = relationship,
+            None => self.relaciones.push(relationship),
         }
     }
 
@@ -417,7 +507,110 @@ impl ModelDoc {
             model.measures.push(measure);
         }
 
+        self.apply_relationships(model, &mut avisos);
+
         avisos
+    }
+
+    /// Aplica las relationships del documento.
+    ///
+    /// Una que ya existe se AJUSTA: el rol y la direccion se pisap. Una que no existe se
+    /// AGREGA. El segundo caso es el que importa: la introspeccion solo lee foreign keys, y
+    /// una base sin constraints declaradas llega sin ninguna relacion, con lo que no se puede
+    /// agrupar los hechos por ninguna dimension.
+    fn apply_relationships(&self, model: &mut Model, avisos: &mut Vec<String>) {
+        for doc in &self.relaciones {
+            let Some((from_table, from_column)) =
+                column_id(model, &doc.from_table, &doc.from_column)
+            else {
+                avisos.push(format!(
+                    "la relacion `{}`[{}] -> `{}`[{}] no se aplico: `{}`[{}] no esta en el modelo",
+                    doc.from_table,
+                    doc.from_column,
+                    doc.to_table,
+                    doc.to_column,
+                    doc.from_table,
+                    doc.from_column
+                ));
+                continue;
+            };
+            let Some((_, to_column)) = column_id(model, &doc.to_table, &doc.to_column) else {
+                avisos.push(format!(
+                    "la relacion `{}`[{}] -> `{}`[{}] no se aplico: `{}`[{}] no esta en el modelo",
+                    doc.from_table,
+                    doc.from_column,
+                    doc.to_table,
+                    doc.to_column,
+                    doc.to_table,
+                    doc.to_column
+                ));
+                continue;
+            };
+
+            let Some(role) = parse_role(doc.role.as_deref()) else {
+                avisos.push(format!(
+                    "la relacion `{}`[{}] -> `{}`[{}] no se aplico: el rol `{}` no existe",
+                    doc.from_table,
+                    doc.from_column,
+                    doc.to_table,
+                    doc.to_column,
+                    doc.role.as_deref().unwrap_or("")
+                ));
+                continue;
+            };
+            let Some(direction) = parse_direction(doc.direction.as_deref()) else {
+                avisos.push(format!(
+                    "la relacion `{}`[{}] -> `{}`[{}] no se aplico: la direccion `{}` no existe",
+                    doc.from_table,
+                    doc.from_column,
+                    doc.to_table,
+                    doc.to_column,
+                    doc.direction.as_deref().unwrap_or("")
+                ));
+                continue;
+            };
+
+            if let Some(existing) = model
+                .relationships
+                .iter_mut()
+                .find(|r| r.from_column == from_column && r.to_column == to_column)
+            {
+                existing.role = role;
+                existing.direction = direction;
+                continue;
+            }
+
+            // Una relacion NUEVA. La clave tiene que estar del lado UNO: si el usuario escribio
+            // el par al reves, la propagacion va en la direccion contraria y los numeros salen
+            // mal sin ningun error. Se avisa y no se aplica.
+            let has_keys = model
+                .table(from_table)
+                .is_some_and(|table| !table.key_columns.is_empty());
+            let is_key = model
+                .table(from_table)
+                .is_some_and(|table| table.key_columns.contains(&from_column));
+            if has_keys && !is_key {
+                avisos.push(format!(
+                    "la relacion `{}`[{}] -> `{}`[{}] no se aplico: `{}`[{}] no es la clave de su tabla,                      y el lado UNO de una relacion es la clave",
+                    doc.from_table,
+                    doc.from_column,
+                    doc.to_table,
+                    doc.to_column,
+                    doc.from_table,
+                    doc.from_column
+                ));
+                continue;
+            }
+
+            model.relationships.push(Relationship {
+                from_column,
+                to_column,
+                cardinality: Cardinality::OneToMany,
+                direction,
+                role,
+                assume_referential_integrity: false,
+            });
+        }
     }
 }
 
@@ -436,6 +629,38 @@ fn next_column_id(model: &Model) -> ObjectId {
         .max()
         .unwrap_or(0);
     ObjectId(max + 1)
+}
+
+/// El id de la tabla y el de la columna de un nombre del documento.
+fn column_id(model: &Model, table: &str, column: &str) -> Option<(ObjectId, ObjectId)> {
+    let table = model.table_by_name(table)?;
+    let column = table.column_by_name(column)?;
+    Some((table.id, column.id))
+}
+
+/// El rol de una relationship, en el espanol del documento. Sin texto es activa: es el
+/// default de Power BI y el que el usuario espera al declarar una relacion nueva.
+fn parse_role(text: Option<&str>) -> Option<RelationshipRole> {
+    match text {
+        None => Some(RelationshipRole::Active),
+        Some(text) if text.trim().eq_ignore_ascii_case("activa") => Some(RelationshipRole::Active),
+        Some(text) if text.trim().eq_ignore_ascii_case("inactiva") => {
+            Some(RelationshipRole::Inactive)
+        }
+        Some(_) => None,
+    }
+}
+
+/// La direccion del filtro, en el espanol del documento. Sin texto es de la dimension a los
+/// hechos, que es lo que hace un star schema.
+fn parse_direction(text: Option<&str>) -> Option<FilterDirection> {
+    match text {
+        None => Some(FilterDirection::Single),
+        Some(text) if text.trim().eq_ignore_ascii_case("simple") => Some(FilterDirection::Single),
+        Some(text) if text.trim().eq_ignore_ascii_case("ambas") => Some(FilterDirection::Both),
+        Some(text) if text.trim().eq_ignore_ascii_case("ninguna") => Some(FilterDirection::None),
+        Some(_) => None,
+    }
 }
 
 /// El tipo de una columna calculada, en el espanol del documento.
@@ -462,6 +687,7 @@ mod tests {
         let documento = ModelDoc {
             measures: vec![],
             columns: vec![],
+            relaciones: vec![],
             jerarquias: vec![JerarquiaDoc {
                 name: "Producto".to_string(),
                 table: "catalogo_productos".to_string(),
@@ -527,11 +753,194 @@ mod tests {
         }
     }
 
+    /// La tabla de hechos de `modelo()` mas una dimension con clave, para las relationships.
+    fn modelo_con_dimension() -> Model {
+        let mut model = modelo();
+        model.tables.push(Table {
+            id: ObjectId(2),
+            name: "productos".to_string(),
+            kind: TableKind::Dimension,
+            columns: vec![
+                Column::new(ObjectId(20), "id", DataType::Integer),
+                Column::new(ObjectId(21), "nombre", DataType::Text),
+            ],
+            key_columns: vec![ObjectId(20)],
+            is_date_table: false,
+        });
+        model
+    }
+
+    fn relaciones(relaciones: Vec<RelationshipDoc>) -> ModelDoc {
+        ModelDoc {
+            relaciones,
+            ..ModelDoc::default()
+        }
+    }
+
+    #[test]
+    fn declarar_una_relacion_que_la_base_no_trae() {
+        // La introspeccion solo lee foreign keys. Sin constraint declarada, el modelo llega
+        // sin relaciones y no hay forma de agrupar los hechos por una dimension.
+        let mut model = modelo_con_dimension();
+        let documento = relaciones(vec![RelationshipDoc::new(
+            "productos", "id", "ventas", "producto_id",
+        )]);
+        // La columna de los hechos existe en el modelo, con otro id.
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+
+        let avisos = documento.apply(&mut model);
+
+        assert!(avisos.is_empty(), "{avisos:?}");
+        assert_eq!(model.relationships.len(), 1);
+        let relacion = &model.relationships[0];
+        assert_eq!(relacion.from_column, ObjectId(20));
+        assert_eq!(relacion.to_column, ObjectId(12));
+        assert_eq!(relacion.role, RelationshipRole::Active);
+        assert_eq!(relacion.direction, FilterDirection::Single);
+    }
+
+    #[test]
+    fn una_relacion_que_ya_existe_se_ajusta_y_no_se_duplica() {
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+        model.relationships.push(Relationship {
+            from_column: ObjectId(20),
+            to_column: ObjectId(12),
+            cardinality: Cardinality::OneToMany,
+            direction: FilterDirection::Single,
+            role: RelationshipRole::Active,
+            assume_referential_integrity: false,
+        });
+
+        let documento = relaciones(vec![
+            RelationshipDoc::new("productos", "id", "ventas", "producto_id")
+                .con_rol("inactiva"),
+        ]);
+        let avisos = documento.apply(&mut model);
+
+        assert!(avisos.is_empty(), "{avisos:?}");
+        assert_eq!(model.relationships.len(), 1);
+        assert_eq!(model.relationships[0].role, RelationshipRole::Inactive);
+    }
+
+    #[test]
+    fn el_lado_uno_tiene_que_ser_una_clave() {
+        // Con el lado UNO en una columna que no es la clave, el filtro propaga por el camino
+        // equivocado y los numeros salen mal sin ningun error. Se rechaza al aplicar.
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+
+        let documento = relaciones(vec![RelationshipDoc::new(
+            "productos", "nombre", "ventas", "producto_id",
+        )]);
+        let avisos = documento.apply(&mut model);
+
+        assert_eq!(avisos.len(), 1);
+        assert!(avisos[0].contains("clave"), "{avisos:?}");
+        assert!(model.relationships.is_empty());
+    }
+
+    #[test]
+    fn una_tabla_sin_claves_declaradas_se_aplica_sin_validar() {
+        // Una vista o una tabla sin clave primaria no declara `key_columns`, y no hay contra
+        // que validar. Se aplica: negar la relacion dejaria el informe sin ninguna salida, y
+        // una relacion mal escrita ya se nota en los numeros.
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+
+        let documento = relaciones(vec![RelationshipDoc::new(
+            "ventas", "producto_id", "productos", "id",
+        )]);
+        let avisos = documento.apply(&mut model);
+
+        assert!(avisos.is_empty(), "{avisos:?}");
+        assert_eq!(model.relationships.len(), 1);
+    }
+
+    #[test]
+    fn una_relacion_a_una_columna_que_no_esta_avisa() {
+        let mut model = modelo_con_dimension();
+        let documento = relaciones(vec![RelationshipDoc::new(
+            "productos", "id", "ventas", "no_existe",
+        )]);
+        let avisos = documento.apply(&mut model);
+
+        assert_eq!(avisos.len(), 1);
+        assert!(avisos[0].contains("no_existe"), "{avisos:?}");
+        assert!(model.relationships.is_empty());
+    }
+
+    #[test]
+    fn un_rol_que_no_existe_avisa() {
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+        let documento = relaciones(vec![
+            RelationshipDoc::new("productos", "id", "ventas", "producto_id").con_rol("a veces"),
+        ]);
+        let avisos = documento.apply(&mut model);
+
+        assert_eq!(avisos.len(), 1);
+        assert!(avisos[0].contains("a veces"), "{avisos:?}");
+        assert!(model.relationships.is_empty());
+    }
+
+    #[test]
+    fn la_relacion_da_la_vuelta_por_disco() {
+        let documento = relaciones(vec![RelationshipDoc::new(
+            "productos", "id", "ventas", "producto_id",
+        )
+        .con_rol("inactiva")]);
+        let file = File {
+            measure: vec![],
+            column: vec![],
+            jerarquia: vec![],
+            relacion: documento.relaciones.clone(),
+        };
+        let text = toml::to_string_pretty(&file).expect("serializa");
+        assert!(text.contains("[[relacion]]"));
+        assert!(text.contains("from_table"));
+
+        let back: File = toml::from_str(&text).expect("vuelve a parsear");
+        assert_eq!(back.relacion, documento.relaciones);
+        assert!(!back.relacion[0].activa());
+    }
+
     fn doc(measures: Vec<MeasureDoc>) -> ModelDoc {
         ModelDoc {
             measures,
             columns: vec![],
             jerarquias: vec![],
+            relaciones: vec![],
         }
     }
 
@@ -636,6 +1045,7 @@ mod tests {
                 data_type: None,
             }],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -659,6 +1069,7 @@ mod tests {
                 data_type: None,
             }],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -678,6 +1089,7 @@ mod tests {
                 "moneda",
             )],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -704,6 +1116,7 @@ mod tests {
                 ColumnDoc::calculada("ventas", "cuadruple", "doble * 2", "moneda"),
             ],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -726,6 +1139,7 @@ mod tests {
                 "moneda",
             )],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -745,6 +1159,7 @@ mod tests {
             measures: vec![],
             columns: vec![ColumnDoc::calculada("ventas", "mes", "total * 2", "texto")],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -764,6 +1179,7 @@ mod tests {
             measures: vec![],
             columns: vec![ColumnDoc::calculada("ventas", "rara", "total * 2", "magico")],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -780,6 +1196,7 @@ mod tests {
             measures: vec![],
             columns: vec![column_doc],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -800,6 +1217,7 @@ mod tests {
             measures: vec![MeasureDoc::new("Doble", "SUM('ventas'[doble])")],
             columns: vec![ColumnDoc::calculada("ventas", "doble", "total * 2", "moneda")],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -819,6 +1237,7 @@ mod tests {
             measures: vec![],
             columns: vec![ColumnDoc::calculada("ventas", "rota", "[TotalVentas] + 1", "moneda")],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -841,6 +1260,7 @@ mod tests {
             measures: vec![],
             columns: vec![column_doc],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         documento.apply(&mut model);
 
@@ -863,11 +1283,13 @@ mod tests {
                 "entero",
             )],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let file = File {
             measure: vec![],
             column: documento.columns.clone(),
             jerarquia: vec![],
+            relacion: vec![],
         };
         let text = toml::to_string_pretty(&file).expect("serializa");
         assert!(text.contains("expression"));
@@ -906,11 +1328,13 @@ mod tests {
                 data_type: None,
             }],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         let file = File {
             measure: documento.measures.clone(),
             column: documento.columns.clone(),
             jerarquia: documento.jerarquias.clone(),
+            relacion: documento.relaciones.clone(),
         };
         let text = toml::to_string_pretty(&file).expect("serializa");
 
@@ -934,6 +1358,7 @@ mod tests {
             measures: vec![MeasureDoc::new("Ventas", "SUM('ventas'[total])")],
             columns: vec![],
             jerarquias: vec![],
+            relaciones: vec![],
         };
         documento.save_to(&path).expect("escribe");
         let back = ModelDoc::load_from(&path).expect("lee");
