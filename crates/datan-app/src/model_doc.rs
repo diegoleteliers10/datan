@@ -14,7 +14,8 @@
 //! # Formato
 //!
 //! TOML en `~/.datan/models/<base>.toml`. Un archivo por base, como las conexiones. El
-//! archivo se puede leer y editar a mano: son medidas y ajustes de columnas, nada mas.
+//! archivo se puede leer y editar a mano: son medidas, ajustes de columnas y jerarquias,
+//! nada mas.
 //!
 //! # Que gana la introspeccion y que gana el documento
 //!
@@ -34,6 +35,8 @@ struct File {
     measure: Vec<MeasureDoc>,
     #[serde(default)]
     column: Vec<ColumnDoc>,
+    #[serde(default)]
+    jerarquia: Vec<JerarquiaDoc>,
 }
 
 /// Una medida del usuario.
@@ -79,6 +82,59 @@ pub struct ColumnDoc {
 pub struct ModelDoc {
     pub measures: Vec<MeasureDoc>,
     pub columns: Vec<ColumnDoc>,
+    pub jerarquias: Vec<JerarquiaDoc>,
+}
+
+/// Una jerarquia del usuario: niveles ordenados de UNA misma tabla.
+///
+/// El drill reemplaza el nivel del informe por el siguiente o el anterior, y para eso hace
+/// falta saber QUE columnas forman una jerarquia y en QUE orden. La base no lo declara: es
+/// una decision del usuario, como las medidas.
+///
+/// ```toml
+/// [[jerarquia]]
+/// name = "Producto"
+/// table = "catalogo_productos"
+/// levels = ["categoria", "nombre"]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JerarquiaDoc {
+    pub name: String,
+    pub table: String,
+    /// Los niveles, de FUERA hacia dentro.
+    pub levels: Vec<String>,
+}
+
+impl JerarquiaDoc {
+    /// Los ids de los niveles, o el motivo por el que no se puede usar.
+    ///
+    /// Una jerarquia con MENOS de dos niveles no taladra nada y se avisa: declarar una es
+    /// pedir el boton de drill, y con un nivel el boton no hace nada.
+    pub fn resolver(&self, model: &Model) -> Result<Vec<ObjectId>, String> {
+        if self.levels.len() < 2 {
+            return Err(format!(
+                "la jerarquia `{}` necesita al menos dos niveles",
+                self.name
+            ));
+        }
+        let Some(table) = model.table_by_name(&self.table) else {
+            return Err(format!(
+                "la jerarquia `{}` habla de la tabla `{}`, que no esta en el modelo",
+                self.name, self.table
+            ));
+        };
+        let mut niveles = Vec::with_capacity(self.levels.len());
+        for nombre in &self.levels {
+            let Some(column) = table.column_by_name(nombre) else {
+                return Err(format!(
+                    "la jerarquia `{}` usa la columna `{}[{}]`, que no existe",
+                    self.name, self.table, nombre
+                ));
+            };
+            niveles.push(column.id);
+        }
+        Ok(niveles)
+    }
 }
 
 /// Un error del documento del modelo.
@@ -146,6 +202,7 @@ impl ModelDoc {
         Ok(Self {
             measures: file.measure,
             columns: file.column,
+            jerarquias: file.jerarquia,
         })
     }
 
@@ -162,6 +219,7 @@ impl ModelDoc {
         let file = File {
             measure: self.measures.clone(),
             column: self.columns.clone(),
+            jerarquia: self.jerarquias.clone(),
         };
         let text = toml::to_string_pretty(&file).map_err(|source| DocError::Write {
             path: path.to_path_buf(),
@@ -259,6 +317,57 @@ mod tests {
     use super::*;
     use datan_model::{Column, DataType, Table, TableKind};
 
+    #[test]
+    fn la_jerarquia_viaja_en_el_archivo() {
+        let documento = ModelDoc {
+            measures: vec![],
+            columns: vec![],
+            jerarquias: vec![JerarquiaDoc {
+                name: "Producto".to_string(),
+                table: "catalogo_productos".to_string(),
+                levels: vec!["categoria".to_string(), "nombre".to_string()],
+            }],
+        };
+        let ruta = std::env::temp_dir().join(format!(
+            "datan-jerarquia-{}.toml",
+            std::process::id()
+        ));
+        documento.save_to(&ruta).expect("guarda");
+        let leido = ModelDoc::load_from(&ruta).expect("lee");
+        let _ = std::fs::remove_file(&ruta);
+        assert_eq!(leido, documento);
+    }
+
+    #[test]
+    fn una_jerarquia_que_no_resuelve_se_avisa() {
+        let model = modelo();
+        let corta = JerarquiaDoc {
+            name: "Corta".to_string(),
+            table: "ventas".to_string(),
+            levels: vec!["mes".to_string()],
+        };
+        let sin_tabla = JerarquiaDoc {
+            name: "Fantasma".to_string(),
+            table: "otra_tabla".to_string(),
+            levels: vec!["a".to_string(), "b".to_string()],
+        };
+        let sin_columna = JerarquiaDoc {
+            name: "Rota".to_string(),
+            table: "ventas".to_string(),
+            levels: vec!["mes".to_string(), "no_existe".to_string()],
+        };
+        let buena = JerarquiaDoc {
+            name: "Ventas".to_string(),
+            table: "ventas".to_string(),
+            levels: vec!["mes".to_string(), "mes".to_string()],
+        };
+
+        assert!(corta.resolver(&model).unwrap_err().contains("dos niveles"));
+        assert!(sin_tabla.resolver(&model).unwrap_err().contains("otra_tabla"));
+        assert!(sin_columna.resolver(&model).unwrap_err().contains("no_existe"));
+        assert_eq!(buena.resolver(&model), Ok(vec![ObjectId(11), ObjectId(11)]));
+    }
+
     /// Una tabla de hechos con una columna sumable y una de texto.
     fn modelo() -> Model {
         Model {
@@ -282,6 +391,7 @@ mod tests {
         ModelDoc {
             measures,
             columns: vec![],
+            jerarquias: vec![],
         }
     }
 
@@ -383,6 +493,7 @@ mod tests {
                 sort_by: None,
                 is_hidden: Some(true),
             }],
+            jerarquias: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -403,6 +514,7 @@ mod tests {
                 sort_by: None,
                 is_hidden: Some(true),
             }],
+            jerarquias: vec![],
         };
         let avisos = documento.apply(&mut model);
 
@@ -436,10 +548,12 @@ mod tests {
                 sort_by: None,
                 is_hidden: Some(true),
             }],
+            jerarquias: vec![],
         };
         let file = File {
             measure: documento.measures.clone(),
             column: documento.columns.clone(),
+            jerarquia: documento.jerarquias.clone(),
         };
         let text = toml::to_string_pretty(&file).expect("serializa");
 
@@ -449,6 +563,7 @@ mod tests {
         // toco, y nada mas.
         assert!(!text.contains("format_string"));
         assert!(!text.contains("description"));
+        assert!(!text.contains("[[jerarquia]]"));
 
         let back: File = toml::from_str(&text).expect("vuelve a parsear");
         assert_eq!(back.measure, documento.measures);
@@ -461,6 +576,7 @@ mod tests {
         let documento = ModelDoc {
             measures: vec![MeasureDoc::new("Ventas", "SUM('ventas'[total])")],
             columns: vec![],
+            jerarquias: vec![],
         };
         documento.save_to(&path).expect("escribe");
         let back = ModelDoc::load_from(&path).expect("lee");

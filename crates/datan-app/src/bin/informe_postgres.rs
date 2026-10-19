@@ -8,6 +8,12 @@
 
 use std::path::Path;
 
+// El documento del usuario vive en el bin de la app. Se incluye por ruta para poder
+// verificar las jerarquias contra la base, sin pantalla.
+#[path = "../model_doc.rs"]
+#[allow(dead_code)] // El bin solo lee el documento; el resto de la API es de la app.
+mod model_doc;
+
 use datan_connect::{PostgresCatalog, Source, introspect};
 use datan_model::{DataType, ObjectId, TableKind};
 use datan_report::Report;
@@ -92,5 +98,39 @@ fn main() {
             }
         }
         Err(error) => println!("\nERROR: {error}"),
+    }
+
+    // El drill, de punta a punta: cada nivel que el usuario declaro como jerarquia, como
+    // dimension unica de su propio informe. Es lo que hacen los botones de bajar y subir.
+    let doc = model_doc::ModelDoc::load(&database).expect("el modelo del usuario");
+    if doc.jerarquias.is_empty() {
+        println!("\nSin jerarquias declaradas en el modelo del usuario.");
+        return;
+    }
+    let medida: Vec<ObjectId> = measures.iter().copied().take(1).collect();
+    for jerarquia in &doc.jerarquias {
+        let niveles = match jerarquia.resolver(&model) {
+            Ok(niveles) => niveles,
+            Err(aviso) => {
+                println!("\nAVISO: {aviso}");
+                continue;
+            }
+        };
+        println!("\n--- jerarquia {} ---", jerarquia.name);
+        for (posicion, nivel) in niveles.iter().enumerate() {
+            let nombre = model
+                .column(*nivel)
+                .map(|(_, c)| c.name.clone())
+                .unwrap_or_default();
+            println!("\nnivel {}: {nombre}", posicion + 1);
+            let informe = Report::new(model.clone())
+                .attached_to("pg")
+                .with_dimensions(vec![*nivel])
+                .with_measures(medida.clone());
+            match informe.execute(&engine, None) {
+                Ok(matrix) => matrix.print(4),
+                Err(error) => println!("  ERROR: {error}"),
+            }
+        }
     }
 }

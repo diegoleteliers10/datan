@@ -1561,3 +1561,30 @@ intermedio no existia.
 
 224 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergen (la suite agrupa por una
 columna, y con una dimension no hay subtotales). Solo `arrow v58.4.0`.
+
+## Fase UI-7: drill down y drill up
+
+Power BI navega una jerarquia con un solo nivel a la vista: bajar cambia el nivel por el
+siguiente, subir por el anterior. Datan no tenia jerarquias, y la base no las declara.
+
+- La jerarquia es una decision del usuario, como las medidas: vive en el TOML de
+  `~/.datan/models/<base>.toml`, en `[[jerarquia]]` con `name`, `table` y `levels` de fuera
+  hacia dentro. El modelo NO cambia: `datan-model` no sabe de jerarquias y no tiene que saber.
+- `JerarquiaDoc::resolver` resuelve los nombres a ids contra el modelo ya aplicado. Lo que no
+  resuelve se avisa en la barra de estado, como el resto del documento, y no se pierde en
+  silencio. Una jerarquia con menos de dos niveles tambien se avisa: no taladra nada.
+- `drill_objetivo` es puro: dice que nivel sigue, o nada si no hay. La seleccion tiene que ser
+  EXACTAMENTE un nivel de UNA jerarquia. El drill reemplaza el nivel, no lo apila: con dos
+  dimensiones elegidas el boton no aparece, porque no hay una respuesta unica.
+- Los filtros activos se quedan. Filtrar por una categoria y bajar a producto tiene que ver
+  solo los productos de esa categoria. Al bajar cambia la columna agrupada, no el filtro.
+- El orden por medida se suelta al taladrar: los indices apuntan a la matriz anterior.
+- Dos botones de icono, al lado de Actualizar: `ChevronsDown` baja y `ChevronsUp` sube. Sin
+  nivel al que ir, el boton se dibuja apagado. En modo Lectura no se dibujan.
+
+### Resultado
+
+227 tests. `informe_postgres` verifica el drill de punta a punta contra `datan_bench`: la
+jerarquia Producto resuelve a `catalogo_productos[categoria]` y `catalogo_productos[nombre]`,
+y cada nivel corre su propio informe. La suma de las categorias cuadra con el desglose de los
+productos.

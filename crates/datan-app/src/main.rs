@@ -155,6 +155,9 @@ struct Datan {
     /// Se muestra en la barra de estado porque una medida que existia y ya no se puede
     /// aplicar no puede desaparecer en silencio: el informe la pide por nombre y falla.
     model_warnings: Vec<String>,
+    /// Las jerarquias del usuario, ya resueltas a ids: (nombre, niveles de fuera a dentro).
+    /// Es lo que alimenta el drill.
+    jerarquias: Vec<(String, Vec<ObjectId>)>,
     database: Option<String>,
     scroll: UniformListScrollHandle,
 }
@@ -188,6 +191,7 @@ impl Datan {
             counted_at: None,
             stats: None,
             model_warnings: Vec::new(),
+            jerarquias: Vec::new(),
             database: None,
             scroll: UniformListScrollHandle::default(),
         }
@@ -614,6 +618,17 @@ impl Datan {
     }
 
     /// Exporta la matriz a CSV junto a la carpeta del usuario.
+    /// Reemplaza la dimension actual por el nivel de jerarquia que llega.
+    ///
+    /// Los filtros activos SE QUEDAN: filtrar por region y bajar a producto tiene que ver
+    /// solo los productos de esa region. El orden por medida se suelta, porque los indices
+    /// de columna apuntan a la matriz anterior.
+    fn drill_nivel(&mut self, nivel: ObjectId, cx: &mut Context<Self>) {
+        self.selection.dimensions = vec![nivel];
+        self.sort = None;
+        self.refresh(cx);
+    }
+
     fn export_csv(&mut self, cx: &mut Context<Self>) {
         self.exportar(Archivo::Csv, cx);
     }
@@ -682,10 +697,11 @@ impl Datan {
 
             _ = this.update(cx, |view, cx| {
                 match built {
-                    Ok((model, report, avisos)) => {
+                    Ok((model, report, avisos, jerarquias)) => {
                         view.selection = suggested(&model);
                         view.report = Some(report);
                         view.model_warnings = avisos;
+                        view.jerarquias = jerarquias;
                         // Sin esto la cabecera dice "sin base" y el refresh cae por defecto a
                         // `datan_bench`: la app aparentaba estar conectada a otra base.
                         view.database = Some(database.clone());
@@ -972,7 +988,11 @@ fn attach(engine: &Engine, database: &str) -> Result<(), String> {
 }
 
 #[allow(dead_code)]
-fn build_model(database: &str) -> Result<(Model, Report, Vec<String>), String> {
+/// Lo que deja construir el modelo: el modelo, el informe base, lo que no se aplico y las
+/// jerarquias resueltas a ids.
+type ModeloListo = (Model, Report, Vec<String>, Vec<(String, Vec<ObjectId>)>);
+
+fn build_model(database: &str) -> Result<ModeloListo, String> {
     let engine = open_engine()?;
     attach(&engine, database)?;
 
@@ -995,10 +1015,20 @@ fn build_model(database: &str) -> Result<(Model, Report, Vec<String>), String> {
     // medida de usuario no la puede resolver al abrir. Un documento corrupto para la conexion
     // a proposito: ahi esta el trabajo que no se puede volver a generar.
     let doc = model_doc::ModelDoc::load(database).map_err(|e| e.to_string())?;
-    let avisos = doc.apply(&mut model);
+    let mut avisos = doc.apply(&mut model);
+
+    // Las jerarquias no tocan el modelo: son de la PANTALLA. Los niveles se resuelven a ids
+    // aca, con el modelo ya aplicado, y lo que no resuelve se avisa como el resto.
+    let mut jerarquias = Vec::new();
+    for jerarquia in &doc.jerarquias {
+        match jerarquia.resolver(&model) {
+            Ok(niveles) => jerarquias.push((jerarquia.name.clone(), niveles)),
+            Err(aviso) => avisos.push(aviso),
+        }
+    }
 
     let report = Report::new(model.clone()).attached_to("pg");
-    Ok((model, report, avisos))
+    Ok((model, report, avisos, jerarquias))
 }
 
 fn run_report(
@@ -1141,6 +1171,26 @@ fn date_column(report: &Report) -> Option<ObjectId> {
     // timestamp y toda la ventana de doce meses daba un solo dia.
     dates.sort_by_key(|(table, _, es_date)| (Some(*table) != fact, !*es_date));
     dates.first().map(|(_, column, _)| *column)
+}
+
+/// El nivel al que se llega al taladrar desde la dimension actual.
+///
+/// La dimension tiene que ser UN nivel de UNA jerarquia: el drill reemplaza el nivel, no lo
+/// apila. `abajo` pide el siguiente; `arriba`, el anterior, y desde el primero no hay. Una
+/// dimension que no es nivel de ninguna jerarquia tampoco taladra.
+fn drill_objetivo(
+    jerarquias: &[(String, Vec<ObjectId>)],
+    dimension: ObjectId,
+    abajo: bool,
+) -> Option<ObjectId> {
+    for (_, niveles) in jerarquias {
+        let Some(index) = niveles.iter().position(|nivel| *nivel == dimension) else {
+            continue;
+        };
+        let destino = if abajo { index + 1 } else { index.checked_sub(1)? };
+        return niveles.get(destino).copied();
+    }
+    None
 }
 
 /// Si la forma de salida de una medida suma.
@@ -2071,6 +2121,34 @@ impl Datan {
             IconName::RefreshCw,
             cx.listener(|view, _event, _window, cx| view.refresh(cx)),
         ));
+
+        // El drill vive ahi tambien: cambia QUE nivel de la jerarquia se ve. Con la
+        // seleccion en un nivel de una jerarquia, bajar lo cambia por el siguiente y subir
+        // por el anterior; en cualquier otro caso los botones estan apagados, porque el
+        // drill reemplaza UN nivel y no sabe que hacer con dos.
+        if self.selection.dimensions.len() == 1 && !self.lectura {
+            let actual = self.selection.dimensions[0];
+            let abajo = drill_objetivo(&self.jerarquias, actual, true);
+            let arriba = drill_objetivo(&self.jerarquias, actual, false);
+            fila_etiquetas = fila_etiquetas.child(match abajo {
+                Some(nivel) => components::boton_icono(
+                    &theme,
+                    "drill-down",
+                    IconName::ChevronsDown,
+                    cx.listener(move |view, _event, _window, cx| view.drill_nivel(nivel, cx)),
+                ),
+                None => components::boton_icono_apagado(&theme, IconName::ChevronsDown),
+            });
+            fila_etiquetas = fila_etiquetas.child(match arriba {
+                Some(nivel) => components::boton_icono(
+                    &theme,
+                    "drill-up",
+                    IconName::ChevronsUp,
+                    cx.listener(move |view, _event, _window, cx| view.drill_nivel(nivel, cx)),
+                ),
+                None => components::boton_icono_apagado(&theme, IconName::ChevronsUp),
+            });
+        }
 
         let cabecera = div()
             .flex()
@@ -3538,5 +3616,47 @@ mod fecha_tests {
         let report = Report::new(model);
         // 13 es `fecha`, no 12 (`created_at`).
         assert_eq!(date_column(&report), Some(ObjectId(13)));
+    }
+}
+
+#[cfg(test)]
+mod drill_tests {
+    use super::drill_objetivo;
+    use datan_model::ObjectId;
+
+    /// Categoria -> region: bajar llega a region, subir desde categoria no hay, y una
+    /// dimension que no es nivel de ninguna jerarquia no taladra.
+    #[test]
+    fn el_drill_reemplaza_el_nivel_y_no_apila() {
+        let jerarquias = vec![(
+            "Producto".to_string(),
+            vec![ObjectId(22), ObjectId(21)],
+        )];
+
+        assert_eq!(
+            drill_objetivo(&jerarquias, ObjectId(22), true),
+            Some(ObjectId(21)),
+            "bajar desde categoria"
+        );
+        assert_eq!(
+            drill_objetivo(&jerarquias, ObjectId(21), false),
+            Some(ObjectId(22)),
+            "subir desde region"
+        );
+        assert_eq!(
+            drill_objetivo(&jerarquias, ObjectId(22), false),
+            None,
+            "desde el primer nivel no hay arriba"
+        );
+        assert_eq!(
+            drill_objetivo(&jerarquias, ObjectId(21), true),
+            None,
+            "desde el ultimo nivel no hay abajo"
+        );
+        assert_eq!(
+            drill_objetivo(&jerarquias, ObjectId(99), true),
+            None,
+            "una dimension ajena no taladra"
+        );
     }
 }
