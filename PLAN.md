@@ -1674,3 +1674,28 @@ un camino independiente: `SUM(quantity * precio_unitario)` da 79328000000 por el
 SQL, la particion por `IF(quantity > 2, ...)` da Chico 1200000 y Grande 4800000 en los dos
 caminos, y la jerarquia de fecha (`YEAR(fecha)`, calculada sobre la boleta, agrupada desde
 los hechos por la relacion) da 2025 1683480 y 2026 4316520 igual que `EXTRACT` en SQL.
+
+## Fase UI-10: Relaciones declaradas por el usuario
+
+La introspeccion lee las foreign keys del catalogo y con eso arma el grafo. Una base de datos
+real casi nunca las tiene completas: sin la constraint, el modelo llega sin relaciones y
+agrupar los hechos por una dimension falla con "no hay relationship entre la tabla de hechos y
+la tabla 2 que agrupa". Hasta ahora no habia forma de arreglarlo desde la app.
+
+- `[[relacion]]` en el documento del modelo, con `from_table`, `from_column`, `to_table`,
+  `to_column` y, opcionales, `role` (`activa`/`inactiva`) y `direction`
+  (`simple`/`ambas`/`ninguna`). Cuatro nombres y no `tabla.columna`: un punto en un nombre lo
+  vuelve ambiguo.
+- Una relacion que ya existe se AJUSTA. Una que no existe se AGREGA con cardinalidad uno a
+  muchos y sin `assume_referential_integrity`, que es lo que hace un star schema.
+- El lado UNO tiene que ser una clave de su tabla. Si la tabla no declara claves no se puede
+  validar y se aplica igual: negar la relacion dejaria el informe sin ninguna salida.
+- El interruptor de la app cambia el rol y lo guarda en el documento ANTES de tocar la vista,
+  igual que al crear una medida. Una relacion que vive solo en pantalla se pierde al cerrar.
+- En modo Lectura el rol se ve y no se toca.
+
+### Resultado
+
+312 tests. `informe_postgres` imprime las relaciones del modelo y, con la de productos
+apagada, el informe por `categoria` falla con "no hay relationship": el rol gobierna el
+camino de verdad y no es un adorno.

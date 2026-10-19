@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use datan_connect::{PostgresCatalog, Source, introspect};
 use datan_dax_eval::{AtomKind, BinaryOp, Shape};
-use datan_model::{DataType, Model, ObjectId, TableKind};
+use datan_model::{DataType, Model, ObjectId, RelationshipRole, TableKind};
 mod components;
 mod config;
 mod formato;
@@ -422,6 +422,80 @@ impl Datan {
                 .with_measures(self.selection.measures.clone()),
         );
         self.toggle(id, true, cx);
+    }
+
+    /// Cambia el rol de una relationship y lo guarda en el documento del modelo.
+    ///
+    /// La introspeccion solo lee foreign keys. Una relacion que la base no declara no existe
+    /// para el motor, y hasta ahora no habia forma de decirla desde la app. El interruptor
+    /// apaga la que el catalogo trae mal, que es el otro lado del mismo problema.
+    fn toggle_relationship(&mut self, from: ObjectId, to: ObjectId, cx: &mut Context<Self>) {
+        if self.lectura {
+            self.stats = Some("modo Lectura: el modelo no se toca".to_string());
+            cx.notify();
+            return;
+        }
+        let Some(report) = self.report.clone() else {
+            return;
+        };
+        let (Some((from_table, from_column)), Some((to_table, to_column))) = (
+            report
+                .model
+                .column(from)
+                .map(|(table, column)| (table.name.clone(), column.name.clone())),
+            report
+                .model
+                .column(to)
+                .map(|(table, column)| (table.name.clone(), column.name.clone())),
+        ) else {
+            return;
+        };
+        let Some(current) = report
+            .model
+            .relationships
+            .iter()
+            .find(|relating| relating.from_column == from && relating.to_column == to)
+        else {
+            return;
+        };
+        let next = match current.role {
+            RelationshipRole::Active => "inactiva",
+            RelationshipRole::Inactive => "activa",
+        };
+        let Some(database) = self.database.clone() else {
+            return;
+        };
+        // El documento se escribe antes de tocar la vista, igual que al crear una medida: una
+        // relacion que vive solo en pantalla se pierde al cerrar, y el informe guardado vuelve
+        // a leer un modelo sin ella.
+        let mut doc = match model_doc::ModelDoc::load(&database) {
+            Ok(doc) => doc,
+            Err(error) => {
+                self.stats = Some(format!("{error}"));
+                cx.notify();
+                return;
+            }
+        };
+        doc.upsert_relationship(
+            model_doc::RelationshipDoc::new(from_table, from_column, to_table, to_column)
+                .con_rol(next),
+        );
+        if let Err(error) = doc.save(&database) {
+            self.stats = Some(format!("{error}"));
+            cx.notify();
+            return;
+        }
+
+        let mut model = report.model.clone();
+        self.model_warnings = doc.apply(&mut model);
+        self.report = Some(
+            Report::new(model)
+                .attached_to(&report.qualifier)
+                .with_dimensions(self.selection.dimensions.clone())
+                .with_measures(self.selection.measures.clone()),
+        );
+        self.stats = Some(format!("relacion {next}"));
+        self.refresh(cx);
     }
 
     /// Filtra por el valor de texto de una dimension, como pinchar una barra.
@@ -2111,6 +2185,7 @@ impl Datan {
                         &model,
                         cx,
                     ))
+                    .child(self.render_relaciones(&model, cx))
                     .child(if query.is_empty() || !tablas.is_empty() || !measures.is_empty() {
                         div().into_any_element()
                     } else {
@@ -2791,6 +2866,101 @@ impl Datan {
             )
             .child(tabs)
             .into_any_element()
+    }
+
+    /// Las relaciones del modelo, con su rol.
+    ///
+    /// Es el unico sitio donde se ve POR QUE dos tablas estan conectadas. Una relacion que la
+    /// base no declara no se puede inventar sola, y una que el catalogo trae mal manda los
+    /// filtros por el camino equivocado sin dar ningun error: por eso el rol se cambia a mano
+    /// y se guarda en el documento del modelo.
+    fn render_relaciones(&self, model: &Model, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let mut list = div().flex_col().gap_1().mt_2();
+        if model.relationships.is_empty() {
+            list = list.child(div().px_2().pt_2().child(components::nota(
+                &theme,
+                "Relaciones",
+            )));
+            list = list.child(div().px_2().pb_2().child(components::nota(
+                &theme,
+                "la base no declara ninguna",
+            )));
+            return list;
+        }
+        list = list.child(div().px_2().pt_2().child(components::nota(
+            &theme,
+            "Relaciones",
+        )));
+
+        for relating in &model.relationships {
+            let (Some((from_table, from_column)), Some((to_table, to_column))) = (
+                model.column(relating.from_column),
+                model.column(relating.to_column),
+            ) else {
+                continue;
+            };
+            let activa = relating.role == RelationshipRole::Active;
+            let from = relating.from_column;
+            let to = relating.to_column;
+            let origen = format!("{}[{}]", from_table.name, from_column.name);
+            let destino = format!("a {}[{}]", to_table.name, to_column.name);
+            let row = div()
+                .id(ElementId::Name(
+                    format!("rel-{}-{}", from.0, to.0).into(),
+                ))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_xl()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(tokens::LETRA_NOTA))
+                                .overflow_hidden()
+                                .child(origen.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(tokens::LETRA_NOTA))
+                                .text_color(theme.muted_foreground)
+                                .overflow_hidden()
+                                .child(destino.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .px_1()
+                        .rounded_md()
+                        .text_size(px(tokens::LETRA_NOTA))
+                        .text_color(if activa {
+                            theme.primary_foreground
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .bg(if activa { theme.primary } else { theme.muted })
+                        .child(if activa { "activa" } else { "inactiva" }),
+                );
+            // En modo Lectura el rol se ve y no se toca: un interruptor que no hace nada es
+            // peor que no dibujarlo.
+            if self.lectura {
+                list = list.child(row);
+            } else {
+                list = list.child(row.cursor_pointer().hover(|style| style.bg(theme.list_hover)).on_click(
+                    cx.listener(move |view, _event, _window, cx| {
+                        view.toggle_relationship(from, to, cx);
+                    }),
+                ));
+            }
+        }
+        list
     }
 
     /// El panel de Datos como lo ve el usuario: tablas con su conteo de filas, y dentro

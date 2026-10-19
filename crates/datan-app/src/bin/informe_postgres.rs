@@ -67,6 +67,23 @@ fn main() {
     // vez de dar un numero. Es lo mismo que hace la app en `run_report`.
     let source = datan_report::source::DuckSource::new(&engine, &model, "pg");
 
+    println!("--- relaciones ---");
+    for relating in &model.relationships {
+        let (Some((from_table, from_column)), Some((to_table, to_column))) = (
+            model.column(relating.from_column),
+            model.column(relating.to_column),
+        ) else {
+            continue;
+        };
+        println!(
+            "  {}[{}] -> {}[{}] ({:?})",
+            from_table.name, from_column.name, to_table.name, to_column.name, relating.role
+        );
+    }
+    if model.relationships.is_empty() {
+        println!("  ninguna: una base sin foreign keys no trae relaciones");
+    }
+
     // Las dimensiones son las columnas de texto de las dimensiones que no son clave. Las
     // medidas, las de suma sobre los hechos.
     let dimensions: Vec<ObjectId> = model
@@ -243,6 +260,7 @@ fn main() {
             ),
         ],
         jerarquias: vec![],
+        relaciones: vec![],
     };
     let avisos = demo.apply(&mut con_calculadas);
     for aviso in &avisos {
@@ -307,6 +325,47 @@ fn main() {
                 }
             }
             Err(error) => println!("  ERROR: {error}"),
+        }
+    }
+
+    // Apagar una relacion tiene que notarse. Si el informe sigue dando lo mismo, el rol no
+    // gobierna nada y el interruptor de la app seria decorativo.
+    {
+        let mut sin_producto = user_doc.clone();
+        sin_producto.upsert_relationship(
+            model_doc::RelationshipDoc::new(
+                "catalogo_productos",
+                "id",
+                "product_boleta",
+                "product_id",
+            )
+            .con_rol("inactiva"),
+        );
+        let mut modelo_sin = model.clone();
+        let avisos = sin_producto.apply(&mut modelo_sin);
+        for aviso in &avisos {
+            println!("\nAVISO: {aviso}");
+        }
+        let sin_source = datan_report::source::DuckSource::new(&engine, &modelo_sin, "pg");
+        let categoria = modelo_sin
+            .table_by_name("catalogo_productos")
+            .and_then(|table| table.column_by_name("categoria"))
+            .map(|column| column.id);
+        let cantidad = modelo_sin
+            .measures
+            .iter()
+            .find(|m| m.expression.contains("quantity"))
+            .map(|m| m.id);
+        if let (Some(categoria), Some(cantidad)) = (categoria, cantidad) {
+            let informe = Report::new(modelo_sin.clone())
+                .attached_to("pg")
+                .with_dimensions(vec![categoria])
+                .with_measures(vec![cantidad]);
+            println!("\n--- por categoria con la relacion de productos APAGADA ---");
+            match informe.execute(&engine, Some(&sin_source)) {
+                Ok(matrix) => matrix.print(6),
+                Err(error) => println!("  ERROR: {error}"),
+            }
         }
     }
 
