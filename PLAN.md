@@ -1623,3 +1623,39 @@ visual.
 
 248 tests. Contra `datan_bench`, el mayor de `catalogo_productos[categoria]` por cantidad es
 Ferreteria con 1588000 y el menor es Almacen con 1424000, los mismos numeros que da `psql`.
+
+## Fase UI-9: Columnas calculadas
+
+Una columna calculada es una expresion DAX evaluada FILA A FILA sobre su tabla. No es una
+medida: la medida se evalua por celda de grupo y no tiene fila actual. Es la pieza que
+desbloquea una jerarquia de fecha (`anio`, `mes`, `dia`) encima de la tabla de hechos, que es
+la jerarquia mas comun que un informe necesita y que la base no declara.
+
+- `Column.origin` es un TIPO, `Physical | Calculated(String)`, y no un `Option<String>`: los
+  consumidores tratan distinto una columna fisica y una con expresion, y un campo opcional
+  deja que cada uno decida por su cuenta si tiene nombre fisico.
+- El chequeo va en contexto de FILA (`check_row`), que ya existia para el cuerpo de un
+  iterador. Una columna desnuda de esa tabla resuelve sin calificar; la de otra tabla es un
+  error. Una medida se rechaza al aplicar: no tiene valor fila a fila.
+- `CalculatedSource` envuelve cualquier `DataSource` y materializa la columna evaluando la
+  expresion por fila, con cache y guardia de reentrada por ciclo. Como el interprete pide
+  cada columna por id, la calculada se comporta como una fisica en TODO el camino: agrupar,
+  filtrar, ordenar, agregar. Sin envoltorio habria una rama paralela por cada uso.
+- El fast path SQL NO la baja: `SourceMap` deja de mapear su nombre fisico y el informe rutea
+  al interprete cuando el plan toca una (`por_el_interprete`). Es preferir el camino correcto
+  en vez de reaccionar a un error de columna.
+- El evaluador de fila gana las llamadas escalares y las comparaciones. Sin eso una calculada
+  con `IF` o con `YEAR` no se podia evaluar, que es justo lo que hace una calculada.
+- Se declaran en `~/.datan/models/<base>.toml`, con `expression` y `data_type`. Las columnas
+  se aplican ANTES que las medidas del mismo documento: la medida que suma una calculada
+  tiene que encontrarla.
+- El panel Datos ya las muestra: se dibuja desde las columnas de cada tabla conectada.
+- No hay editor en la app: se escriben en el TOML, como las jerarquias. Un panel de
+  propiedades es la fase que falta para crearlas con el mouse.
+
+### Resultado
+
+297 tests. `informe_postgres` verifica contra `datan_bench` una calculada de dos columnas y
+una condicional: `SUM(quantity * precio_unitario)` da 79328000000 por el motor y por SQL
+crudo, y la particion por `IF(quantity > 2, ...)` da Chico 1200000 y Grande 4800000 en los
+dos caminos.
