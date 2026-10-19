@@ -1780,3 +1780,30 @@ Los dos iconos de la barra superior estaban dibujados y apagados. No habia histo
 ### Resultado
 
 320 tests. La app arranca en 12 s con 159 MB RSS y sin errores en el log.
+
+## Fase UI-14: tema claro y oscuro
+
+El tema era una constante del componente: la app siempre se pintaba clara.
+
+- El boton vive en la barra superior, al lado de Editar/Lectura. Muestra a donde se va, no
+  donde se esta: en claro se ve la luna, en oscuro el sol. Un solo icono, no un segmento de
+  dos: el tema es un interruptor, no una eleccion entre tres.
+- El tema se guarda en `~/.datan/preferences.toml`, aparte de las conexiones. Un archivo de
+  preferencias roto no impide arrancar: se pierde el tema, no el trabajo. `Connections` si
+  devuelve error, porque una conexion que no se lee es una base que no se abre.
+- El tema se aplica antes de abrir la ventana. Al reves, el primer frame sale claro y el
+  segundo oscuro: un parpadeo en cada arranque.
+- El cambio de tema no entra en el historial. Deshacer un filtro no tiene por que devolver el
+  color de la ventana.
+- La paleta de series tiene dos escalones. Sobre `neutral-950` los tonos 600 quedan cerca de
+  3:1 y el violeta se hunde en el fondo; el oscuro usa los tonos 400. Cambia el escalon, no
+  la familia: la misma categoria conserva su color al cambiar de tema.
+- Todo lo demas sale del tema del componente: superficies, bordes, texto y rejilla de los
+  graficos. No queda ningun color fijo en la interfaz.
+- Sin opcion "Sistema": seguir el escritorio obliga a escuchar el cambio de apariencia de la
+  ventana, y una app que cambia de color sola a mitad de una reunion no ayuda.
+
+### Resultado
+
+328 tests. La app arranca en oscuro (preferencia escrita a mano) en 12 s con 157 MB RSS y sin
+errores en el log. El clic del boton no se pudo verificar sin captura de pantalla.

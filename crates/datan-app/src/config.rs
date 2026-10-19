@@ -14,6 +14,12 @@
 //!
 //! TOML plano en `~/.datan/connections.toml`. Sin secciones anidadas ni tablas de tablas: son
 //! pares nombre-base, y el archivo se lee mas veces de las que se escribe.
+//!
+//! # Preferencias
+//!
+//! `~/.datan/preferences.toml` guarda lo que no es una conexion: hoy, el tema. Se separa del
+//! archivo de conexiones porque una cosa no tiene por que perderse con la otra, y un archivo
+//! roto no impide arrancar: se pierde la preferencia, no el trabajo.
 
 use std::path::PathBuf;
 
@@ -152,6 +158,74 @@ impl Connections {
     }
 }
 
+/// El tema de la app.
+///
+/// Claro y oscuro, sin "sistema": seguir el tema del escritorio obliga a escuchar el cambio
+/// de apariencia de la ventana, y medio sistema seguisse y medio no dejaria una app que
+/// cambia de color sola a mitad de una reunion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tema {
+    #[default]
+    Claro,
+    Oscuro,
+}
+
+/// Las preferencias de la app.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preferences {
+    #[serde(default)]
+    pub tema: Tema,
+}
+
+impl Preferences {
+    /// El archivo del usuario.
+    pub fn path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".datan").join("preferences.toml")
+    }
+
+    /// Carga las preferencias.
+    ///
+    /// No devuelve error a proposito: un archivo que no parsea deja el tema por defecto y la
+    /// app arranca. Perder el tema es molesto; no abrir la app por el tema no tiene defensa.
+    pub fn load() -> Self {
+        Self::load_from(&Self::path())
+    }
+
+    /// Carga de una ruta. Es la mitad testeable de `load`.
+    pub fn load_from(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Guarda las preferencias.
+    pub fn save(&self) -> Result<(), ConfigError> {
+        self.save_to(&Self::path())
+    }
+
+    /// Guarda en una ruta. Es la mitad testeable de `save`.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return Err(ConfigError::Write {
+                path: parent.to_path_buf(),
+                source: error,
+            });
+        }
+
+        let text = toml::to_string_pretty(self)
+            .map_err(|_| ConfigError::Unknown("no se pudo serializar el tema".to_string()))?;
+        std::fs::write(path, text).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +277,74 @@ mod tests {
 
         let file: File = toml::from_str(&text).expect("vuelve a parsear");
         assert_eq!(file.connection, connections.list);
+    }
+
+    fn ruta_de_prueba(nombre: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "datan-preferencias-{}-{nombre}.toml",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn el_tema_guardado_vuelve_al_arrancar() {
+        let path = ruta_de_prueba("vuelve");
+        let preferences = Preferences { tema: Tema::Oscuro };
+        preferences.save_to(&path).expect("guarda");
+        let leido = Preferences::load_from(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(leido, preferences);
+    }
+
+    #[test]
+    fn sin_archivo_el_tema_es_claro() {
+        let path = ruta_de_prueba("no-existe");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(Preferences::load_from(&path).tema, Tema::Claro);
+    }
+
+    #[test]
+    fn un_archivo_roto_no_impide_arrancar() {
+        // La app no puede negarse a abrir porque una preferencia no parsea. El tema vuelve
+        // al default y el archivo se reescribe en el proximo cambio.
+        let path = ruta_de_prueba("roto");
+        std::fs::write(&path, "tema = 3\n").expect("escribe");
+        let leido = Preferences::load_from(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(leido.tema, Tema::Claro);
+    }
+
+    #[test]
+    fn un_archivo_sin_tema_abre_en_claro() {
+        // El archivo puede existir por otra preferencia, o venir de una version que no
+        // tenia tema. La falta del campo no es un error: es el default.
+        let preferences: Preferences = toml::from_str("").expect("parsea");
+        assert_eq!(preferences.tema, Tema::Claro);
+    }
+
+    #[test]
+    fn el_tema_se_lee_en_minusculas() {
+        let preferences: Preferences =
+            toml::from_str("tema = \"oscuro\"").expect("parsea");
+        assert_eq!(preferences.tema, Tema::Oscuro);
+    }
+
+    #[test]
+    fn un_tema_que_no_existe_no_se_inventa() {
+        // Una version futura escribe `sistema`; esta version no lo entiende y no puede
+        // adivinar. `Preferences::load` cae al default en vez de fallar.
+        assert!(toml::from_str::<Preferences>("tema = \"sistema\"").is_err());
+    }
+
+    #[test]
+    fn las_preferencias_se_escriben_sin_tablas() {
+        let text = toml::to_string_pretty(&Preferences {
+            tema: Tema::Oscuro,
+        })
+        .expect("serializa");
+        assert!(text.contains("tema = \"oscuro\""), "{text}");
+        let back: Preferences = toml::from_str(&text).expect("vuelve a parsear");
+        assert_eq!(back, Preferences { tema: Tema::Oscuro });
     }
 
     #[test]

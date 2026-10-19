@@ -85,12 +85,12 @@ pub const LETRA_ICONO: f32 = 16.0;
 
 // --- Paleta de series -----------------------------------------------------------------------
 
-/// Los cinco matices de la paleta de series.
+/// Los cinco matices de la paleta de series en claro.
 ///
 /// La paleta del tema (`chart.1` a `chart.5`) es una rampa de AZUL: cinco tonos del mismo
 /// color no distinguen cinco categorias, y en un anillo salen cinco porciones que parecen la
 /// misma. Estos son cinco matices distintos, en las familias que el tema ya usa.
-const SERIES: [u32; 5] = [
+const SERIES_CLARO: [u32; 5] = [
     0x2563eb, // azul
     0x0d9488, // verde azulado
     0xea580c, // naranja
@@ -98,14 +98,31 @@ const SERIES: [u32; 5] = [
     0xdc2626, // rojo
 ];
 
+/// La misma paleta un escalon mas clara, para el fondo oscuro.
+///
+/// Sobre `neutral-950` los tonos 600 quedan cerca de 3:1 y el violeta se hunde en el fondo.
+/// Cambia el escalon, no la familia: la misma categoria conserva su color al cambiar de tema,
+/// que es lo que hace que dos capturas del mismo informe se puedan comparar.
+const SERIES_OSCURO: [u32; 5] = [
+    0x60a5fa, // azul
+    0x2dd4bf, // verde azulado
+    0xfb923c, // naranja
+    0xa78bfa, // violeta
+    0xf87171, // rojo
+];
+
 /// El color de la serie `indice`. Cicla: ocho series usan los cinco colores otra vez.
-pub fn serie(indice: usize) -> Hsla {
-    Hsla::from(rgb(SERIES[indice % SERIES.len()]))
+///
+/// `oscuro` sale del tema vivo (`theme.is_dark()`), no de una preferencia guardada aparte: el
+/// color tiene que seguir el fondo que se esta pintando, no el que se eligio al arrancar.
+pub fn serie(indice: usize, oscuro: bool) -> Hsla {
+    let paleta = if oscuro { SERIES_OSCURO } else { SERIES_CLARO };
+    Hsla::from(rgb(paleta[indice % paleta.len()]))
 }
 
 /// El color de una barra segun su lugar, para el grafico de barras de una sola medida.
-pub fn serie_unica() -> Hsla {
-    serie(0)
+pub fn serie_unica(oscuro: bool) -> Hsla {
+    serie(0, oscuro)
 }
 
 #[cfg(test)]
@@ -114,19 +131,38 @@ mod tests {
 
     #[test]
     fn la_paleta_cicla_y_no_se_sale() {
-        assert_eq!(serie(0), Hsla::from(rgb(SERIES[0])));
-        assert_eq!(serie(5), serie(0), "el sexto color repite el primero");
-        assert_eq!(serie(7), serie(2));
+        assert_eq!(serie(0, false), Hsla::from(rgb(SERIES_CLARO[0])));
+        assert_eq!(serie(5, false), serie(0, false), "el sexto color repite el primero");
+        assert_eq!(serie(7, false), serie(2, false));
     }
 
     #[test]
-    fn los_cinco_colores_son_distintos() {
+    fn los_cinco_colores_son_distintos_en_los_dos_temas() {
         // Una paleta con un color repetido dibuja dos categorias con el mismo tono, y la
-        // leyenda miente sin decirlo.
-        let mut vistos: Vec<Hsla> = (0..5).map(serie).collect();
-        vistos.sort_by(|a, b| a.h.partial_cmp(&b.h).expect("sin NaN"));
-        let antes = vistos.len();
-        vistos.dedup();
-        assert_eq!(vistos.len(), antes);
+        // leyenda miente sin decirlo. Vale para el claro y para el oscuro.
+        for oscuro in [false, true] {
+            let mut vistos: Vec<Hsla> = (0..5).map(|indice| serie(indice, oscuro)).collect();
+            vistos.sort_by(|a, b| a.h.partial_cmp(&b.h).expect("sin NaN"));
+            let antes = vistos.len();
+            vistos.dedup();
+            assert_eq!(vistos.len(), antes, "oscuro = {oscuro}");
+        }
+    }
+
+    #[test]
+    fn la_misma_categoria_conserva_el_matiz_al_cambiar_de_tema() {
+        // El escalon cambia; la familia no. Si el indice 2 fuera violeta en claro y naranja
+        // en oscuro, cambiar de tema reordenaria las categorias de un grafico.
+        for indice in 0..5 {
+            let claro = serie(indice, false).h;
+            let oscuro = serie(indice, true).h;
+            // Diferencia circular: el rojo vive en 0 y en 1 a la vez.
+            let mut diferencia = (claro - oscuro).abs();
+            diferencia = diferencia.min(1.0 - diferencia);
+            assert!(
+                diferencia < 0.03,
+                "el indice {indice} cambia de familia: {claro} contra {oscuro}"
+            );
+        }
     }
 }

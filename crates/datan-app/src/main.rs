@@ -783,6 +783,23 @@ impl Datan {
         self.historial.olvidar();
     }
 
+    /// Cambia entre claro y oscuro, y lo recuerda en el archivo de preferencias.
+    ///
+    /// El cambio de tema no entra en el historial: deshacer un filtro no tiene por que
+    /// devolver el color de la ventana.
+    fn cambiar_tema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tema = if cx.theme().is_dark() {
+            config::Tema::Claro
+        } else {
+            config::Tema::Oscuro
+        };
+        aplicar_tema(tema, Some(window), cx);
+        if let Err(error) = (config::Preferences { tema }).save() {
+            self.stats = Some(format!("no se pudo guardar el tema: {error}"));
+        }
+        cx.notify();
+    }
+
     /// El formato del visual que se esta mirando. El que no se toco usa el default.
     fn formato_actual(&self) -> datan_report::saved::SavedFormato {
         self.formatos
@@ -2209,7 +2226,12 @@ fn tarjeta_kpi(
     if formato.comparacion
         && let Some(serie) = tarjeta.serie.as_deref().filter(|serie| serie.len() > 1)
     {
-        cuerpo = cuerpo.child(div().flex().justify_end().child(sparkline(serie)));
+        cuerpo = cuerpo.child(
+            div()
+                .flex()
+                .justify_end()
+                .child(sparkline(serie, theme.is_dark())),
+        );
     }
 
     components::superficie(theme, formato.fondo)
@@ -2226,9 +2248,9 @@ fn tarjeta_kpi(
 /// A 96 x 28 px no cabe un grafico: la rejilla, los ejes y la leyenda miden mas que el dato.
 /// La forma de la linea es lo unico que se mira en una tarjeta, y para la forma alcanza un
 /// `canvas` con dos trazos.
-fn sparkline(serie: &[f64]) -> AnyElement {
+fn sparkline(serie: &[f64], oscuro: bool) -> AnyElement {
     let datos: Vec<f64> = serie.to_vec();
-    let linea = tokens::serie(0);
+    let linea = tokens::serie(0, oscuro);
     let relleno = linea.opacity(0.12);
     // El tamano va EN el canvas y no en un div de afuera: un canvas se mide por su
     // contenido, que no tiene, asi que hereda un alto de cero y todos los puntos caen en la
@@ -3279,6 +3301,17 @@ impl Datan {
                 )
             })
             .child(modo)
+            // El icono dice a donde se va, no donde se esta: en claro se ve la luna.
+            .child(components::boton_icono(
+                &theme,
+                "tema",
+                if cx.theme().is_dark() {
+                    IconName::Sun
+                } else {
+                    IconName::Moon
+                },
+                cx.listener(|view, _event, window, cx| view.cambiar_tema(window, cx)),
+            ))
             .child(components::boton_apagado(&theme, "Compartir"))
             .child(components::boton_apagado(&theme, "Publicar"));
 
@@ -3964,7 +3997,7 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
             .child(
                 div()
                     .flex_1()
-                    .child(dibujo(tipo, puntos, medida, formato.eje)),
+                    .child(dibujo(tipo, puntos, medida, formato.eje, theme.is_dark())),
             )
             .child(leyenda(theme, puntos, dimension_id, cx))
             .into_any_element(),
@@ -3979,7 +4012,7 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
         _ => div()
             .flex()
             .flex_1()
-            .child(dibujo(tipo, puntos, medida, formato.eje))
+            .child(dibujo(tipo, puntos, medida, formato.eje, theme.is_dark()))
             .into_any_element(),
     };
 
@@ -4046,7 +4079,7 @@ fn dispersion(theme: &Theme, nube: &[(f64, f64)], eje: bool) -> AnyElement {
             )
         })
         .collect();
-    let color = tokens::serie_unica();
+    let color = tokens::serie_unica(theme.is_dark());
     let rejilla = theme.chart_grid;
 
     let dibujo = canvas(
@@ -4130,12 +4163,12 @@ fn dispersion(theme: &Theme, nube: &[(f64, f64)], eje: bool) -> AnyElement {
 }
 
 /// El dibujo de un grafico del sistema, segun el tipo elegido.
-fn dibujo(tipo: &str, puntos: &[Punto], medida: &str, eje: bool) -> AnyElement {
+fn dibujo(tipo: &str, puntos: &[Punto], medida: &str, eje: bool, oscuro: bool) -> AnyElement {
     let datos = puntos.to_vec();
     let nombre = SharedString::from(medida.to_string());
     // Una sola medida: un solo color. El color por categoria es para el anillo, donde cada
     // porcion ES una categoria.
-    let color = tokens::serie_unica();
+    let color = tokens::serie_unica(oscuro);
     let id = ElementId::Name(SharedString::from(format!("grafico-{tipo}")));
 
     match tipo {
@@ -4175,7 +4208,7 @@ fn dibujo(tipo: &str, puntos: &[Punto], medida: &str, eje: bool) -> AnyElement {
         "Anillo" => PieChart::new(datos)
             .id(id)
             .value(|punto: &Punto| punto.valor as f32)
-            .color(|punto: &Punto| tokens::serie(punto.indice))
+            .color(move |punto: &Punto| tokens::serie(punto.indice, oscuro))
             .inner_radius(64.0)
             .name(nombre)
             .tooltip_name(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
@@ -4250,7 +4283,7 @@ fn leyenda_columna(
                         .h(px(8.0))
                         .flex_shrink_0()
                         .rounded_full()
-                        .bg(tokens::serie(punto.indice)),
+                        .bg(tokens::serie(punto.indice, theme.is_dark())),
                 )
                 .child(
                     div()
@@ -4331,7 +4364,7 @@ fn barras(
                                 .flex_grow(fraccion as f32 * 1000.0)
                                 .h_full()
                                 .rounded_sm()
-                                .bg(tokens::serie_unica()),
+                                .bg(tokens::serie_unica(theme.is_dark())),
                         )
                         .child(div().flex_grow((1.0 - fraccion) as f32 * 1000.0)),
                 );
@@ -4392,6 +4425,18 @@ fn cx_hover(color: Hsla, cell: Div) -> Div {
     cell.hover(move |style| style.bg(color))
 }
 
+/// Aplica el tema de la app.
+///
+/// El archivo guarda un enum propio (`config::Tema`) y no el `ThemeMode` del componente: el
+/// formato del archivo no tiene que cambiar el dia que el componente renombre el suyo.
+fn aplicar_tema(tema: config::Tema, window: Option<&mut Window>, cx: &mut App) {
+    let mode = match tema {
+        config::Tema::Claro => gpui_kit::component::ThemeMode::Light,
+        config::Tema::Oscuro => gpui_kit::component::ThemeMode::Dark,
+    };
+    Theme::change(mode, window, cx);
+}
+
 fn main() {
     application()
         // `Assets` es el juego corto de 106 iconos del componente, y no tiene los siete que
@@ -4400,6 +4445,9 @@ fn main() {
         .with_assets(assets::AllAssets)
         .run(|cx| {
             init(cx);
+            // El tema se aplica antes de abrir la ventana: al reves, el primer frame se pinta
+            // claro y el segundo oscuro, un parpadeo en cada arranque.
+            aplicar_tema(config::Preferences::load().tema, None, cx);
             let database = std::env::var("DATAN_AUTOCONNECT").unwrap_or_default();
             open_window(WindowOptions::default(), cx, |_, cx| {
                 let view = cx.new(Datan::new);
