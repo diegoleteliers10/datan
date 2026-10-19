@@ -7,7 +7,7 @@
 
 use datan_dax_eval::FilterValue;
 use datan_model::{Measure, ObjectId};
-use datan_report::{Matrix, Report};
+use datan_report::{Matrix, Report, RowKind};
 use datan_testkit::{engine, memory_source, model, Y2024};
 
 fn measure(id: &str) -> ObjectId {
@@ -750,5 +750,92 @@ fn la_matriz_sale_en_el_orden_de_sort_by() {
         assert_eq!(matrix.cell(row, 0), Some(*region));
         let q: f64 = matrix.cell(row, 1).unwrap().parse().unwrap();
         assert_eq!(q, *qty, "fila {region}");
+    }
+}
+
+#[test]
+fn los_subtotales_cuelgan_de_su_grupo_y_el_total_va_al_final() {
+    // Dos dimensiones: la matriz es una jerarquia. Debajo de los detalles de cada region va
+    // su subtotal, y el gran total cierra la tabla. El orden importa tanto como el numero:
+    // un subtotal junto al grupo equivocado parece un dato.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21), ObjectId(22)])
+        .with_measures(vec![measure("Qty")])
+        .with_subtotals(true);
+
+    let esperado = [
+        ("Este", "A", "24", RowKind::Data),
+        ("Este", "B", "33", RowKind::Data),
+        ("Este", "", "57", RowKind::Subtotal { level: 0 }),
+        ("Norte", "A", "27", RowKind::Data),
+        ("Norte", "B", "33", RowKind::Data),
+        ("Norte", "", "60", RowKind::Subtotal { level: 0 }),
+        ("Sur", "A", "24", RowKind::Data),
+        ("Sur", "B", "24", RowKind::Data),
+        ("Sur", "", "48", RowKind::Subtotal { level: 0 }),
+        ("", "", "165", RowKind::GrandTotal),
+    ];
+
+    let engine = engine().expect("motor");
+    let matrix = report.execute(&engine, None).expect("corre");
+    assert_eq!(matrix.row_count(), esperado.len(), "nueve renglones y el total");
+    for (row, (region, categoria, qty, kind)) in esperado.iter().enumerate() {
+        assert_eq!(matrix.cell(row, 0), Some(*region), "fila {row}");
+        assert_eq!(matrix.cell(row, 1), Some(*categoria), "fila {row}");
+        assert_eq!(matrix.cell(row, 2), Some(*qty), "fila {row}");
+        assert_eq!(&matrix.row_kind(row), kind, "fila {row}");
+    }
+
+    // El interprete arma LA MISMA tabla: mismo orden, mismos renglones marcados.
+    let source = memory_source();
+    let matrix = report.execute(&engine, Some(&source)).expect("corre");
+    assert_eq!(matrix.row_count(), esperado.len());
+    for (row, (region, categoria, qty, kind)) in esperado.iter().enumerate() {
+        assert_eq!(matrix.cell(row, 0), Some(*region), "interprete fila {row}");
+        assert_eq!(matrix.cell(row, 2), Some(*qty), "interprete fila {row}");
+        assert_eq!(&matrix.row_kind(row), kind, "interprete fila {row}");
+    }
+}
+
+#[test]
+fn los_subtotales_con_una_dimension_no_hacen_nada() {
+    // Una jerarquia de un nivel no tiene niveles intermedios: con subtotales encendidos, la
+    // matriz sigue siendo la de siempre. Cambiar el numero de filas sin motivo romperia a
+    // los que leen la matriz.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21)])
+        .with_measures(vec![measure("Qty")])
+        .with_subtotals(true);
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    assert_eq!(matrix.row_count(), 3, "Este, Norte y Sur");
+    for row in 0..matrix.row_count() {
+        assert_eq!(matrix.row_kind(row), RowKind::Data);
+    }
+}
+
+#[test]
+fn el_subtotal_no_es_un_valor_para_filtrar() {
+    // Un subtotal resume un grupo: pincharlo no puede filtrar por un valor que no existe en
+    // la columna. La matriz lleva la marca y `row_kind` la entrega; el que decide el clic es
+    // la app, pero el contracto empieza aqui: `row_kind` distingue.
+    let model = model();
+    let report = Report::new(model)
+        .with_dimensions(vec![ObjectId(21), ObjectId(22)])
+        .with_measures(vec![measure("Qty")])
+        .with_subtotals(true);
+    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let subtotales: Vec<usize> = (0..matrix.row_count())
+        .filter(|row| matrix.row_kind(*row) != RowKind::Data)
+        .collect();
+    assert_eq!(subtotales.len(), 4, "tres subtotales y el gran total");
+    for row in subtotales {
+        // La dimension recogida queda VACIA, no con un valor inventado.
+        assert!(
+            matrix.cell(row, 0).unwrap_or("").is_empty()
+                || matrix.cell(row, 1).unwrap_or("").is_empty(),
+            "fila {row}"
+        );
     }
 }

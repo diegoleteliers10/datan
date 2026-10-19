@@ -31,7 +31,7 @@ mod tokens;
 
 use components::Peso;
 use config::Connections;
-use datan_report::{Header, Matrix, Report, source::DuckSource};
+use datan_report::{Header, Matrix, Report, RowKind, source::DuckSource};
 use datan_storage::Engine;
 
 use gpui_kit::component::input::{Input, InputState};
@@ -75,6 +75,9 @@ struct Column {
 #[derive(Clone)]
 struct Grid {
     columns: Arc<[Column]>,
+    /// Que renglon es cada fila, en el orden de la matriz: dato, subtotal o gran total.
+    /// Los subtotales se pintan distintos y no aceptan clic.
+    kinds: Arc<[datan_report::RowKind]>,
     row_count: usize,
 }
 
@@ -775,7 +778,11 @@ impl Datan {
         };
         let mut report = base
             .with_dimensions(self.selection.dimensions.clone())
-            .with_measures(self.selection.measures.clone());
+            .with_measures(self.selection.measures.clone())
+            // Con dos dimensiones o mas la matriz es una jerarquia y lleva subtotales. Con
+            // una, no hay niveles intermedios y encenderlos cambiaria el numero de filas
+            // que ven el grid, el drill y los exports sin motivo.
+            .with_subtotals(self.selection.dimensions.len() >= 2);
         // Los filtros activos se vuelven a aplicar por COLUMNA, como un conjunto: dos valores
         // de la misma columna son una union (`IN`), y aplicarlos como dos filtros que se
         // intersectan dejaria la matriz vacia. El informe base es el que tiene el filtro de
@@ -1341,6 +1348,12 @@ fn build_grid(
 
     Grid {
         columns: Arc::from(columns.into_boxed_slice()),
+        kinds: Arc::from(
+            (0..matrix.row_count())
+                .map(|row| matrix.row_kind(row))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
         row_count: matrix.row_count(),
     }
 }
@@ -2767,20 +2780,36 @@ impl Datan {
         if let Some(matrix) = self.matrix.as_mut()
             && let Some((column, descending)) = self.sort
         {
-            // Ordenar en su sitio para que `drill` lea la misma fila que pinto. Un orden en
+            // Ordenar en su sitio para que `drill` lea la misma fila que pinta. Un orden en
             // la pantalla y otro en el modelo haria que el clic filtrara por el valor de
             // OTRO producto.
-            matrix.rows.sort_by(|a, b| {
-                let parse = |row: &Vec<String>| {
-                    row.get(column)
-                        .and_then(|value| value.parse::<f64>().ok())
-                };
-                parse(a)
-                    .partial_cmp(&parse(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            if descending {
-                matrix.rows.reverse();
+            //
+            // Con subtotales, cada corrida de renglones de dato se ordena DENTRO de su
+            // grupo: mover un subtotal de sitio desarmaria el arbol, y una corrida de datos
+            // es exactamente los detalles de un grupo.
+            let parse = |row: &Vec<String>| {
+                row.get(column)
+                    .and_then(|value| value.parse::<f64>().ok())
+            };
+            let mut inicio = 0;
+            while inicio < matrix.rows.len() {
+                if matrix.row_kind(inicio) != RowKind::Data {
+                    inicio += 1;
+                    continue;
+                }
+                let mut fin = inicio;
+                while fin < matrix.rows.len() && matrix.row_kind(fin) == RowKind::Data {
+                    fin += 1;
+                }
+                matrix.rows[inicio..fin].sort_by(|a, b| {
+                    parse(a)
+                        .partial_cmp(&parse(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                if descending {
+                    matrix.rows[inicio..fin].reverse();
+                }
+                inicio = fin;
             }
         }
 
@@ -2788,6 +2817,7 @@ impl Datan {
             return div().into_any_element();
         };
         let columns = Arc::clone(&grid.columns);
+        let kinds = Arc::clone(&grid.kinds);
         let row_count = grid.row_count;
         let dimension_count = self
             .report
@@ -2851,6 +2881,10 @@ impl Datan {
             move |range, _window, _cx| {
                 range
                     .map(|row| {
+                        // Un subtotal resume un grupo: se lee con peso y sin clic. El gran
+                        // total cierra la tabla con el mismo trato.
+                        let destacado =
+                            !matches!(kinds.get(row), None | Some(RowKind::Data));
                         let cells = columns.iter().enumerate().map(|(index, column)| {
                             // Las celdas de medida y las de dimension son tipos distintos
                             // (Div y Stateful<Div>), asi que la fila se arma de elementos ya
@@ -2869,11 +2903,16 @@ impl Datan {
                                         .cloned()
                                         .unwrap_or_default(),
                                 );
+                            if destacado {
+                                cell = cell.font_semibold();
+                            }
                             if column.numeric {
                                 cell = cell.text_align(TextAlign::Right);
                             }
 
-                            if index >= dimension_count {
+                            // Solo un renglon de dato filtra al pinchar. Pinchar un subtotal
+                            // seria filtrar por un valor que no existe en la columna.
+                            if destacado || index >= dimension_count {
                                 return cell.into_any_element();
                             }
 
@@ -2894,11 +2933,15 @@ impl Datan {
                                 .into_any_element()
                         });
 
-                        div()
+                        let mut fila = div()
                             .flex()
                             .border_b_1()
                             .border_color(theme.border)
-                            .children(cells)
+                            .children(cells);
+                        if destacado {
+                            fila = fila.bg(theme.muted);
+                        }
+                        fila
                     })
                     .collect::<Vec<_>>()
             },

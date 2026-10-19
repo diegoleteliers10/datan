@@ -410,6 +410,7 @@ mod tests {
                 vec!["Sur,Este".to_string(), String::new()],
                 vec!["cantidad \"rara\"".to_string(), "-1.5".to_string()],
             ],
+            kinds: Vec::new(),
             truncated: false,
         }
     }

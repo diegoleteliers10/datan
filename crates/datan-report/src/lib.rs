@@ -80,6 +80,11 @@ pub struct Report {
     /// `pg.product_boleta`. Sin esto, el SQL se genera bien y DuckDB responde "table does not
     /// exist" con una pista que es justamente el nombre con el prefijo que falta.
     pub qualifier: String,
+    /// Subtotales por nivel de dimension y gran total al final.
+    ///
+    /// Apagado por defecto: una matriz de UNA dimension no tiene subtotales que mostrar, y
+    /// encenderlo de mas cambia el numero de filas que ven todos los consumidores.
+    pub subtotales: bool,
 }
 
 impl Report {
@@ -90,7 +95,15 @@ impl Report {
             measures: Vec::new(),
             filters: FilterContext::empty(),
             qualifier: String::new(),
+            subtotales: false,
         }
+    }
+
+    /// Enciende o apaga los subtotales. Con menos de dos dimensiones no hacen nada: una
+    /// jerarquia de un nivel no tiene niveles intermedios.
+    pub fn with_subtotals(mut self, subtotales: bool) -> Self {
+        self.subtotales = subtotales;
+        self
     }
 
     /// El informe corre contra la base adjunta con este alias.
@@ -346,7 +359,9 @@ impl Report {
         let plans = self.plans()?;
 
         let width = headers.len();
+        let con_subtotales = self.subtotales && self.dimensions.len() >= 2;
         let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut kinds: Vec<RowKind> = Vec::new();
 
         for (atoms, members) in &plans {
             // Sin forma no hay valor que pegar. El camino viejo emitia una columna por atomo
@@ -362,7 +377,7 @@ impl Report {
             let measure_columns = atoms.outputs.len();
             let produced = self.dimensions.len() + measure_columns;
 
-            let cells = if atoms.needs_interpreter() {
+            let (cells, kinds_del_plan) = if atoms.needs_interpreter() {
                 let source = source.ok_or_else(|| ReportError::NoSource {
                     measure: members
                         .first()
@@ -371,26 +386,42 @@ impl Report {
                         .unwrap_or_else(|| "?".to_string()),
                 })?;
                 let interpreter = Interpreter::new(&self.model, source);
-                let grouped = interpreter
-                    .evaluate_grouped(
-                        &atoms.atoms,
-                        &atoms.outputs,
-                        &self.filters,
-                        &self.dimensions,
-                        MAX_CELLS,
-                    )
-                    .map_err(|error| ReportError::Interp(error.to_string()))?;
-                grouped
-                    .rows
-                    .iter()
-                    .map(|row| row.iter().map(scalar_to_text).collect())
-                    .collect::<Vec<Vec<String>>>()
+                if con_subtotales {
+                    subtotales_del_interprete(&interpreter, atoms, &self.filters, &self.dimensions)?
+                } else {
+                    let grouped = interpreter
+                        .evaluate_grouped(
+                            &atoms.atoms,
+                            &atoms.outputs,
+                            &self.filters,
+                            &self.dimensions,
+                            MAX_CELLS,
+                        )
+                        .map_err(|error| ReportError::Interp(error.to_string()))?;
+                    let filas = grouped
+                        .rows
+                        .iter()
+                        .map(|row| row.iter().map(scalar_to_text).collect())
+                        .collect::<Vec<Vec<String>>>();
+                    let tipos = vec![RowKind::Data; filas.len()];
+                    (filas, tipos)
+                }
             } else {
-                let plan = lower(&self.model, &sources, atoms, &self.filters)
-                    .map_err(|error| ReportError::Interp(error.to_string()))?;
-                engine
+                let plan = if con_subtotales {
+                    datan_dax_sql::lower_with_subtotals(&self.model, &sources, atoms, &self.filters)
+                } else {
+                    lower(&self.model, &sources, atoms, &self.filters)
+                }
+                .map_err(|error| ReportError::Interp(error.to_string()))?;
+                let crudas = engine
                     .render_rows(&plan.sql)
-                    .map_err(|error| ReportError::Query(error.to_string()))?
+                    .map_err(|error| ReportError::Query(error.to_string()))?;
+                if con_subtotales {
+                    separar_banderas(crudas, self.dimensions.len(), produced)?
+                } else {
+                    let tipos = vec![RowKind::Data; crudas.len()];
+                    (crudas, tipos)
+                }
             };
 
             for row in &cells {
@@ -400,6 +431,16 @@ impl Report {
                         got: row.len(),
                     });
                 }
+            }
+
+            if kinds.is_empty() {
+                kinds = kinds_del_plan;
+            } else if kinds != kinds_del_plan {
+                return Err(ReportError::Query(
+                    "dos medidas del informe produjeron renglones de tipo distinto. Con el \
+                     mismo filtro y agrupamiento tienen que ser las mismas"
+                        .to_string(),
+                ));
             }
 
             if rows.is_empty() {
@@ -451,9 +492,117 @@ impl Report {
         Ok(Matrix {
             headers,
             rows,
+            kinds,
             truncated: false,
         })
     }
+}
+
+/// Que renglon dicen las banderas de `GROUPING`: una por dimension, al final de la fila.
+///
+/// Las recogidas son las dimensiones que el renglon NO desglosa. Todas: gran total. Ninguna:
+/// dato. Las demas: el subtotal del nivel mas profundo que conserva, que es `dims - recogidas
+/// - 1`.
+fn separar_banderas(
+    crudas: Vec<Vec<String>>,
+    dims: usize,
+    produced: usize,
+) -> Result<(Vec<Vec<String>>, Vec<RowKind>), ReportError> {
+    let mut filas = Vec::with_capacity(crudas.len());
+    let mut kinds = Vec::with_capacity(crudas.len());
+    for mut fila in crudas {
+        if fila.len() != produced + dims {
+            return Err(ReportError::ColumnCount {
+                expected: produced + dims,
+                got: fila.len(),
+            });
+        }
+        let recogidas = fila.drain(produced..).filter(|c| c == "1").count();
+        let kind = match recogidas {
+            0 => RowKind::Data,
+            n if n == dims => RowKind::GrandTotal,
+            n => RowKind::Subtotal {
+                level: dims - n - 1,
+            },
+        };
+        // La dimension recogida sale como texto "NULL" y queda VACIA: un subtotal no
+        // desglosa esa dimension, y un "NULL" pintado parece un dato que no existe.
+        let desde = match kind {
+            RowKind::Data => usize::MAX,
+            RowKind::Subtotal { level } => level + 1,
+            RowKind::GrandTotal => 0,
+        };
+        for celda in fila.iter_mut().take(dims).skip(desde) {
+            *celda = String::new();
+        }
+        kinds.push(kind);
+        filas.push(fila);
+    }
+    Ok((filas, kinds))
+}
+
+/// Los renglones de una matriz con subtotales por el camino del interprete.
+///
+/// Un nivel por prefijo de dimensiones: el nivel `l` agrupa por las primeras `l+1`. El
+/// recorrido es el de la matriz: por cada grupo, su subarbol y DESPUES su subtotal; al final,
+/// el gran total sin dimensiones. Dos lecturas por nivel, no una por grupo.
+fn subtotales_del_interprete(
+    interpreter: &Interpreter,
+    atoms: &datan_dax_eval::AtomSet,
+    filters: &FilterContext,
+    dims: &[ObjectId],
+) -> Result<(Vec<Vec<String>>, Vec<RowKind>), ReportError> {
+    let niveles: Vec<Vec<Vec<String>>> = (0..dims.len())
+        .map(|l| {
+            interpreter
+                .evaluate_grouped(&atoms.atoms, &atoms.outputs, filters, &dims[..=l], MAX_CELLS)
+                .map(|grouped| {
+                    grouped
+                        .rows
+                        .iter()
+                        .map(|row| row.iter().map(scalar_to_text).collect::<Vec<String>>())
+                        .collect()
+                })
+                .map_err(|error| ReportError::Interp(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    fn rec(
+        nivel: usize,
+        prefijo: &[String],
+        niveles: &[Vec<Vec<String>>],
+        filas: &mut Vec<Vec<String>>,
+        kinds: &mut Vec<RowKind>,
+    ) {
+        for fila in niveles[nivel]
+            .iter()
+            .filter(|f| f.len() >= prefijo.len() && f[..prefijo.len()] == *prefijo)
+        {
+            if nivel + 1 < niveles.len() {
+                rec(nivel + 1, &fila[..=nivel], niveles, filas, kinds);
+                filas.push(fila.clone());
+                kinds.push(RowKind::Subtotal { level: nivel });
+            } else {
+                filas.push(fila.clone());
+                kinds.push(RowKind::Data);
+            }
+        }
+    }
+
+    let mut filas = Vec::new();
+    let mut kinds = Vec::new();
+    rec(0, &[], &niveles, &mut filas, &mut kinds);
+
+    // El gran total es OTRA consulta: sin agrupamiento, una fila de medidas.
+    let totales = interpreter
+        .evaluate_totals(&atoms.atoms, &atoms.outputs, filters)
+        .map_err(|error| ReportError::Interp(error.to_string()))?;
+    let mut fila = vec![String::new(); dims.len()];
+    fila.extend(totales.iter().map(scalar_to_text));
+    filas.push(fila);
+    kinds.push(RowKind::GrandTotal);
+
+    Ok((filas, kinds))
 }
 
 /// Una cabecera de columna.
@@ -473,12 +622,31 @@ impl Header {
     }
 }
 
+/// Que renglon es cada fila de la matriz.
+///
+/// Con subtotales, una matriz no es una lista plana de datos: un renglon puede resumir un
+/// grupo o el informe entero. El que pinta lo distingue (fondo, peso, sin clic) y el que
+/// exporta decide si lo lleva; sin esta marca, un subtotal es una fila mas y pincharlo
+/// filtraria por un valor que no existe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    /// Un renglon del detalle.
+    Data,
+    /// El renglon que resume las dimensiones `0..=level` de su grupo.
+    Subtotal { level: usize },
+    /// El total del informe, sin dimensiones.
+    GrandTotal,
+}
+
 /// La matriz del informe.
 #[derive(Debug, Clone)]
 pub struct Matrix {
     pub headers: Vec<Header>,
     /// Cada fila: primero los valores de dimension, luego los de medida.
     pub rows: Vec<Vec<String>>,
+    /// Que renglon es cada fila, en el mismo orden. Mas corto que `rows` solo en una matriz
+    /// construida a mano sin subtotales: todo lo que falte es `Data`.
+    pub kinds: Vec<RowKind>,
     /// `true` si el informe tiene mas celdas de las que se muestran.
     pub truncated: bool,
 }
@@ -495,6 +663,11 @@ impl Matrix {
     /// El valor de una celda.
     pub fn cell(&self, row: usize, column: usize) -> Option<&str> {
         self.rows.get(row)?.get(column).map(String::as_str)
+    }
+
+    /// Que renglon es la fila. Las matrices sin subtotales ni siquiera llevan la lista.
+    pub fn row_kind(&self, row: usize) -> RowKind {
+        self.kinds.get(row).copied().unwrap_or(RowKind::Data)
     }
 
     /// Los primeros `n` valores de una columna de dimension, ordenados por una de medidas.

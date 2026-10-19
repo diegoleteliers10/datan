@@ -98,6 +98,33 @@ pub fn lower(
     atoms: &AtomSet,
     filters: &FilterContext,
 ) -> Result<SqlPlan, LowerError> {
+    bajar(model, sources, atoms, filters, false)
+}
+
+/// La misma consulta, con SUBTOTALES: `GROUPING SETS` con todos los prefijos del
+/// agrupamiento y el conjunto vacio, mas una columna `GROUPING` por dimension al final del
+/// `SELECT`.
+///
+/// Las banderas son la unica forma de saber QUE renglon es cada fila: un subtotal tiene las
+/// dimensiones recogidas en NULL, y un NULL en una dimension tambien existe como dato. La
+/// fila de columnas queda dims + medidas + dims banderas, en ese orden; el informe se queda
+/// con las primeras y lee las ultimas.
+pub fn lower_with_subtotals(
+    model: &Model,
+    sources: &SourceMap,
+    atoms: &AtomSet,
+    filters: &FilterContext,
+) -> Result<SqlPlan, LowerError> {
+    bajar(model, sources, atoms, filters, true)
+}
+
+fn bajar(
+    model: &Model,
+    sources: &SourceMap,
+    atoms: &AtomSet,
+    filters: &FilterContext,
+    subtotales: bool,
+) -> Result<SqlPlan, LowerError> {
     if atoms.needs_interpreter() {
         let culprit = atoms
             .atoms
@@ -254,7 +281,11 @@ pub fn lower(
     // El `GROUP BY` repite el nombre de la columna, NO el alias. DuckDB rechaza un alias
     // dentro del `GROUP BY`: "aliases cannot be used as part of an expression in the GROUP
     // BY". Por eso aqui se usa el nombre entrecomillado, no el del `SELECT`.
-    let group_by = grouping
+    //
+    // Con subtotales, `GROUPING SETS` con el conjunto entero, todos los prefijos y el vacio.
+    // Cada conjunto es un nivel de la jerarquia: el renglon del nivel l resume las primeras
+    // l+1 dimensiones.
+    let expresiones: Vec<String> = grouping
         .iter()
         .map(|column| {
             sources
@@ -267,8 +298,30 @@ pub fn lower(
                     )
                 })
         })
-        .collect::<Result<Vec<_>, _>>()?
-        .join(", ");
+        .collect::<Result<Vec<_>, _>>()?;
+    let group_by = if subtotales && grouping.len() >= 2 {
+        let conjuntos: Vec<String> = (0..=grouping.len())
+            .rev()
+            .map(|k| {
+                if k == 0 {
+                    "()".to_string()
+                } else {
+                    format!("({})", expresiones[..k].join(", "))
+                }
+            })
+            .collect();
+        format!("GROUPING SETS ({})", conjuntos.join(", "))
+    } else {
+        expresiones.join(", ")
+    };
+
+    // Con subtotales, una bandera `GROUPING` por dimension al final del SELECT: dicen si el
+    // renglon recoge esa dimension, y con eso se sabe si es dato, subtotal o gran total.
+    if subtotales && grouping.len() >= 2 {
+        for (index, expresion) in expresiones.iter().enumerate() {
+            select.push(format!("GROUPING({}) AS \"grupo{index}\"", expresion));
+        }
+    }
 
     // El `ORDER BY` es lo que hace que el grid tenga filas estables.
     //
@@ -283,9 +336,25 @@ pub fn lower(
     // Una columna con `sort_by` se ordena por SU columna de orden. En el SQL entra como
     // `MIN` porque no esta en el `GROUP BY`: como es funcionalmente dependiente de la que
     // agrupa, el minimo es EL valor, y el orden sale igual que en el interprete.
+    //
+    // Con subtotales, cada dimension lleva su `GROUPING` delante y `NULLS LAST` detras: el
+    // renglon del subtotal tiene la dimension en NULL, y el NULL se va al fondo de su grupo.
+    // El resultado es el layout de una matriz: los detalles de cada grupo, debajo su
+    // subtotal, y el gran total al final.
+    let con_subtotales = subtotales && grouping.len() >= 2;
     let order_by = grouping
         .iter()
-        .map(|column| {
+        .enumerate()
+        .map(|(index, column)| {
+            let bandera = if con_subtotales {
+                format!("GROUPING({}), ", expresiones[index])
+            } else {
+                String::new()
+            };
+            // `NULLS LAST` solo hace falta con subtotales: el renglon del subtotal lleva la
+            // dimension recogida en NULL, y sin esto DuckDB lo pone primero (los NULL van
+            // primero en un DESC y le pegan a un ASC cuando la dimension ya era NULL).
+            let fondo = if con_subtotales { " NULLS LAST" } else { "" };
             if let Some((sort_physical, sort_owner)) = model
                 .column(*column)
                 .and_then(|(_, definition)| definition.sort_by)
@@ -293,14 +362,14 @@ pub fn lower(
                 .and_then(|sort| sources.column(sort).ok())
             {
                 return Ok(format!(
-                    "MIN({}.{})",
+                    "{bandera}MIN({}.{}){fondo}",
                     aliases.of(sort_owner),
                     quote_identifier(sort_physical)
                 ));
             }
             let (physical, _) = sources.column(*column)?;
             Ok(format!(
-                "{}.{}",
+                "{bandera}{}.{}{fondo}",
                 aliases.of(owner_of(model, *column)),
                 quote_identifier(physical)
             ))

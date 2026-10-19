@@ -1532,3 +1532,32 @@ Y la decision pendiente de la base: `fecha` SE QUEDA. Es la fecha de negocio, ll
 ciento (cero nulos sobre cien mil filas), repartida entre 2025-09 y 2026-10. Borrarla dejaria el
 periodo en manos de `created_at`, que es un solo dia. `ALTER TABLE boleta DROP COLUMN fecha` no se
 corre.
+
+## Subtotales de matriz: `RowKind` y `GROUPING SETS`
+
+Con dos dimensiones o mas, la matriz es una jerarquia y Power BI la muestra con un subtotal bajo
+cada grupo y el gran total al final. Hasta ahora la matriz era una lista plana de datos: el nivel
+intermedio no existia.
+
+- `RowKind { Data, Subtotal { level }, GrandTotal }` viaja con la matriz, en paralelo a las filas.
+  El que pinta distingue fondo y peso; el que filtra sabe que un subtotal no es un valor.
+- SQL: `GROUPING SETS` con el conjunto entero, todos los prefijos y el vacio, mas una bandera
+  `GROUPING` por dimension al final del `SELECT`. Las banderas son la unica forma segura de saber
+  que renglon es cada fila: la dimension recogida queda en NULL, y un NULL de verdad tambien
+  existe como dato. `ORDER BY` con `GROUPING` y `NULLS LAST`: detalles, subtotal de cada grupo,
+  gran total al final, que es el layout de la matriz.
+- Interprete: una lectura por prefijo de dimensiones y un recorrido en profundidad que cuelga el
+  subtotal despues de su subarbol. El gran total es la lectura sin agrupar que ya existia.
+  Dos caminos, la misma tabla.
+- La dimension recogida sale VACIA, no "NULL": un subtotal no desglosa esa dimension, y un
+  "NULL" pintado parece un dato que no existe.
+- El orden por medida se hace DENTRO de cada corrida de datos: los subtotales quedan anclados a
+  su grupo, y `drill` sigue leyendo la misma fila que se pinta.
+- Pinchar un subtotal no filtra: filtraria por un valor que no existe en la columna.
+- La app enciende subtotales con dos dimensiones o mas. Con una, no hay niveles intermedios y el
+  numero de filas no cambia para nadie.
+
+### Resultado
+
+224 tests. 48 casos de conformidad, 44 por los dos caminos, 0 divergen (la suite agrupa por una
+columna, y con una dimension no hay subtotales). Solo `arrow v58.4.0`.
