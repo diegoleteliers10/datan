@@ -1751,3 +1751,32 @@ tarjeta y el interruptor no gobernaba nada.
 ### Resultado
 
 316 tests. La app arranca en 12 s con 137 MB RSS y sin errores en el log.
+
+## Fase UI-13: deshacer y rehacer
+
+Los dos iconos de la barra superior estaban dibujados y apagados. No habia historial.
+
+- El historial guarda la VISTA, no la matriz: seleccion, filtros, visual, orden, Top N,
+  periodo y formato. Deshacer vuelve a correr el informe, asi que los numeros son los de la
+  base de ahora. Guardar la matriz haria que deshacer mostrara un numero viejo como actual.
+- `Historial` es una pila con dos lados y un tope de 50 pasos. Un cambio nuevo borra el
+  futuro. Es un tipo aparte de la app para poder probar el orden de los pasos sin una ventana.
+- Se anota el estado ANTES de cada accion que cambia la vista: elegir un campo, filtrar por
+  una celda o una barra, bajar de nivel, ordenar, Top N, periodo, un ajuste de propiedades y
+  cambiar de visual.
+- Un clic que no cambia nada no deja paso: el Top N ya activo, el visual ya elegido, el rango
+  ya elegido, el nivel donde ya se esta.
+- El boton se apaga cuando no hay paso en ese lado. Compartir y Publicar siguen apagados: no
+  hay destino.
+- El historial se olvida al abrir otro informe, al cambiar de base y al cambiar el modelo
+  (crear una relacion o cambiarle el rol). Los ids de esos pasos son de otro modelo.
+- Cada corrida del informe lleva un numero. El resultado de una corrida que ya fue reemplazada
+  no se pinta: dos deshaceres seguidos dejan dos consultas en vuelo y la que llega tarde
+  pisaba la matriz de la que llego primero.
+- Al cambiar de base tambien se sueltan los filtros, el Top N y el orden. Sus ids e indices
+  son de la base anterior: los filtros se saltaban al correr, pero la pastilla se seguia
+  dibujando como si gobernara.
+
+### Resultado
+
+320 tests. La app arranca en 12 s con 159 MB RSS y sin errores en el log.

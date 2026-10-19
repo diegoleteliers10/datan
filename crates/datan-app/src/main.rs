@@ -63,6 +63,71 @@ struct ActiveFilter {
     value: SharedString,
 }
 
+/// Lo que se puede deshacer: el estado de la VISTA, no el resultado.
+///
+/// La matriz no entra. Se vuelve a correr con el mismo modelo y la misma base, y muestra los
+/// numeros de ahora. Guardar la matriz haria que deshacer mostrara un numero viejo como si
+/// fuera actual, que es justo lo que un informe no puede hacer.
+#[derive(Clone)]
+struct Vista {
+    selection: Selection,
+    filters: Vec<ActiveFilter>,
+    visual: String,
+    sort: Option<(usize, bool)>,
+    top_n: Option<datan_report::TopN>,
+    date_months: Option<u8>,
+    formatos: std::collections::BTreeMap<String, datan_report::saved::SavedFormato>,
+}
+
+/// Cuantos pasos guarda el historial.
+///
+/// Un tope y no historia infinita: cada paso es una seleccion y una lista de filtros, pero el
+/// tope tambien dice donde termina lo que se puede deshacer. Cincuenta alcanza para el trabajo
+/// de una sesion.
+const HISTORIAL_MAX: usize = 50;
+
+/// Las dos pilas de deshacer y rehacer.
+///
+/// Es una pila y no parte de `Datan`: asi el orden de los pasos se prueba sin una ventana, que
+/// es lo unico que no se puede montar en un test. La app solo le pasa la vista actual.
+#[derive(Default)]
+struct Historial {
+    atras: Vec<Vista>,
+    adelante: Vec<Vista>,
+}
+
+impl Historial {
+    /// Anota la vista que se va a abandonar. Un cambio nuevo borra el futuro: despues de
+    /// deshacer y tocar otra cosa, rehacer ya no lleva a ninguna parte.
+    fn recordar(&mut self, vista: Vista) {
+        self.adelante.clear();
+        if self.atras.len() == HISTORIAL_MAX {
+            self.atras.remove(0);
+        }
+        self.atras.push(vista);
+    }
+
+    /// Devuelve la vista anterior y guarda la actual para rehacer. `None` si no hay nada.
+    fn deshacer(&mut self, actual: Vista) -> Option<Vista> {
+        let vista = self.atras.pop()?;
+        self.adelante.push(actual);
+        Some(vista)
+    }
+
+    fn rehacer(&mut self, actual: Vista) -> Option<Vista> {
+        let vista = self.adelante.pop()?;
+        self.atras.push(actual);
+        Some(vista)
+    }
+
+    /// Olvida todo. Se llama cuando cambia el MODELO o el informe: los ids del historial son
+    /// de otra cosa y restaurarlos apuntaria a columnas que ya no estan.
+    fn olvidar(&mut self) {
+        self.atras.clear();
+        self.adelante.clear();
+    }
+}
+
 /// La fila lista para pintar. `SharedString` es un string compartido por referencia: una
 /// columna con 500 valores repetidos cuesta 500 asignaciones, no 500 por celda.
 #[derive(Clone)]
@@ -183,6 +248,12 @@ struct Datan {
     /// El formato de cada visual, por su clave. Cambiar de Barras a Tabla y volver tiene que
     /// encontrar las barras como estaban: un solo formato para la pagina no lo hace.
     formatos: std::collections::BTreeMap<String, datan_report::saved::SavedFormato>,
+    /// Los pasos de deshacer y rehacer.
+    historial: Historial,
+    /// El numero de la ultima corrida pedida. Una corrida vieja que termina despues de una
+    /// nueva NO pinta: dos clics seguidos (o dos deshaceres) dejan dos consultas en vuelo y
+    /// la que llega tarde pisaria la matriz de la que llego primero.
+    refresh_seq: u64,
 }
 
 impl Datan {
@@ -220,6 +291,8 @@ impl Datan {
             scroll: UniformListScrollHandle::default(),
             conexion: Conexion::Apagada,
             formatos: Default::default(),
+            historial: Historial::default(),
+            refresh_seq: 0,
         }
     }
 
@@ -536,6 +609,7 @@ impl Datan {
                 .with_dimensions(self.selection.dimensions.clone())
                 .with_measures(self.selection.measures.clone()),
         );
+        self.olvidar_historial();
         self.stats = Some(format!(
             "relacion {}[{}] a {}[{}]",
             from.0.name, from.1.name, to.0.name, to.1.name
@@ -614,6 +688,7 @@ impl Datan {
                 .with_dimensions(self.selection.dimensions.clone())
                 .with_measures(self.selection.measures.clone()),
         );
+        self.olvidar_historial();
         self.stats = Some(format!("relacion {next}"));
         self.refresh(cx);
     }
@@ -627,6 +702,7 @@ impl Datan {
         }
         // Pinchar dos veces la misma barra CAMBIA el valor, no acumula dos filtros que se
         // intersectan y dejan la matriz vacia.
+        self.recordar();
         self.filters.retain(|filter| filter.column != column);
         self.filters.push(ActiveFilter {
             column,
@@ -654,6 +730,59 @@ impl Datan {
             .unwrap_or_default()
     }
 
+    /// El estado de la vista, para el historial.
+    fn vista(&self) -> Vista {
+        Vista {
+            selection: self.selection.clone(),
+            filters: self.filters.clone(),
+            visual: self.visual.clone(),
+            sort: self.sort,
+            top_n: self.top_n,
+            date_months: self.date_months,
+            formatos: self.formatos.clone(),
+        }
+    }
+
+    /// Anota el estado ANTES de cambiarlo. Cada accion que cambia la vista llama a esto.
+    fn recordar(&mut self) {
+        let vista = self.vista();
+        self.historial.recordar(vista);
+    }
+
+    /// Vuelve al estado anterior. El informe se vuelve a correr: los numeros son los de la
+    /// base de ahora, sin el cambio.
+    fn deshacer(&mut self, cx: &mut Context<Self>) {
+        let actual = self.vista();
+        let Some(vista) = self.historial.deshacer(actual) else {
+            return;
+        };
+        self.restaurar(vista);
+        self.refresh(cx);
+    }
+
+    fn rehacer(&mut self, cx: &mut Context<Self>) {
+        let actual = self.vista();
+        let Some(vista) = self.historial.rehacer(actual) else {
+            return;
+        };
+        self.restaurar(vista);
+        self.refresh(cx);
+    }
+
+    fn restaurar(&mut self, vista: Vista) {
+        self.selection = vista.selection;
+        self.filters = vista.filters;
+        self.visual = vista.visual;
+        self.sort = vista.sort;
+        self.top_n = vista.top_n;
+        self.date_months = vista.date_months;
+        self.formatos = vista.formatos;
+    }
+
+    fn olvidar_historial(&mut self) {
+        self.historial.olvidar();
+    }
+
     /// El formato del visual que se esta mirando. El que no se toco usa el default.
     fn formato_actual(&self) -> datan_report::saved::SavedFormato {
         self.formatos
@@ -673,6 +802,7 @@ impl Datan {
             cx.notify();
             return;
         }
+        self.recordar();
         cambio(self.formatos.entry(self.visual.clone()).or_default());
         cx.notify();
     }
@@ -827,6 +957,9 @@ impl Datan {
                     })
                     .collect();
                 self.report = Some(report);
+                // El historial era de otro informe. Deshacer despues de abrir llevaria a
+                // una vista que no es la de este archivo.
+                self.olvidar_historial();
                 self.state = State::Ready;
                 self.stats = Some(format!("abierto `{name}`"));
                 self.refresh(cx);
@@ -845,7 +978,7 @@ impl Datan {
     /// La medida que ordena es la PRIMERA de la seleccion: la matriz ordena por la columna
     /// que se ve mas a la izquierda de las medidas, que es la que el usuario eligio primero.
     fn set_top_n(&mut self, top: Option<(usize, bool)>, cx: &mut Context<Self>) {
-        self.top_n = top.and_then(|(count, abajo)| {
+        let next = top.and_then(|(count, abajo)| {
             self.selection
                 .measures
                 .first()
@@ -855,6 +988,13 @@ impl Datan {
                     abajo,
                 })
         });
+        // El boton de un Top N ya activo lo apaga. Si el resultado es el mismo que ya estaba,
+        // no hay paso de historial: deshacer no tiene que deshacer un clic que no cambio nada.
+        if next == self.top_n {
+            return;
+        }
+        self.recordar();
+        self.top_n = next;
         self.refresh(cx);
     }
 
@@ -864,6 +1004,12 @@ impl Datan {
     /// solo los productos de esa region. El orden por medida se suelta, porque los indices
     /// de columna apuntan a la matriz anterior.
     fn drill_nivel(&mut self, nivel: ObjectId, cx: &mut Context<Self>) {
+        // Bajar al nivel donde ya se esta no cambia nada: no deja un paso de historial que
+        // no hace nada al deshacer.
+        if self.selection.dimensions.as_slice() == [nivel] {
+            return;
+        }
+        self.recordar();
         self.selection.dimensions = vec![nivel];
         self.sort = None;
         self.refresh(cx);
@@ -940,8 +1086,15 @@ impl Datan {
                     Ok((model, report, avisos, jerarquias)) => {
                         view.selection = suggested(&model);
                         // El modo de conectar dos columnas es del modelo anterior: los ids
-                        // que tenia no existen en este.
+                        // que tenia no existen en este. Los filtros, el Top N y el orden
+                        // tampoco: sus ids e indices apuntan a columnas de la base anterior.
+                        // Los filtros se saltaban al correr, pero la pastilla se seguia
+                        // dibujando como si gobernara.
                         view.conexion = Conexion::Apagada;
+                        view.filters.clear();
+                        view.top_n = None;
+                        view.sort = None;
+                        view.olvidar_historial();
                         view.report = Some(report);
                         view.model_warnings = avisos;
                         view.jerarquias = jerarquias;
@@ -1032,6 +1185,7 @@ impl Datan {
             return;
         }
 
+        self.recordar();
         if is_measure {
             // El Top N ordena por UNA medida. Cuando esa medida sale de la seleccion, el
             // recorte no tiene por que ordenar y se suelta: dejarlo puesto seria un ajuste
@@ -1065,6 +1219,8 @@ impl Datan {
         let Some(base) = self.report.clone() else {
             return;
         };
+        self.refresh_seq += 1;
+        let seq = self.refresh_seq;
         let mut report = base
             .with_dimensions(self.selection.dimensions.clone())
             .with_measures(self.selection.measures.clone())
@@ -1156,6 +1312,10 @@ impl Datan {
                 .background_spawn(async move { run_report(report, previous, database) })
                 .await;
             _ = this.update(cx, |view, cx| {
+                // Llego una corrida vieja: hay otra pedida despues y esa manda.
+                if view.refresh_seq != seq {
+                    return;
+                }
                 match built {
                     Ok((matrix, stats, cards)) => {
                         // Volver arriba tras filtrar. Sin esto, el usuario pincha una fila
@@ -1214,6 +1374,7 @@ impl Datan {
         // Quitar el filtro anterior de esa columna antes de poner el nuevo. Pinchar dos
         // veces la misma columna debe CAMBIAR el valor, no acumular dos filtros que se
         // intersectan y dan una celda vacia.
+        self.recordar();
         self.filters.retain(|filter| filter.column != header.column);
         self.filters.push(ActiveFilter {
             column: header.column,
@@ -1875,7 +2036,12 @@ fn range_button(
         label.to_string(),
         active,
         cx.listener(move |view, _event, _window, cx| {
-            view.date_months = (months != 0).then_some(months);
+            let next = (months != 0).then_some(months);
+            if view.date_months == next {
+                return;
+            }
+            view.recordar();
+            view.date_months = next;
             view.refresh(cx);
         }),
     )
@@ -2843,6 +3009,10 @@ impl Datan {
                 activo,
                 !habilitado,
                 cx.listener(move |view, _event, _window, cx| {
+                    if view.visual == key {
+                        return;
+                    }
+                    view.recordar();
                     view.visual = key.to_string();
                     cx.notify();
                 }),
@@ -3027,9 +3197,10 @@ impl Datan {
             .into_any_element(),
             None => components::nota(&theme, "Sin guardar").into_any_element(),
         };
-        // Sin backend de undo no hay historial; sin backend de publicacion no hay destino. Los
-        // cuatro se dibujan apagados en vez de esconderse: la barra es la misma en las dos
-        // versiones, y un hueco que aparece y desaparece mueve todo lo demas.
+        // Deshacer y rehacer se apagan cuando no hay historial o cuando no hay futuro. Un
+        // icono encendido que no lleva a ningun lado, al lado de uno apagado que si, ensena a
+        // no confiar en ninguno de los dos. Compartir y Publicar siguen apagados: no hay
+        // destino.
         let mut modo = components::caja_segmentada(&theme);
         for (etiqueta, lectura) in [("Editar", false), ("Lectura", true)] {
             modo = modo.child(components::segmento(
@@ -3087,8 +3258,26 @@ impl Datan {
             ))
             .child(guardado)
             .child(div().flex_1())
-            .child(components::boton_icono_apagado(&theme, IconName::Undo2))
-            .child(components::boton_icono_apagado(&theme, IconName::Redo2))
+            .child(if self.historial.atras.is_empty() {
+                components::boton_icono_apagado(&theme, IconName::Undo2)
+            } else {
+                components::boton_icono(
+                    &theme,
+                    "undo",
+                    IconName::Undo2,
+                    cx.listener(|view, _event, _window, cx| view.deshacer(cx)),
+                )
+            })
+            .child(if self.historial.adelante.is_empty() {
+                components::boton_icono_apagado(&theme, IconName::Redo2)
+            } else {
+                components::boton_icono(
+                    &theme,
+                    "redo",
+                    IconName::Redo2,
+                    cx.listener(|view, _event, _window, cx| view.rehacer(cx)),
+                )
+            })
             .child(modo)
             .child(components::boton_apagado(&theme, "Compartir"))
             .child(components::boton_apagado(&theme, "Publicar"));
@@ -3521,6 +3710,7 @@ impl Datan {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.list_hover))
                     .on_click(cx.listener(move |view, _event, _window, cx| {
+                        view.recordar();
                         view.sort = match view.sort {
                             Some((c, false)) if c == column_index => Some((c, true)),
                             Some((c, true)) if c == column_index => None,
@@ -4226,7 +4416,82 @@ fn main() {
 }
 #[cfg(test)]
 mod tests {
-    use super::{AtomKind, BinaryOp, Shape, forma_aditiva, hit};
+    use super::{
+        AtomKind, BinaryOp, HISTORIAL_MAX, Historial, Selection, Shape, Vista, forma_aditiva, hit,
+    };
+
+    /// Una vista con lo unico que distingue un paso de otro en estos tests: el visual.
+    fn vista(visual: &str) -> Vista {
+        Vista {
+            selection: Selection {
+                dimensions: Vec::new(),
+                measures: Vec::new(),
+            },
+            filters: Vec::new(),
+            visual: visual.to_string(),
+            sort: None,
+            top_n: None,
+            date_months: None,
+            formatos: Default::default(),
+        }
+    }
+
+    #[test]
+    fn deshacer_recorre_los_pasos_al_reves() {
+        let mut historial = Historial::default();
+        historial.recordar(vista("A"));
+        historial.recordar(vista("B"));
+
+        // La app esta en C, que es el estado que el usuario tiene delante.
+        let paso = historial.deshacer(vista("C")).expect("vuelve a B");
+        assert_eq!(paso.visual, "B");
+        let paso = historial.deshacer(paso).expect("vuelve a A");
+        assert_eq!(paso.visual, "A");
+        assert!(historial.deshacer(paso).is_none());
+    }
+
+    #[test]
+    fn rehacer_devuelve_el_paso_deshecho() {
+        let mut historial = Historial::default();
+        historial.recordar(vista("A"));
+        historial.recordar(vista("B"));
+
+        let b = historial.deshacer(vista("C")).expect("vuelve a B");
+        let a = historial.deshacer(b).expect("vuelve a A");
+        assert_eq!(historial.rehacer(a).map(|vista| vista.visual), Some("B".to_string()));
+        assert_eq!(
+            historial.rehacer(vista("B")).map(|vista| vista.visual),
+            Some("C".to_string())
+        );
+        assert!(historial.rehacer(vista("C")).is_none());
+    }
+
+    #[test]
+    fn un_cambio_nuevo_borra_el_futuro() {
+        // Despues de deshacer, tocar otra cosa deja el futuro apuntando a un estado que ya no
+        // sigue de este. Rehacer tiene que llevar a ninguna parte, no a un salto raro.
+        let mut historial = Historial::default();
+        historial.recordar(vista("A"));
+        historial.recordar(vista("B"));
+        let _ = historial.deshacer(vista("C"));
+        historial.recordar(vista("D"));
+        assert!(historial.rehacer(vista("D")).is_none());
+    }
+
+    #[test]
+    fn el_historial_tiene_tope() {
+        // Sin tope, una sesion larga guarda una vista por clic para siempre. Con tope, se
+        // pierden los pasos mas viejos y se conservan los ultimos.
+        let mut historial = Historial::default();
+        for paso in 0..HISTORIAL_MAX + 5 {
+            historial.recordar(vista(&paso.to_string()));
+        }
+        assert_eq!(historial.atras.len(), HISTORIAL_MAX);
+        assert_eq!(
+            historial.atras.first().map(|vista| vista.visual.as_str()),
+            Some("5")
+        );
+    }
 
     #[test]
     fn sin_busqueda_no_hay_coincidencia() {
