@@ -48,6 +48,10 @@ pub enum SavedError {
     UnknownDimension { name: String, database: String },
     #[error("la medida `{name}` no existe en la base `{database}`")]
     UnknownMeasure { name: String, database: String },
+    #[error("`{name}` no sirve como nombre de informe: sin barra, sin `..` y sin punto al principio")]
+    InvalidName { name: String },
+    #[error("ya existe un informe llamado `{name}`")]
+    Occupied { name: String },
 }
 
 /// El archivo de un informe.
@@ -203,9 +207,8 @@ fn file_name(name: &str) -> Result<String, SavedError> {
         || name.contains("..")
         || name.starts_with('.')
     {
-        return Err(SavedError::UnknownDimension {
+        return Err(SavedError::InvalidName {
             name: name.to_string(),
-            database: String::new(),
         });
     }
     Ok(format!("{name}.toml"))
@@ -292,6 +295,58 @@ pub fn save_view(report: &Report, name: &str, view: &SavedView) -> Result<(), Sa
         })?;
 
     std::fs::write(&path, text).map_err(|source| SavedError::Write { path, source })
+}
+
+/// Renombra un informe guardado.
+///
+/// Mueve el archivo y actualiza el nombre de adentro. El nombre del informe ES el nombre del
+/// archivo: cambiar solo uno de los dos deja un informe que dice llamarse de una forma y vive
+/// en otra, y el proximo guardado escribe un segundo archivo con el nombre nuevo.
+///
+/// No pisa un informe que ya existe. Perder uno para renombrar otro es la clase de perdida
+/// que no se nota hasta que se busca.
+pub fn rename(from: &str, to: &str) -> Result<(), SavedError> {
+    rename_in(&folder(), from, to)
+}
+
+/// La mitad testeable de `rename`.
+fn rename_in(folder: &std::path::Path, from: &str, to: &str) -> Result<(), SavedError> {
+    let from_path = folder.join(file_name(from)?);
+    let to_path = folder.join(file_name(to)?);
+    if from_path == to_path {
+        return Ok(());
+    }
+
+    let text = std::fs::read_to_string(&from_path).map_err(|source| SavedError::Read {
+        path: from_path.clone(),
+        source,
+    })?;
+    let mut file: File = toml::from_str(&text).map_err(|source| SavedError::Parse {
+        path: from_path.clone(),
+        source,
+    })?;
+
+    if to_path.exists() {
+        return Err(SavedError::Occupied {
+            name: to.to_string(),
+        });
+    }
+
+    file.name = to.to_string();
+    let text = toml::to_string_pretty(&file).map_err(|_| SavedError::InvalidName {
+        name: to.to_string(),
+    })?;
+    std::fs::write(&to_path, text).map_err(|source| SavedError::Write {
+        path: to_path.clone(),
+        source,
+    })?;
+    // El viejo se borra DESPUES de escribir el nuevo: si el borrado falla queda una copia de
+    // mas, que se ve y se puede borrar. Al reves quedaria un informe sin archivo.
+    std::fs::remove_file(&from_path).map_err(|source| SavedError::Write {
+        path: from_path,
+        source,
+    })?;
+    Ok(())
 }
 
 /// Los nombres de los informes guardados, ordenados.
@@ -468,6 +523,77 @@ mod tests {
     #[test]
     fn el_nombre_de_archivo_lleva_la_extension() {
         assert_eq!(file_name("ventas").unwrap(), "ventas.toml");
+    }
+
+    fn carpeta_de_prueba(nombre: &str) -> std::path::PathBuf {
+        let folder = std::env::temp_dir().join(format!(
+            "datan-informes-{}-{nombre}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("crea la carpeta");
+        folder
+    }
+
+    fn informe_de_prueba(nombre: &str) -> File {
+        File {
+            name: nombre.to_string(),
+            database: "pg".to_string(),
+            dimensions: vec!["region".to_string()],
+            measures: vec!["Qty".to_string()],
+            filters: vec![],
+            visual: None,
+            period_months: None,
+            top_n: None,
+            formato: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn renombrar_mueve_el_archivo_y_el_nombre_de_adentro() {
+        let folder = carpeta_de_prueba("mueve");
+        let viejo = folder.join("region.toml");
+        let texto = toml::to_string_pretty(&informe_de_prueba("region")).expect("serializa");
+        std::fs::write(&viejo, texto).expect("escribe");
+
+        rename_in(&folder, "region", "region norte").expect("renombra");
+
+        assert!(!viejo.exists(), "el archivo viejo ya no esta");
+        let nuevo = std::fs::read_to_string(folder.join("region norte.toml")).expect("lee");
+        let file: File = toml::from_str(&nuevo).expect("parsea");
+        assert_eq!(file.name, "region norte");
+        // Lo que define el informe viaja: el renombre no toca la definicion.
+        assert_eq!(file.dimensions, vec!["region".to_string()]);
+        assert_eq!(file.database, "pg");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn renombrar_no_pisa_otro_informe() {
+        let folder = carpeta_de_prueba("ocupado");
+        for nombre in ["region", "categoria"] {
+            let texto = toml::to_string_pretty(&informe_de_prueba(nombre)).expect("serializa");
+            std::fs::write(folder.join(format!("{nombre}.toml")), texto).expect("escribe");
+        }
+
+        let error = rename_in(&folder, "region", "categoria").expect_err("no pisa");
+        assert!(matches!(error, SavedError::Occupied { .. }), "{error:?}");
+        // Los dos quedan como estaban.
+        assert!(folder.join("region.toml").exists());
+        assert!(folder.join("categoria.toml").exists());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn renombrar_a_un_nombre_invalido_no_toca_nada() {
+        let folder = carpeta_de_prueba("invalido");
+        let texto = toml::to_string_pretty(&informe_de_prueba("region")).expect("serializa");
+        std::fs::write(folder.join("region.toml"), texto).expect("escribe");
+
+        let error = rename_in(&folder, "region", "../fuera").expect_err("rechaza");
+        assert!(matches!(error, SavedError::InvalidName { .. }), "{error:?}");
+        assert!(folder.join("region.toml").exists());
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

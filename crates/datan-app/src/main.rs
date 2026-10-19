@@ -34,7 +34,7 @@ use config::Connections;
 use datan_report::{Header, Matrix, Report, RowKind, source::DuckSource};
 use datan_storage::Engine;
 
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::chart::{AreaChart, BarChart, LineChart, PieChart};
 use gpui_kit::*;
@@ -220,6 +220,14 @@ struct Datan {
     formula: Option<Entity<InputState>>,
     /// La busqueda del panel Datos. Se crea en el primer render, como la de formula.
     search: Option<Entity<InputState>>,
+    /// El campo para renombrar el informe, mientras esta abierto.
+    ///
+    /// Se crea al tocar la pestaña y se suelta al confirmar. Un campo siempre visible
+    /// convertiria el nombre del informe en una caja de texto, y una pestaña que es una caja
+    /// de texto no se lee como una pestaña.
+    rename: Option<Entity<InputState>>,
+    /// La suscripcion al Enter del campo de renombrar. Se guarda para poder soltarla.
+    rename_sub: Option<Subscription>,
     /// El rango de fechas activo en meses hacia atras. `None` es todo el historico.
     date_months: Option<u8>,
     /// Las tablas abiertas en el panel Datos, por id.
@@ -279,6 +287,8 @@ impl Datan {
             sort: None,
             formula: None,
             search: None,
+            rename: None,
+            rename_sub: None,
             date_months: None,
             expanded: Vec::new(),
             row_counts: Default::default(),
@@ -873,9 +883,67 @@ impl Datan {
             .unwrap_or_else(|| self.suggested_name())
     }
 
-    /// Guarda el informe actual. Sin nombre de archivo elegido a mano: el informe se llama
-    /// por la primera dimension, que es lo que lo distingue. Un dialogo de nombre no se puede
-    /// verificar sin pantalla.
+    /// Abre el campo para renombrar el informe, con el nombre actual adentro.
+    ///
+    /// El campo toma el foco al abrirse. Sin eso hay que hacer dos clics para escribir, y un
+    /// campo que no responde al teclado se ve igual que uno roto.
+    fn abrir_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.lectura || self.rename.is_some() {
+            return;
+        }
+        let actual = self.report_title();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(actual));
+        let handle = input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        // Enter confirma. El campo tambien tiene su boton al lado: un Enter que no se
+        // conoce no puede ser la unica salida.
+        self.rename_sub = Some(cx.subscribe(&input, |view, _input, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                view.confirmar_rename(cx);
+            }
+        }));
+        self.rename = Some(input);
+        cx.notify();
+    }
+
+    /// Aplica el nombre escrito y cierra el campo.
+    ///
+    /// Un informe que ya tiene archivo se MUEVE. Guardar con el nombre nuevo y dejar el
+    /// viejo deja dos archivos que se parecen, y nadie sabe cual es el bueno.
+    fn confirmar_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.rename.take() else {
+            return;
+        };
+        self.rename_sub = None;
+        let viejo = self.report_title();
+        let Some(nuevo) = nombre_nuevo(&viejo, &input.read(cx).value()) else {
+            cx.notify();
+            return;
+        };
+
+        if self.report_name.is_some() {
+            match datan_report::saved::rename(&viejo, &nuevo) {
+                Ok(()) => {}
+                // El archivo se borro a mano. El nombre nuevo vale igual, y el proximo
+                // guardado lo escribe: negar el renombre dejaria un nombre que ya no tiene
+                // archivo y que no se puede arreglar desde la app.
+                Err(datan_report::saved::SavedError::Read { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    self.stats = Some(format!("no se pudo renombrar: {error}"));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
+        self.report_name = Some(nuevo.clone());
+        self.stats = Some(format!("informe `{nuevo}`"));
+        cx.notify();
+    }
+
+    /// Guarda el informe actual. Sin dialogo de nombre: el informe se llama por la primera
+    /// dimension, que es lo que lo distingue, y se puede cambiar desde la pestaña.
     ///
     /// Se guarda DOS veces bajo el mismo nombre: la segunda vez sobrescribe. Un informe
     /// guardado que se guarda otra vez con otro nombre deja dos archivos que se parecen.
@@ -3345,18 +3413,50 @@ impl Datan {
             .bg(theme.background)
             .border_t_1()
             .border_color(theme.border)
-            .child(
+            .child(if let Some(input) = self.rename.as_ref() {
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().w(px(200.0)).child(Input::new(input)))
+                    .child(components::boton_icono(
+                        &theme,
+                        "renombrar-listo",
+                        IconName::Check,
+                        cx.listener(|view, _event, _window, cx| view.confirmar_rename(cx)),
+                    ))
+                    .into_any_element()
+            } else {
+                let mut pestana = div()
+                    .id("renombrar-informe")
                     .h(px(tokens::ALTO_PASTILLA))
                     .px_3()
                     .rounded_xl()
                     .bg(theme.muted)
                     .flex()
                     .items_center()
+                    .gap_1()
                     .font_semibold()
                     .text_size(px(tokens::LETRA_TITULO))
-                    .child(self.report_title()),
-            )
+                    .child(self.report_title());
+                // En Lectura el nombre no se toca: renombrar mueve el archivo del informe,
+                // que es una accion de autor.
+                if !self.lectura {
+                    pestana = pestana
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.accent))
+                        .child(
+                            div()
+                                .text_size(px(tokens::LETRA_NOTA))
+                                .text_color(theme.muted_foreground)
+                                .child(IconName::Pencil),
+                        )
+                        .on_click(cx.listener(|view, _event, window, cx| {
+                            view.abrir_rename(window, cx)
+                        }));
+                }
+                pestana.into_any_element()
+            })
             .child(components::boton_icono_apagado(&theme, IconName::Plus))
             .child(div().flex_1())
             .child(components::nota(&theme, self.linea_estado(visuales)));
@@ -4425,6 +4525,18 @@ fn cx_hover(color: Hsla, cell: Div) -> Div {
     cell.hover(move |style| style.bg(color))
 }
 
+/// El nombre que queda despues de editar la pestaña. `None` es "no cambio nada".
+///
+/// Separado del metodo porque es la unica decision del renombre: un nombre vacio o igual al
+/// anterior no toca el archivo, y el espacio de los costados no forma parte del nombre.
+fn nombre_nuevo(viejo: &str, escrito: &str) -> Option<String> {
+    let nuevo = escrito.trim();
+    if nuevo.is_empty() || nuevo == viejo {
+        return None;
+    }
+    Some(nuevo.to_string())
+}
+
 /// Aplica el tema de la app.
 ///
 /// El archivo guarda un enum propio (`config::Tema`) y no el `ThemeMode` del componente: el
@@ -4466,6 +4578,7 @@ fn main() {
 mod tests {
     use super::{
         AtomKind, BinaryOp, HISTORIAL_MAX, Historial, Selection, Shape, Vista, forma_aditiva, hit,
+        nombre_nuevo,
     };
 
     /// Una vista con lo unico que distingue un paso de otro en estos tests: el visual.
@@ -4482,6 +4595,28 @@ mod tests {
             date_months: None,
             formatos: Default::default(),
         }
+    }
+
+    #[test]
+    fn renombrar_quita_los_espacios_de_los_costados() {
+        assert_eq!(
+            nombre_nuevo("region", "  region norte  "),
+            Some("region norte".to_string())
+        );
+    }
+
+    #[test]
+    fn un_nombre_vacio_no_cambia_nada() {
+        // Borrar el nombre y confirmar no puede dejar el informe sin nombre: la pestaña
+        // desaparece y el proximo guardado no sabe donde escribir.
+        assert_eq!(nombre_nuevo("region", ""), None);
+        assert_eq!(nombre_nuevo("region", "   "), None);
+    }
+
+    #[test]
+    fn confirmar_sin_cambiar_el_nombre_no_toca_el_archivo() {
+        assert_eq!(nombre_nuevo("region", "region"), None);
+        assert_eq!(nombre_nuevo("region", " region "), None);
     }
 
     #[test]

@@ -1807,3 +1807,29 @@ El tema era una constante del componente: la app siempre se pintaba clara.
 
 328 tests. La app arranca en oscuro (preferencia escrita a mano) en 12 s con 157 MB RSS y sin
 errores en el log. El clic del boton no se pudo verificar sin captura de pantalla.
+
+## Fase UI-15: nombre del informe
+
+El nombre salia de la primera dimension y no se podia cambiar. Dos informes sobre la misma
+dimension se guardaban en el mismo archivo: el segundo pisaba al primero sin avisar.
+
+- La pestaña de la pagina es el nombre. Al tocarla se abre un campo con el nombre actual, y
+  al lado un boton de confirmar. Enter tambien confirma. En modo Lectura la pestaña no se
+  toca y no se dibuja el lapiz: renombrar mueve el archivo del informe, y eso es de autor.
+- Un nombre vacio o igual al anterior cierra el campo sin tocar nada.
+- Un informe con archivo se MUEVE, adentro y en el disco: el nombre es el del archivo y
+  tambien el campo `name` del TOML. Cambiar solo uno deja un informe que dice llamarse de una
+  forma y vive en otra, y el proximo guardado escribe un segundo archivo.
+- El renombre no pisa un informe que ya existe. Perder uno para renombrar otro no se nota
+  hasta que se busca.
+- Si el archivo se borro a mano, el nombre nuevo vale igual y el proximo guardado lo escribe.
+  Negar el renombre dejaria un nombre sin archivo que no se puede arreglar desde la app.
+- El nombre no entra en el historial: deshacer un filtro no tiene por que devolver el nombre.
+- Un nombre con barra, con `..` o que empieza con punto se rechaza con un mensaje propio. Antes
+  caia en el error de "la dimension no existe", que no dice nada del nombre.
+
+### Resultado
+
+334 tests. La app arranca en 12 s con 157 MB RSS y sin errores en el log. El campo de
+renombrar no se pudo abrir sin captura de pantalla: la logica del nombre y el movimiento del
+archivo estan cubiertos por tests, el foco y el Enter no.
