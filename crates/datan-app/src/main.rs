@@ -1204,7 +1204,12 @@ impl Datan {
                             database: database.clone(),
                         });
                         if let Err(error) = saved.save() {
-                            eprintln!("[datan] no se pudo guardar la conexion: {error}");
+                            // La conexion funciona; lo que falla es recordarla. Va por los
+                            // avisos del modelo y no por stderr: quien conecta no ve una
+                            // terminal, y la proxima vez no va a encontrar la base en la
+                            // lista sin saber por que.
+                            view.model_warnings
+                                .push(format!("no se pudo recordar la conexion: {error}"));
                         }
 
                         view.state = State::Connecting;

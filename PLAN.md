@@ -1848,6 +1848,9 @@ archivo estan cubiertos por tests, el foco y el Enter no.
   `#[allow(dead_code)]` y el motivo escrito: este binario no crea calculadas, solo las lee.
 - El test de subtotales no miraba la segunda dimension en el camino del interprete. Ahora la
   mira.
+- Una conexion que funciona pero no se puede recordar avisaba solo por `stderr`. Ahora va por
+  los avisos del modelo, que es lo que la barra de estado muestra: el que conecta no ve una
+  terminal.
 - `cargo check --workspace --all-targets` queda sin avisos.
 
 ### Resultado
