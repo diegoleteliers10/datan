@@ -160,15 +160,16 @@ impl Connections {
 
 /// El tema de la app.
 ///
-/// Claro y oscuro, sin "sistema": seguir el tema del escritorio obliga a escuchar el cambio
-/// de apariencia de la ventana, y medio sistema seguisse y medio no dejaria una app que
-/// cambia de color sola a mitad de una reunion.
+/// `Sistema` sigue la apariencia del escritorio y escucha el cambio en caliente: un tema que
+/// solo se mira al arrancar deja la app en claro cuando el sistema pasa a oscuro, y el
+/// usuario no tiene por que saber que hay que reiniciarla.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tema {
     #[default]
     Claro,
     Oscuro,
+    Sistema,
 }
 
 /// Las preferencias de la app.
@@ -331,9 +332,18 @@ mod tests {
 
     #[test]
     fn un_tema_que_no_existe_no_se_inventa() {
-        // Una version futura escribe `sistema`; esta version no lo entiende y no puede
+        // Una version futura escribe otro tema; esta version no lo entiende y no puede
         // adivinar. `Preferences::load` cae al default en vez de fallar.
-        assert!(toml::from_str::<Preferences>("tema = \"sistema\"").is_err());
+        assert!(toml::from_str::<Preferences>("tema = \"sepia\"").is_err());
+    }
+
+    #[test]
+    fn el_tema_del_sistema_se_lee_y_se_escribe() {
+        let preferences: Preferences =
+            toml::from_str("tema = \"sistema\"").expect("parsea");
+        assert_eq!(preferences.tema, Tema::Sistema);
+        let text = toml::to_string_pretty(&preferences).expect("serializa");
+        assert!(text.contains("tema = \"sistema\""), "{text}");
     }
 
     #[test]

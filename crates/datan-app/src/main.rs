@@ -220,6 +220,14 @@ struct Datan {
     formula: Option<Entity<InputState>>,
     /// La busqueda del panel Datos. Se crea en el primer render, como la de formula.
     search: Option<Entity<InputState>>,
+    /// El tema elegido. Se guarda porque "Sistema" no se puede deducir del color actual: con
+    /// el escritorio oscuro, `Claro` y `Sistema` pintan lo mismo y significan otra cosa.
+    tema: config::Tema,
+    /// La suscripcion al cambio de apariencia de la ventana, mientras la app vive.
+    ///
+    /// Se registra siempre y el callback mira el tema: elegir un tema fijo no deja de
+    /// escuchar de mas, y volver a "Sistema" no tiene que registrar nada otra vez.
+    apariencia: Option<Subscription>,
     /// El campo para renombrar el informe, mientras esta abierto.
     ///
     /// Se crea al tocar la pestaña y se suelta al confirmar. Un campo siempre visible
@@ -303,6 +311,8 @@ impl Datan {
             formatos: Default::default(),
             historial: Historial::default(),
             refresh_seq: 0,
+            tema: config::Preferences::load().tema,
+            apariencia: None,
         }
     }
 
@@ -793,16 +803,17 @@ impl Datan {
         self.historial.olvidar();
     }
 
-    /// Cambia entre claro y oscuro, y lo recuerda en el archivo de preferencias.
+    /// Pasa al tema siguiente (claro, oscuro, sistema) y lo recuerda.
     ///
     /// El cambio de tema no entra en el historial: deshacer un filtro no tiene por que
     /// devolver el color de la ventana.
     fn cambiar_tema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tema = if cx.theme().is_dark() {
-            config::Tema::Claro
-        } else {
-            config::Tema::Oscuro
+        let tema = match self.tema {
+            config::Tema::Claro => config::Tema::Oscuro,
+            config::Tema::Oscuro => config::Tema::Sistema,
+            config::Tema::Sistema => config::Tema::Claro,
         };
+        self.tema = tema;
         aplicar_tema(tema, Some(window), cx);
         if let Err(error) = (config::Preferences { tema }).save() {
             self.stats = Some(format!("no se pudo guardar el tema: {error}"));
@@ -1311,13 +1322,22 @@ impl Datan {
         };
         self.refresh_seq += 1;
         let seq = self.refresh_seq;
+        // El total es un ajuste del visual de tabla, encendido por defecto. Con dos
+        // dimensiones o mas la matriz es una jerarquia y lleva subtotales; con una, el total
+        // es un solo renglon al final.
+        let totales = if self.formato_actual().total_general {
+            if self.selection.dimensions.len() >= 2 {
+                datan_report::Totales::Subtotales
+            } else {
+                datan_report::Totales::General
+            }
+        } else {
+            datan_report::Totales::Ninguno
+        };
         let mut report = base
             .with_dimensions(self.selection.dimensions.clone())
             .with_measures(self.selection.measures.clone())
-            // Con dos dimensiones o mas la matriz es una jerarquia y lleva subtotales. Con
-            // una, no hay niveles intermedios y encenderlos cambiaria el numero de filas
-            // que ven el grid, el drill y los exports sin motivo.
-            .with_subtotals(self.selection.dimensions.len() >= 2);
+            .with_totales(totales);
         // El Top N es de la primera dimension: con dos o mas la matriz es una jerarquia y el
         // recorte no tiene una lectura unica, asi que no se aplica. El ajuste SE QUEDA: al
         // volver a una dimension vuelve a regir.
@@ -3191,6 +3211,20 @@ impl Datan {
         if matches!(visual, "Tabla" | "Todo") {
             propiedades = propiedades.child(components::interruptor(
                 &theme,
+                "prop-total",
+                "Total",
+                formato.total_general,
+                editable,
+                cx.listener(|view, _event, _window, cx| {
+                    view.ajustar_formato(|formato| formato.total_general = !formato.total_general, cx);
+                    // El total no cambia la vista guardada, cambia la matriz: hay que
+                    // volver a correrla. Sin esto el interruptor se apaga y la tabla
+                    // sigue con su renglon de total, que es peor que no tenerlo.
+                    view.refresh(cx);
+                }),
+            ));
+            propiedades = propiedades.child(components::interruptor(
+                &theme,
                 "prop-cuadricula",
                 "Cuadricula",
                 formato.cuadricula,
@@ -3374,14 +3408,15 @@ impl Datan {
                 )
             })
             .child(modo)
-            // El icono dice a donde se va, no donde se esta: en claro se ve la luna.
+            // Con tres estados el icono dice donde se ESTA: "el siguiente" no se puede
+            // adivinar desde el dibujo. Tocar pasa al que sigue.
             .child(components::boton_icono(
                 &theme,
                 "tema",
-                if cx.theme().is_dark() {
-                    IconName::Sun
-                } else {
-                    IconName::Moon
+                match self.tema {
+                    config::Tema::Claro => IconName::Sun,
+                    config::Tema::Oscuro => IconName::Moon,
+                    config::Tema::Sistema => IconName::SunMoon,
                 },
                 cx.listener(|view, _event, window, cx| view.cambiar_tema(window, cx)),
             ))
@@ -4550,6 +4585,12 @@ fn aplicar_tema(tema: config::Tema, window: Option<&mut Window>, cx: &mut App) {
     let mode = match tema {
         config::Tema::Claro => gpui_kit::component::ThemeMode::Light,
         config::Tema::Oscuro => gpui_kit::component::ThemeMode::Dark,
+        // La apariencia del escritorio. Sin ventana todavia (el arranque) la dice la app; con
+        // ventana, la ventana, que es la que va a escuchar el cambio.
+        config::Tema::Sistema => match window.as_deref() {
+            Some(window) => window.appearance().into(),
+            None => cx.window_appearance().into(),
+        },
     };
     Theme::change(mode, window, cx);
 }
@@ -4566,8 +4607,19 @@ fn main() {
             // claro y el segundo oscuro, un parpadeo en cada arranque.
             aplicar_tema(config::Preferences::load().tema, None, cx);
             let database = std::env::var("DATAN_AUTOCONNECT").unwrap_or_default();
-            open_window(WindowOptions::default(), cx, |_, cx| {
+            open_window(WindowOptions::default(), cx, |window, cx| {
                 let view = cx.new(Datan::new);
+                // Con "Sistema" elegido, la app sigue el cambio de apariencia del escritorio.
+                // El observador se guarda en la vista: al soltarlo se deja de escuchar.
+                let seguir = view.clone();
+                let apariencia = window.observe_window_appearance(move |window, cx| {
+                    if seguir.read(cx).tema != config::Tema::Sistema {
+                        return;
+                    }
+                    let appearance = window.appearance();
+                    Theme::change(appearance, Some(window), cx);
+                });
+                view.update(cx, |view, _| view.apariencia = Some(apariencia));
                 // `DATAN_AUTOCONNECT=datan_bench` arranca conectado. Es para desarrollo: en
                 // pruebas hay que poder mirar el lienzo sin un clic de por medio. Sin la
                 // variable, la app arranca en la pantalla de conexion, como debe.

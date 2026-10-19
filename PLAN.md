@@ -1856,3 +1856,44 @@ archivo estan cubiertos por tests, el foco y el Enter no.
 ### Resultado
 
 335 tests. Conformance: 0 divergencias.
+
+## Fase UI-16: total general
+
+- **`Report.totales` es un enum, no dos banderas.** `Ninguno`, `General` (una fila de datos por
+  grupo y el gran total) y `Subtotales` (ademas, un subtotal por nivel). Dos `bool` dejaban
+  construir "subtotales sin gran total", que no significa nada. `with_subtotals(bool)` se
+  queda como atajo.
+- Una sola dimension no tiene niveles intermedios: pedir `Subtotales` da `General`.
+- El SQL baja `GROUPING SETS ((dimensiones...), ())` para `General` y todos los prefijos para
+  `Subtotales`; el interprete agrega el renglon con `evaluate_totals`. Los dos caminos dan la
+  misma matriz con los mismos `RowKind`.
+- El ajuste es del VISUAL de tabla (`SavedFormato.total_general`, encendido y no escrito por
+  defecto) y esta en Propiedades. Cambiarlo vuelve a correr el informe: apagar un interruptor
+  y dejar el renglon pintado es peor que no tenerlo.
+- El Top N y el total conviven: el total se calcula sobre lo que se ve, que es lo que hace
+  Power BI. Top N y subtotales siguen siendo excluyentes.
+
+## Fase UI-17: la clave sin valor
+
+- El motor entrega un `NULL` como `datan_storage::CELDA_EN_BLANCO`, un caracter de control.
+  Antes lo entregaba como el texto `NULL`, y el informe no podia distinguir un dato que falta
+  de una categoria que se llama asi.
+- La marca se traduce UNA vez, al final de `execute`: en una dimension es el rotulo
+  `(en blanco)`, en una medida es vacio (un `BLANK` no es un cero).
+- El interprete ya no salta los `BLANK` en `distinct_values`: son un grupo, el mismo que el
+  SQL devuelve para una clave NULL. Van al final de su columna, como el `NULLS LAST`.
+- El clic sobre `(en blanco)` filtra por `FilterValue::Blank`, no por el texto. El SQL lo baja
+  como `IS NULL` (y `IN (...) OR IS NULL` cuando esta mezclado); el interprete ya lo comparaba
+  asi. El archivo guarda `Blank` y lo lee como `Blank`.
+- `(en blanco)` queda como valor reservado: una categoria con ese nombre literal se filtra
+  como blanco.
+
+## Fase UI-18: tema del sistema
+
+- `config::Tema` gana `Sistema`. Al arrancar toma la apariencia del escritorio; con la ventana
+  abierta, un observador de apariencia aplica el cambio en caliente. El callback mira el tema
+  elegido, asi que un tema fijo no reacciona.
+- El boton pasa a tres estados (claro, oscuro, sistema) y el icono muestra el tema ACTUAL: con
+  tres estados "el siguiente" no se adivina desde el dibujo.
+- `Datan` guarda el tema porque no se puede deducir del color: con el escritorio oscuro,
+  `Claro` y `Sistema` pintan igual y significan otra cosa.
