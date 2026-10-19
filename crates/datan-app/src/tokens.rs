@@ -55,6 +55,11 @@ pub const ALTO_FILA: f32 = 26.0;
 /// Cuatro por fila en el panel, con la etiqueta mas larga adentro ("Dispersion") sin
 /// recortar: un nombre cortado por el borde se lee como un defecto.
 pub const ANCHO_MOSAICO: f32 = 58.0;
+/// El ancho de la pista de un interruptor.
+///
+/// La pista y el boton de adentro se miden juntos: 28 de pista con 2 de relleno deja un
+/// boton de 12 que se ve como un control y no como un punto.
+pub const ANCHO_INTERRUPTOR: f32 = 28.0;
 
 // --- Escala ---------------------------------------------------------------------------------
 

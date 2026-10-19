@@ -17,6 +17,7 @@
 //! Los ids de columnas y medidas son internos del modelo y cambian entre ejecuciones. Lo que
 //! se guarda son los NOMBRES, y al abrir se resuelven contra el modelo de esa conexion.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use datan_dax_eval::FilterValue;
@@ -68,6 +69,70 @@ struct File {
     /// El Top N de la vista, si lo habia.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     top_n: Option<SavedTopN>,
+    /// El formato de cada visual, por su clave ("Tarjetas", "Barras", "Tabla"...).
+    ///
+    /// Un mapa y no un solo formato: cambiar de Barras a Tabla y volver tiene que encontrar
+    /// las barras como estaban. Un archivo sin esta tabla abre con todos los ajustes
+    /// encendidos, que es como se dibujaba antes de que existieran.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    formato: BTreeMap<String, SavedFormato>,
+}
+
+/// El formato del visual del lienzo.
+///
+/// Booleanos y no un enum por tipo de visual: el mismo ajuste sirve a varios tipos, y un
+/// enum obligaria a repetir cada campo en cada variante. El panel de propiedades dibuja solo
+/// los ajustes que el visual activo usa, asi que ninguno queda encendido sin efecto.
+///
+/// Los valores por defecto son `true`: un informe guardado antes de que existiera el formato
+/// se abre con el mismo dibujo que tenia.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedFormato {
+    /// El titulo de la tarjeta. En una tarjeta KPI es el nombre de la medida.
+    #[serde(skip_serializing_if = "es_cierto")]
+    pub titulo: bool,
+    /// El fondo y el borde de la tarjeta.
+    #[serde(skip_serializing_if = "es_cierto")]
+    pub fondo: bool,
+    /// El valor al lado de cada barra.
+    #[serde(skip_serializing_if = "es_cierto")]
+    pub etiquetas: bool,
+    /// El eje de valores y su rejilla en los graficos del sistema.
+    #[serde(skip_serializing_if = "es_cierto")]
+    pub eje: bool,
+    /// La variacion contra el periodo anterior y su linea.
+    #[serde(skip_serializing_if = "es_cierto")]
+    pub comparacion: bool,
+    /// Las lineas horizontales de la tabla.
+    #[serde(skip_serializing_if = "es_cierto")]
+    pub cuadricula: bool,
+}
+
+impl Default for SavedFormato {
+    fn default() -> Self {
+        Self {
+            titulo: true,
+            fondo: true,
+            etiquetas: true,
+            eje: true,
+            comparacion: true,
+            cuadricula: true,
+        }
+    }
+}
+
+/// Un ajuste encendido es el default y no se escribe: el archivo dice que se apago.
+fn es_cierto(value: &bool) -> bool {
+    *value
+}
+
+impl SavedFormato {
+    /// `true` si esta todo como al abrir la app. Un archivo con el formato por defecto no
+    /// escribe la tabla: el archivo sigue diciendo lo mismo con menos lineas.
+    pub fn es_el_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// El Top N de la vista, con la medida por NOMBRE.
@@ -123,6 +188,8 @@ pub struct SavedView {
     pub visual: Option<String>,
     pub period_months: Option<u8>,
     pub top_n: Option<SavedTopN>,
+    /// El formato de cada visual, por su clave. Los visuales que no estan usan el default.
+    pub formato: BTreeMap<String, SavedFormato>,
 }
 
 /// El nombre de archivo de un informe.
@@ -208,6 +275,14 @@ pub fn save_view(report: &Report, name: &str, view: &SavedView) -> Result<(), Sa
         visual: view.visual.clone(),
         period_months: view.period_months,
         top_n: view.top_n.clone(),
+        // Un visual que quedo con todos los ajustes encendidos no se escribe: el mapa dice
+        // donde el usuario cambio algo.
+        formato: view
+            .formato
+            .iter()
+            .filter(|(_, formato)| !formato.es_el_default())
+            .map(|(visual, formato)| (visual.clone(), *formato))
+            .collect(),
     };
 
     let text = toml::to_string_pretty(&file)
@@ -338,6 +413,7 @@ pub fn open_view(
         visual: file.visual,
         period_months: file.period_months,
         top_n: file.top_n,
+        formato: file.formato,
     };
 
     Ok((report, view))
@@ -481,6 +557,7 @@ value = "Text(\"Norte\")"
             visual: None,
             period_months: None,
             top_n: None,
+            formato: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&file).expect("serializa");
         assert!(!text.contains("visual"), "{text}");
@@ -505,5 +582,85 @@ value = "Text(\"Norte\")"
         let back: File = toml::from_str(&text).expect("parsea");
         assert_eq!(back, con_vista);
         assert_eq!(back.top_n.expect("el top n").count, 5);
+    }
+
+    #[test]
+    fn un_informe_sin_formato_abre_con_todos_los_ajustes() {
+        // Los informes guardados antes de que existiera el formato no tienen la tabla, y
+        // tienen que abrirse con el dibujo de siempre.
+        let viejo = r#"
+name = "ventas"
+database = "pg"
+dimensions = ["region"]
+measures = ["Qty"]
+"#;
+        let file: File = toml::from_str(viejo).expect("parsea");
+        assert!(file.formato.is_empty());
+    }
+
+    #[test]
+    fn un_formato_a_medias_llena_el_resto_con_el_default() {
+        // Un `[formato]` con un solo ajuste apaga ese y deja los demas como estaban: la
+        // tabla se escribe solo con lo que el usuario toco.
+        let texto = r#"
+name = "ventas"
+database = "pg"
+dimensions = []
+measures = []
+
+[formato.Barras]
+titulo = false
+"#;
+        let file: File = toml::from_str(texto).expect("parsea");
+        let formato = file.formato.get("Barras").expect("el visual");
+        assert!(!formato.titulo);
+        assert!(formato.fondo);
+        assert!(formato.etiquetas);
+        assert!(!formato.es_el_default());
+    }
+
+    #[test]
+    fn el_formato_viaja_en_el_archivo() {
+        let formato = SavedFormato {
+            titulo: false,
+            cuadricula: false,
+            ..SavedFormato::default()
+        };
+        let file = File {
+            name: "ventas".to_string(),
+            database: "pg".to_string(),
+            dimensions: vec![],
+            measures: vec![],
+            filters: vec![],
+            visual: Some("Tabla".to_string()),
+            period_months: None,
+            top_n: None,
+            formato: BTreeMap::from([("Tabla".to_string(), formato)]),
+        };
+        let text = toml::to_string_pretty(&file).expect("serializa");
+        assert!(text.contains("[formato.Tabla]"), "{text}");
+        assert!(text.contains("titulo = false"), "{text}");
+        // Lo que esta encendido no se escribe: el archivo dice lo que se apago.
+        assert!(!text.contains("fondo = true"), "{text}");
+
+        let back: File = toml::from_str(&text).expect("vuelve a parsear");
+        assert_eq!(back.formato.get("Tabla"), Some(&formato));
+    }
+
+    #[test]
+    fn el_formato_por_defecto_no_se_escribe() {
+        let file = File {
+            name: "ventas".to_string(),
+            database: "pg".to_string(),
+            dimensions: vec![],
+            measures: vec![],
+            filters: vec![],
+            visual: None,
+            period_months: None,
+            top_n: None,
+            formato: BTreeMap::new(),
+        };
+        let text = toml::to_string_pretty(&file).expect("serializa");
+        assert!(!text.contains("[formato]"), "{text}");
     }
 }

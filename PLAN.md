@@ -1703,3 +1703,26 @@ la tabla 2 que agrupa". Hasta ahora no habia forma de arreglarlo desde la app.
 312 tests. `informe_postgres` imprime las relaciones del modelo y, con la de productos
 apagada, el informe por `categoria` falla con "no hay relationship": el rol gobierna el
 camino de verdad y no es un adorno.
+
+## Fase UI-11: formato por visual
+
+El panel de Propiedades era una lista de lectura: "Titulo", "Ancho: completo", "Eje",
+"Valores". El ancho no se podia cambiar y los otros dos repetian la seleccion de campos.
+
+- Seis ajustes, y cada uno gobierna el dibujo: `titulo` (el titulo de la tarjeta; en una KPI,
+  el nombre de la medida), `fondo` (relleno y borde de la tarjeta), `etiquetas` (el valor al
+  lado de cada barra), `eje` (eje de valores y rejilla de los graficos del sistema),
+  `comparacion` (la variacion y su linea en las KPI) y `cuadricula` (las lineas de la tabla).
+- El panel dibuja solo los ajustes que el visual activo usa. Un interruptor encendido que no
+  cambia nada ensena a desconfiar de todos. En modo Lectura se ven y no se tocan.
+- El formato se guarda POR CLAVE DE VISUAL (`[formato.Tabla]`, `[formato.Barras]`): cambiar
+  de Barras a Tabla y volver tiene que encontrar las barras como estaban.
+- Solo se escribe el ajuste apagado; un archivo sin la tabla abre con todo encendido, que es
+  como se dibujaba antes.
+- "Ancho" se retira: no se podia cambiar y decia lo que ya se ve.
+
+### Resultado
+
+316 tests. La app arranca en 12 s con 157 MB RSS y sin errores en el log. La captura de
+pantalla sigue sin funcionar en esta maquina (`could not create image from display`), asi que
+el panel esta verificado por compilacion y por el archivo, no por imagen.

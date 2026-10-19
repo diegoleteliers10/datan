@@ -180,6 +180,9 @@ struct Datan {
     scroll: UniformListScrollHandle,
     /// El modo de conectar dos columnas, si esta encendido.
     conexion: Conexion,
+    /// El formato de cada visual, por su clave. Cambiar de Barras a Tabla y volver tiene que
+    /// encontrar las barras como estaban: un solo formato para la pagina no lo hace.
+    formatos: std::collections::BTreeMap<String, datan_report::saved::SavedFormato>,
 }
 
 impl Datan {
@@ -216,6 +219,7 @@ impl Datan {
             database: None,
             scroll: UniformListScrollHandle::default(),
             conexion: Conexion::Apagada,
+            formatos: Default::default(),
         }
     }
 
@@ -650,24 +654,27 @@ impl Datan {
             .unwrap_or_default()
     }
 
-    /// El titulo del visual que esta en el lienzo, con los nombres del modelo.
-    ///
-    /// Sale de la misma funcion que el titulo de la tarjeta del grafico. Dos cadenas que dicen
-    /// lo mismo se separan el dia que una cambia, y el panel queda describiendo otro visual.
-    fn titulo_visual(&self) -> String {
-        let medida = self
-            .selection
-            .measures
-            .first()
-            .map(|id| self.model_measure_name(*id))
-            .unwrap_or_default();
-        let dimension = self
-            .selection
-            .dimensions
-            .first()
-            .map(|id| self.model_column_name(*id))
-            .unwrap_or_default();
-        titulo_de(&medida, &dimension)
+    /// El formato del visual que se esta mirando. El que no se toco usa el default.
+    fn formato_actual(&self) -> datan_report::saved::SavedFormato {
+        self.formatos
+            .get(&self.visual)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Cambia un ajuste del visual activo.
+    fn ajustar_formato(
+        &mut self,
+        cambio: impl FnOnce(&mut datan_report::saved::SavedFormato),
+        cx: &mut Context<Self>,
+    ) {
+        if self.lectura {
+            self.stats = Some("modo Lectura: el formato no se toca".to_string());
+            cx.notify();
+            return;
+        }
+        cambio(self.formatos.entry(self.visual.clone()).or_default());
+        cx.notify();
     }
 
     /// La linea de estado de la barra superior: visuales, consultas y milisegundos, y al
@@ -746,6 +753,7 @@ impl Datan {
                 count: top.count,
                 abajo: top.abajo,
             }),
+            formato: self.formatos.clone(),
         };
 
         match datan_report::saved::save_view(&report, &name, &view) {
@@ -783,6 +791,7 @@ impl Datan {
                 if let Some(visual) = view.visual {
                     self.visual = visual;
                 }
+                self.formatos = view.formato;
                 self.date_months = view.period_months;
                 // La medida del Top N se resuelve por nombre, como todo lo guardado. Una
                 // medida que ya no existe deja la vista sin Top N en vez de romperla.
@@ -1955,7 +1964,11 @@ struct Tarjeta {
     formato: Option<formato::Formato>,
 }
 
-fn tarjeta_kpi(theme: &Theme, tarjeta: &Tarjeta) -> AnyElement {
+fn tarjeta_kpi(
+    theme: &Theme,
+    tarjeta: &Tarjeta,
+    formato: datan_report::saved::SavedFormato,
+) -> AnyElement {
     let valor = if tarjeta.total.is_empty() {
         "-".to_string()
     } else {
@@ -1976,7 +1989,7 @@ fn tarjeta_kpi(theme: &Theme, tarjeta: &Tarjeta) -> AnyElement {
                 .unwrap_or_else(|_| tarjeta.total.clone()),
         }
     };
-    let comparacion: AnyElement = match tarjeta.delta {
+    let comparacion: AnyElement = match tarjeta.delta.filter(|_| formato.comparacion) {
         Some(delta) => {
             // `chart_bullish` y `chart_bearish` son los dos colores con significado del
             // tema: verde y rojo. `danger_foreground` NO sirve para esto: es el color del
@@ -2013,24 +2026,27 @@ fn tarjeta_kpi(theme: &Theme, tarjeta: &Tarjeta) -> AnyElement {
         )
         .child(comparacion);
 
-    let mut cuerpo = div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(components::nota(theme, tarjeta.nombre.clone()))
-        .child(
-            div()
-                .flex()
-                .items_end()
-                .gap_3()
-                .child(columna),
-        );
+    let mut cuerpo = div().flex().flex_col().gap_2();
+    // El nombre de la medida es el titulo de la tarjeta: sin el, el valor es un numero sin
+    // decir que mide.
+    if formato.titulo {
+        cuerpo = cuerpo.child(components::nota(theme, tarjeta.nombre.clone()));
+    }
+    cuerpo = cuerpo.child(
+        div()
+            .flex()
+            .items_end()
+            .gap_3()
+            .child(columna),
+    );
 
-    if let Some(serie) = tarjeta.serie.as_deref().filter(|serie| serie.len() > 1) {
+    if formato.comparacion
+        && let Some(serie) = tarjeta.serie.as_deref().filter(|serie| serie.len() > 1)
+    {
         cuerpo = cuerpo.child(div().flex().justify_end().child(sparkline(serie)));
     }
 
-    components::tarjeta(theme)
+    components::superficie(theme, formato.fondo)
         .flex()
         .flex_1()
         .p_4()
@@ -2570,11 +2586,12 @@ impl Datan {
                     .child(error),
             );
         }
+        let formato = self.formato_actual();
         if !self.totals.is_empty() {
             let cards: Vec<AnyElement> = self
                 .totals
                 .iter()
-                .map(|tarjeta| tarjeta_kpi(&theme, tarjeta))
+                .map(|tarjeta| tarjeta_kpi(&theme, tarjeta, formato))
                 .collect();
             canvas = canvas.child(
                 div()
@@ -2638,6 +2655,7 @@ impl Datan {
                         dimension: &dimension,
                         dimension_id: self.selection.dimensions[0],
                         filas: matrix.row_count(),
+                        formato,
                         // Cuando la tabla no se pinta, el grafico se queda con el alto de la
                         // pagina: un grafico chico arriba de media pantalla vacia no es una
                         // pagina.
@@ -2783,10 +2801,90 @@ impl Datan {
 
         // --- Propiedades del visual elegido ---
         //
-        // Los valores salen del visual que esta en el lienzo. La version anterior decia
-        // "Titulo: Informe" y "Ancho: completo" con el informe que fuera: dos renglones que no
-        // decian nada de lo que se estaba mirando.
-        let mut propiedades = div().flex().flex_col().gap_2();
+        // Cada interruptor gobierna el dibujo. Un ajuste que el visual activo no usa no se
+        // dibuja: un interruptor encendido que no cambia nada ensena a desconfiar de todos.
+        let formato = self.formato_actual();
+        let visual = self.visual.as_str();
+        let editable = !self.lectura;
+        let mut propiedades = div().flex().flex_col().gap_1();
+        propiedades = propiedades.child(components::interruptor(
+            &theme,
+            "prop-titulo",
+            "Titulo",
+            formato.titulo,
+            editable,
+            cx.listener(|view, _event, _window, cx| {
+                view.ajustar_formato(|formato| formato.titulo = !formato.titulo, cx);
+            }),
+        ));
+        propiedades = propiedades.child(components::interruptor(
+            &theme,
+            "prop-fondo",
+            "Fondo",
+            formato.fondo,
+            editable,
+            cx.listener(|view, _event, _window, cx| {
+                view.ajustar_formato(|formato| formato.fondo = !formato.fondo, cx);
+            }),
+        ));
+        // El valor al lado de la barra solo existe en las barras horizontales.
+        if matches!(visual, "Barras" | "Todo") {
+            propiedades = propiedades.child(components::interruptor(
+                &theme,
+                "prop-etiquetas",
+                "Etiquetas",
+                formato.etiquetas,
+                editable,
+                cx.listener(|view, _event, _window, cx| {
+                    view.ajustar_formato(|formato| formato.etiquetas = !formato.etiquetas, cx);
+                }),
+            ));
+        }
+        // El eje de valores es el de los graficos del sistema. Las barras horizontales no
+        // tienen eje: tienen la etiqueta pegada a la barra.
+        if matches!(visual, "Columnas" | "Lineas" | "Area") {
+            propiedades = propiedades.child(components::interruptor(
+                &theme,
+                "prop-eje",
+                "Eje",
+                formato.eje,
+                editable,
+                cx.listener(|view, _event, _window, cx| {
+                    view.ajustar_formato(|formato| formato.eje = !formato.eje, cx);
+                }),
+            ));
+        }
+        // La comparacion es de las tarjetas KPI: la variacion y su linea.
+        if matches!(visual, "Tarjetas" | "Todo") {
+            propiedades = propiedades.child(components::interruptor(
+                &theme,
+                "prop-comparacion",
+                "Comparacion",
+                formato.comparacion,
+                editable,
+                cx.listener(|view, _event, _window, cx| {
+                    view.ajustar_formato(
+                        |formato| formato.comparacion = !formato.comparacion,
+                        cx,
+                    );
+                }),
+            ));
+        }
+        if matches!(visual, "Tabla" | "Todo") {
+            propiedades = propiedades.child(components::interruptor(
+                &theme,
+                "prop-cuadricula",
+                "Cuadricula",
+                formato.cuadricula,
+                editable,
+                cx.listener(|view, _event, _window, cx| {
+                    view.ajustar_formato(|formato| formato.cuadricula = !formato.cuadricula, cx);
+                }),
+            ));
+        }
+
+        // Los campos que alimentan el visual. No son ajustes: son la respuesta a "que esta
+        // pintando esto", y con dos o tres medidas en la lista no se lee en otro sitio.
         let eje = self
             .selection
             .dimensions
@@ -2801,9 +2899,8 @@ impl Datan {
             .map(|id| self.model_measure_name(*id))
             .collect::<Vec<_>>()
             .join(", ");
+        let mut campos = div().flex().flex_col().gap_2().pt_1();
         for (rotulo, valor) in [
-            ("Titulo", self.titulo_visual()),
-            ("Ancho", "completo".to_string()),
             (
                 "Eje",
                 if eje.is_empty() {
@@ -2821,8 +2918,9 @@ impl Datan {
                 },
             ),
         ] {
-            propiedades = propiedades.child(components::fila_propiedad(&theme, rotulo, valor));
+            campos = campos.child(components::fila_propiedad(&theme, rotulo, valor));
         }
+        propiedades = propiedades.child(campos);
 
         let visualizaciones = div()
             .w(px(tokens::PANEL_VISUALES))
@@ -3326,6 +3424,7 @@ impl Datan {
         let columns = Arc::clone(&grid.columns);
         let kinds = Arc::clone(&grid.kinds);
         let row_count = grid.row_count;
+        let cuadricula = self.formato_actual().cuadricula;
         let dimension_count = self
             .report
             .as_ref()
@@ -3440,11 +3539,12 @@ impl Datan {
                                 .into_any_element()
                         });
 
-                        let mut fila = div()
-                            .flex()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .children(cells);
+                        let mut fila = div().flex().children(cells);
+                        // Sin cuadricula la tabla sigue separando el subtotal del dato: el
+                        // relleno no es una linea, es el grupo.
+                        if cuadricula {
+                            fila = fila.border_b_1().border_color(theme.border);
+                        }
                         if destacado {
                             fila = fila.bg(theme.muted);
                         }
@@ -3464,7 +3564,7 @@ impl Datan {
 
         // La tabla vive en una tarjeta como el grafico: las dos son superficies del mismo
         // lienzo, y una tabla suelta sobre el gris se lee como un volcado de datos.
-        components::tarjeta(cx.theme())
+        components::superficie(cx.theme(), self.formato_actual().fondo)
             .p_2()
             // `h_full` y no un alto propio: la caja ya tiene el suyo (el que sobra en la
             // ventana) y la lista de filas se mide contra el. Un alto fijo aca adentro
@@ -3568,6 +3668,8 @@ struct Grafico<'a> {
     dimension_id: ObjectId,
     /// Cuantas filas tiene la matriz: el titulo dice cuantas quedaron afuera.
     filas: usize,
+    /// El formato del visual: titulo, fondo, etiquetas y eje.
+    formato: datan_report::saved::SavedFormato,
     /// El alto del dibujo. `None` cuando el grafico es lo unico del lienzo: ahi ocupa lo
     /// que sobra en la ventana, que es lo que hace la referencia.
     alto: Option<f32>,
@@ -3586,21 +3688,23 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
         dimension,
         dimension_id,
         filas,
+        formato,
         alto,
     } = *grafico;
-    let mut fila = div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(components::titulo_tarjeta(theme, titulo_de(medida, dimension)))
-        .child(div().flex_1());
+    let mut tarjeta_titulo = div().flex().items_center().gap_2();
     // Cuantos valores quedaron afuera. Un grafico que dibuja ocho de quinientas filas y no
-    // lo dice es un grafico que miente con el eje.
-    if filas > puntos.len() {
-        fila = fila.child(components::nota(
-            theme,
-            format!("los {} valores mas altos", puntos.len()),
-        ));
+    // lo dice es un grafico que miente con el eje. La nota va con el titulo: sin titulo, el
+    // aviso del recorte flota sobre el dibujo sin decir de que habla.
+    if formato.titulo {
+        tarjeta_titulo = tarjeta_titulo
+            .child(components::titulo_tarjeta(theme, titulo_de(medida, dimension)))
+            .child(div().flex_1());
+        if filas > puntos.len() {
+            tarjeta_titulo = tarjeta_titulo.child(components::nota(
+                theme,
+                format!("los {} valores mas altos", puntos.len()),
+            ));
+        }
     }
 
     let cuerpo: AnyElement = match tipo {
@@ -3611,30 +3715,36 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
             .flex()
             .flex_1()
             .gap_4()
-            .child(div().flex_1().child(dibujo(tipo, puntos, medida)))
+            .child(
+                div()
+                    .flex_1()
+                    .child(dibujo(tipo, puntos, medida, formato.eje)),
+            )
             .child(leyenda(theme, puntos, dimension_id, cx))
             .into_any_element(),
         // Las barras horizontales se dibujan a mano porque son el clic: un grafico del
         // sistema no avisa que barra se toco, y filtrar por categoria desde el grafico es una
         // funcion que ya existe.
-        "Barras" | "Todo" => barras(theme, puntos, dimension_id, cx),
+        "Barras" | "Todo" => barras(theme, puntos, dimension_id, formato.etiquetas, cx),
         _ => div()
             .flex()
             .flex_1()
-            .child(dibujo(tipo, puntos, medida))
+            .child(dibujo(tipo, puntos, medida, formato.eje))
             .into_any_element(),
     };
 
-    let mut tarjeta = components::tarjeta(theme)
+    let mut tarjeta = components::superficie(theme, formato.fondo)
         .mx_3()
         .mt_3()
         .p_4()
         .flex()
         .flex_col()
         .overflow_hidden()
-        .gap_3()
-        .child(fila)
-        .child(cuerpo);
+        .gap_3();
+    if formato.titulo {
+        tarjeta = tarjeta.child(tarjeta_titulo);
+    }
+    tarjeta = tarjeta.child(cuerpo);
     tarjeta = match alto {
         Some(alto) => tarjeta.h(px(alto)).flex_shrink_0(),
         None => tarjeta.flex_1(),
@@ -3643,7 +3753,7 @@ fn card_grafico(theme: &Theme, grafico: &Grafico, cx: &mut Context<Datan>) -> An
 }
 
 /// El dibujo de un grafico del sistema, segun el tipo elegido.
-fn dibujo(tipo: &str, puntos: &[Punto], medida: &str) -> AnyElement {
+fn dibujo(tipo: &str, puntos: &[Punto], medida: &str, eje: bool) -> AnyElement {
     let datos = puntos.to_vec();
     let nombre = SharedString::from(medida.to_string());
     // Una sola medida: un solo color. El color por categoria es para el anillo, donde cada
@@ -3661,10 +3771,10 @@ fn dibujo(tipo: &str, puntos: &[Punto], medida: &str) -> AnyElement {
             .tooltip_title(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
             .tooltip_value(|_, valor| SharedString::from(format_value(valor)))
             .linear()
-            .y_axis(true)
+            .y_axis(eje)
             .y_tick_count(4)
             .y_tick_format(format_value)
-            .grid(true)
+            .grid(eje)
             .grid_dashed(false)
             .into_any_element(),
         "Area" => AreaChart::new(datos)
@@ -3677,10 +3787,10 @@ fn dibujo(tipo: &str, puntos: &[Punto], medida: &str) -> AnyElement {
             .tooltip_title(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
             .tooltip_value(|_, _, valor| SharedString::from(format_value(valor)))
             .linear()
-            .y_axis(true)
+            .y_axis(eje)
             .y_tick_count(4)
             .y_tick_format(format_value)
-            .grid(true)
+            .grid(eje)
             .grid_dashed(false)
             .into_any_element(),
         // `inner_radius` esta en pixeles, como el radio exterior, que sale del alto de la
@@ -3701,10 +3811,10 @@ fn dibujo(tipo: &str, puntos: &[Punto], medida: &str) -> AnyElement {
             .name(nombre)
             .tooltip_title(|punto: &Punto| SharedString::from(punto.etiqueta.clone()))
             .tooltip_value(|_, valor| SharedString::from(format_value(valor)))
-            .value_axis(true)
+            .value_axis(eje)
             .value_tick_count(4)
             .value_tick_format(format_value)
-            .grid(true)
+            .grid(eje)
             .grid_dashed(false)
             .corner_radii(Corners::all(px(4.)))
             .into_any_element(),
@@ -3796,6 +3906,7 @@ fn barras(
     theme: &Theme,
     puntos: &[Punto],
     dimension_id: ObjectId,
+    etiquetas: bool,
     cx: &mut Context<Datan>,
 ) -> AnyElement {
     let max = puntos
@@ -3809,7 +3920,7 @@ fn barras(
         .map(|punto| {
             let fraccion = (punto.valor / max).clamp(0.02, 1.0);
             let etiqueta = punto.etiqueta.clone();
-            div()
+            let mut fila = div()
                 .id(ElementId::Name(SharedString::from(format!(
                     "barra-{}",
                     punto.etiqueta
@@ -3846,19 +3957,24 @@ fn barras(
                                 .bg(tokens::serie_unica()),
                         )
                         .child(div().flex_grow((1.0 - fraccion) as f32 * 1000.0)),
-                )
-                .child(
+                );
+            // Sin etiqueta el valor no se dibuja, que es lo que pide apagar las etiquetas. El
+            // ancho de la columna no se reserva: la barra llega al borde y la fila no queda
+            // coja.
+            if etiquetas {
+                fila = fila.child(
                     div()
                         .w(px(80.0))
                         .flex_shrink_0()
                         .text_size(px(tokens::LETRA_ETIQUETA))
                         .text_align(TextAlign::Right)
                         .child(format_value(punto.valor)),
-                )
-                .on_click(cx.listener(move |view, _event, _window, cx| {
-                    view.filter_by_label(dimension_id, &etiqueta, cx);
-                }))
-                .into_any_element()
+                );
+            }
+            fila.on_click(cx.listener(move |view, _event, _window, cx| {
+                view.filter_by_label(dimension_id, &etiqueta, cx);
+            }))
+            .into_any_element()
         })
         .collect();
 

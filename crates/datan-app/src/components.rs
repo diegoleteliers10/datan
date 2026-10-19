@@ -439,3 +439,90 @@ pub fn nota(theme: &Theme, texto: impl Into<SharedString>) -> Div {
         .text_color(theme.muted_foreground)
         .child(texto.into())
 }
+
+/// La superficie de un visual: con fondo es una tarjeta, sin fondo es solo la caja.
+///
+/// Apagar el fondo no deja el contenido suelto sobre el lienzo: se queda el redondeo y el
+/// relleno que pone el que llama. Lo que se va es el relleno y el borde, que son los que
+/// hacen que el visual se lea como una pieza separada.
+pub fn superficie(theme: &Theme, con_fondo: bool) -> Div {
+    if con_fondo {
+        tarjeta(theme)
+    } else {
+        div().rounded_2xl()
+    }
+}
+
+/// Un ajuste de propiedades: el rotulo y un interruptor.
+///
+/// `editable` en `false` lo dibuja con el valor que tiene y sin clic. En modo Lectura el
+/// informe se mira: un interruptor que parece que se puede tocar y no hace nada miente.
+pub fn interruptor<F>(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    etiqueta: impl Into<SharedString>,
+    encendido: bool,
+    editable: bool,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let pista = div()
+        .w(px(tokens::ANCHO_INTERRUPTOR))
+        .h(px(16.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .p(px(2.0))
+        .bg(if encendido {
+            theme.primary
+        } else if editable {
+            theme.muted
+        } else {
+            theme.border
+        })
+        .child(
+            div()
+                .w(px(12.0))
+                .h(px(12.0))
+                .rounded_full()
+                .bg(if encendido && editable {
+                    theme.primary_foreground
+                } else {
+                    theme.muted_foreground
+                }),
+        );
+    let pista = if encendido {
+        pista.justify_end()
+    } else {
+        pista.justify_start()
+    };
+
+    let fila = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .py_1()
+        .text_size(px(tokens::LETRA_ETIQUETA))
+        .text_color(if editable {
+            theme.foreground
+        } else {
+            theme.muted_foreground
+        })
+        .child(etiqueta.into())
+        .child(pista);
+
+    if !editable {
+        return fila.into_any_element();
+    }
+    fila.id(ElementId::Name(id.into()))
+        .px_1()
+        .rounded_xl()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.list_hover))
+        .on_click(on_click)
+        .into_any_element()
+}
