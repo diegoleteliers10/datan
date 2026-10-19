@@ -4,8 +4,8 @@
 //! fuente de discrepancias mas comun entre el fast path y el fallback.
 
 use datan_dax_eval::{
-    FilterContext, FilterValue, IntColumn, Interpreter, MemorySource, Scalar, TextColumn,
-    extract_atoms,
+    ColumnView, FilterContext, FilterValue, IntColumn, Interpreter, MemorySource, Scalar,
+    TextColumn, extract_atoms,
 };
 use datan_model::{
     Cardinality, Column, DataType, FilterDirection, Model, ObjectId, Relationship,
@@ -334,4 +334,91 @@ fn dos_filtros_sobre_la_misma_columna_se_intersectan() {
         .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let values = evaluate("SUM('Fact Sales'[Qty])", &twice, &[PRODUCT_REGION]);
     assert_eq!(values[0].1, Scalar::Integer(50));
+}
+/// Un origen que cuenta cuantas veces se lee cada columna.
+///
+/// Es como se prueba que un semijoin se resuelve UNA vez y no una por fila del hecho: el
+/// conteo distingue una lectura del origen de un producto de dos tablas.
+struct CountingSource {
+    inner: MemorySource,
+    reads: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ObjectId, usize>>>,
+}
+
+impl CountingSource {
+    fn new(inner: MemorySource) -> Self {
+        Self {
+            inner,
+            reads: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    fn reads(&self, column: ObjectId) -> usize {
+        self.reads
+            .lock()
+            .expect("candado")
+            .get(&column)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+struct CountedColumn {
+    inner: std::sync::Arc<dyn ColumnView>,
+    id: ObjectId,
+    reads: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ObjectId, usize>>>,
+}
+
+impl ColumnView for CountedColumn {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn value_at(&self, row: usize) -> Scalar {
+        *self.reads.lock().expect("candado").entry(self.id).or_insert(0) += 1;
+        self.inner.value_at(row)
+    }
+
+    fn non_blank_count(&self) -> usize {
+        self.inner.non_blank_count()
+    }
+
+    fn distinct_count(&self) -> usize {
+        self.inner.distinct_count()
+    }
+}
+
+impl datan_dax_eval::DataSource for CountingSource {
+    fn column(&self, column: ObjectId) -> Option<std::sync::Arc<dyn ColumnView>> {
+        let inner = self.inner.column(column)?;
+        Some(std::sync::Arc::new(CountedColumn {
+            inner,
+            id: column,
+            reads: self.reads.clone(),
+        }))
+    }
+
+    fn table_len(&self, table: ObjectId) -> usize {
+        self.inner.table_len(table)
+    }
+}
+
+#[test]
+fn el_semijoin_resuelve_su_origen_una_vez_y_no_una_por_fila() {
+    // Un filtro propagado no lleva valores: lleva los filtros del origen y se evalua fila a
+    // fila. La fila del hecho tiene que buscar su clave en el origen, y ese origen NO se
+    // recorre por cada fila: se recorre una vez y se guardan sus claves. Sin cache, cuatro
+    // hechos por tres productos son doce lecturas, y en una tabla de verdad es el producto de
+    // las dos tablas.
+    let model = model();
+    let source = CountingSource::new(source());
+    let intercepted = FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".into()));
+    let propagated = intercepted.propagate(&model);
+
+    let interpreter = Interpreter::new(&model, &source);
+    let rows = interpreter.select_rows(FACT, &propagated);
+
+    // Las tres ventas de Norte: la 1, la 2 y la 4. La 3 no.
+    assert_eq!(rows.len(), 3);
+    // El origen se leyo una vez: tres filas, no tres por cada hecho.
+    assert_eq!(source.reads(PRODUCT_ID), 3);
 }

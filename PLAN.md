@@ -1650,12 +1650,22 @@ la jerarquia mas comun que un informe necesita y que la base no declara.
   se aplican ANTES que las medidas del mismo documento: la medida que suma una calculada
   tiene que encontrarla.
 - El panel Datos ya las muestra: se dibuja desde las columnas de cada tabla conectada.
+- Un filtro propagado se resuelve UNA vez por semijoin y no una por fila del hecho. La
+  version anterior recorria la tabla del origen entera por cada fila del hecho: con dos
+  millones de hechos y cien mil boletas eran doscientos mil millones de comparaciones, y
+  agrupar por una calculada de la boleta no terminaba nunca. Con el cache, el informe
+  completo de `datan_bench` corre en 7 segundos.
+- `DuckSource` pide `ORDER BY` sobre la clave de cada tabla. El interprete alinea las filas
+  por POSICION, y dos `SELECT` sueltos de la misma tabla no tienen por que devolver el mismo
+  orden. Sin esto, una calculada que multiplica dos columnas mezcla filas y da un numero que
+  parece valido.
 - No hay editor en la app: se escriben en el TOML, como las jerarquias. Un panel de
   propiedades es la fase que falta para crearlas con el mouse.
 
 ### Resultado
 
-297 tests. `informe_postgres` verifica contra `datan_bench` una calculada de dos columnas y
-una condicional: `SUM(quantity * precio_unitario)` da 79328000000 por el motor y por SQL
-crudo, y la particion por `IF(quantity > 2, ...)` da Chico 1200000 y Grande 4800000 en los
-dos caminos.
+298 tests. `informe_postgres` verifica contra `datan_bench` tres cosas por SQL crudo, que es
+un camino independiente: `SUM(quantity * precio_unitario)` da 79328000000 por el motor y por
+SQL, la particion por `IF(quantity > 2, ...)` da Chico 1200000 y Grande 4800000 en los dos
+caminos, y la jerarquia de fecha (`YEAR(fecha)`, calculada sobre la boleta, agrupada desde
+los hechos por la relacion) da 2025 1683480 y 2026 4316520 igual que `EXTRACT` en SQL.

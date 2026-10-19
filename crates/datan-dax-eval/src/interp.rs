@@ -20,7 +20,8 @@
 //! un trait, y el adaptador a Arrow vive en `datan-testkit`.
 
 use datan_model::{Model, ObjectId};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::atom::{Atom, AtomKind, MeasureOutput, Shape};
 use crate::{BinaryOp, CheckedExpr, UnaryOp};
@@ -482,6 +483,13 @@ impl CellResult {
 pub struct Interpreter<'a> {
     model: &'a Model,
     source: &'a dyn DataSource,
+    /// Las claves del origen de cada semijoin, ya resueltas.
+    ///
+    /// Un filtro propagado no lleva valores: lleva los filtros del origen, y se evalua fila a
+    /// fila. Sin cache, cada fila de la tabla de hechos recorre la tabla del origen ENTERA.
+    /// Con dos millones de hechos y cien mil boletas son doscientos mil millones de
+    /// comparaciones, y el informe no termina. La unidad de coste es el semijoin, no la fila.
+    propagated: Mutex<HashMap<String, Arc<HashSet<String>>>>,
 }
 
 /// Error del interprete.
@@ -504,7 +512,45 @@ pub enum InterpError {
 
 impl<'a> Interpreter<'a> {
     pub fn new(model: &'a Model, source: &'a dyn DataSource) -> Self {
-        Self { model, source }
+        Self {
+            model,
+            source,
+            propagated: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Las claves del origen de un semijoin, calculadas UNA vez por semijoin.
+    ///
+    /// La clave de cache es el propio semijoin. Escanear el origen cuesta lo que cuesta su
+    /// tabla; hacerlo por cada fila del hecho cuesta el producto de las dos.
+    fn propagated_keys(
+        &self,
+        origin_column: ObjectId,
+        origin_filters: &[crate::filter::Filter],
+    ) -> Arc<HashSet<String>> {
+        let cache_key = format!("{origin_column:?}|{origin_filters:?}");
+        if let Some(hit) = lock_recover(&self.propagated).get(&cache_key) {
+            return hit.clone();
+        }
+
+        let mut keys = HashSet::new();
+        if let Some(origin) = self.source.column(origin_column) {
+            for row in 0..origin.len() {
+                let value = origin.value_at(row);
+                let passes = origin_filters.iter().all(|inner| {
+                    self.source
+                        .column(inner.column)
+                        .is_some_and(|view| self.matches(view.as_ref(), row, inner))
+                });
+                if passes {
+                    keys.insert(scalar_key(&value));
+                }
+            }
+        }
+
+        let built = Arc::new(keys);
+        lock_recover(&self.propagated).insert(cache_key, built.clone());
+        built
     }
 
     /// Evalua un atomo bajo un contexto de filtro, ya propagado.
@@ -1315,23 +1361,9 @@ impl<'a> Interpreter<'a> {
             FilterSource::Propagated {
                 origin_column,
                 origin_filters,
-            } => {
-                let Some(origin) = self.source.column(*origin_column) else {
-                    return false;
-                };
-                let actual_key = actual;
-                (0..origin.len()).any(|candidate_row| {
-                    if origin.value_at(candidate_row) != actual_key {
-                        return false;
-                    }
-                    origin_filters.iter().all(|inner| {
-                        let Some(inner_view) = self.source.column(inner.column) else {
-                            return false;
-                        };
-                        self.matches(inner_view.as_ref(), candidate_row, inner)
-                    })
-                })
-            }
+            } => self
+                .propagated_keys(*origin_column, origin_filters)
+                .contains(&scalar_key(&actual)),
         }
     }
 
