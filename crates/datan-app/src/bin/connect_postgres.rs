@@ -45,9 +45,8 @@ fn main() {
 
     // 2. Conectar. `ATTACH` con el DSN de libpq; DuckDB reenvia la conexion al driver de
     //    Postgres, asi que no hay dosPooling de conexiones.
-    let attach = format!(
-        "ATTACH 'host=localhost dbname={database}' AS pg (TYPE POSTGRES, READ_ONLY)"
-    );
+    let attach =
+        format!("ATTACH 'host=localhost dbname={database}' AS pg (TYPE POSTGRES, READ_ONLY)");
     if let Err(error) = engine.execute(&attach) {
         println!("  FALLO conectar a la base `{database}`: {error}");
         println!();
@@ -72,8 +71,7 @@ fn main() {
     };
     println!("  3. Catalogo de Postgres leido por conexion directa");
 
-    let introspection =
-        match introspect(
+    let introspection = match introspect(
         &engine,
         &datan_connect::Source::new("pg"),
         Some(&mut catalog),
@@ -153,7 +151,10 @@ fn main() {
             },
         }
     }
-    println!("     {bajan} de {} medidas bajan a SQL", model.measures.len());
+    println!(
+        "     {bajan} de {} medidas bajan a SQL",
+        model.measures.len()
+    );
     if no_bajan > 0 {
         println!("     {no_bajan} no bajan. Una medida autogenerada que no baja es un bug.");
     }
@@ -191,8 +192,8 @@ fn main() {
         return;
     };
 
-    let atoms = extract_atoms(&measure.expression, model, &filters, &[dimension])
-        .expect("extrae atomos");
+    let atoms =
+        extract_atoms(&measure.expression, model, &filters, &[dimension]).expect("extrae atomos");
     match lower(model, &sources, &atoms, &filters) {
         Ok(plan) => {
             println!("\n{}", indent(&plan.sql));

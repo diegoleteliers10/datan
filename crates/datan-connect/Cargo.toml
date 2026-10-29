@@ -12,4 +12,6 @@ datan-dax-syntax = { path = "../datan-dax-syntax" }
 datan-model = { path = "../datan-model" }
 datan-storage = { path = "../datan-storage" }
 postgres = "0.19"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
 thiserror.workspace = true

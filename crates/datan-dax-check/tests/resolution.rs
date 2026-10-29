@@ -155,7 +155,11 @@ fn un_nombre_inexistente_es_error_con_posición() {
     let model = model();
     let error = check("SUM('Fact Sales'[Nope])", &model).expect_err("deberia fallar");
     match error {
-        CheckError::UnknownColumn { table, column, span } => {
+        CheckError::UnknownColumn {
+            table,
+            column,
+            span,
+        } => {
             assert_eq!(table, "Fact Sales");
             assert_eq!(column, "Nope");
             // El span cubre `'Fact Sales'[Nope]`, que empieza en el offset 4.
@@ -228,12 +232,12 @@ fn recoge_todas_las_columnas_referenciadas() {
 #[test]
 fn detecta_un_ciclo_entre_medidas() {
     let mut model = model();
-    model.measures.push(Measure::new(
-        ObjectId(103),
-        "A",
-        "[B] + 1",
-    ));
-    model.measures.push(Measure::new(ObjectId(104), "B", "[A] + 1"));
+    model
+        .measures
+        .push(Measure::new(ObjectId(103), "A", "[B] + 1"));
+    model
+        .measures
+        .push(Measure::new(ObjectId(104), "B", "[A] + 1"));
 
     let cycle = find_measure_cycle(&model);
     let cycle_is_right = matches!(&cycle, Some(name) if name == "A" || name == "B");
@@ -266,11 +270,8 @@ fn las_variables_locales_ganan_sobre_las_medidas() {
 #[test]
 fn accepts_filter_como_source_de_un_iterador() {
     let model = model();
-    let checked = check(
-        "SUMX(FILTER('Fact Sales', [Qty] > 1), [Qty])",
-        &model,
-    )
-    .expect("FILTER como source");
+    let checked =
+        check("SUMX(FILTER('Fact Sales', [Qty] > 1), [Qty])", &model).expect("FILTER como source");
     assert!(matches!(checked.expr, CheckedExpr::Call { .. }));
 }
 

@@ -20,59 +20,61 @@ use std::collections::HashMap;
 /// parecer ciclico si se colapsa: `Bridge[ProductKey]` aparece en las dos relaciones del
 /// puente, y con `Single` en una de ellas el camino se cierra.
 pub fn has_bidirectional_cycle(model: &Model) -> bool {
-#[derive(Clone, Copy, PartialEq)]
-enum Mark {
-    White,
-    Grey,
-    Black,
-}
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        White,
+        Grey,
+        Black,
+    }
 
     // Aristas: de la columna del origen a la del destino, segun la direccion del filtro.
-let mut edges: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
-for relationship in &model.relationships {
-    if relationship.role != RelationshipRole::Active || relationship.direction == FilterDirection::None {
-        continue;
-    }
-    edges
-        .entry(relationship.from_column)
-        .or_default()
-        .push(relationship.to_column);
-    if relationship.direction == FilterDirection::Both {
+    let mut edges: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+    for relationship in &model.relationships {
+        if relationship.role != RelationshipRole::Active
+            || relationship.direction == FilterDirection::None
+        {
+            continue;
+        }
         edges
-            .entry(relationship.to_column)
+            .entry(relationship.from_column)
             .or_default()
-            .push(relationship.from_column);
+            .push(relationship.to_column);
+        if relationship.direction == FilterDirection::Both {
+            edges
+                .entry(relationship.to_column)
+                .or_default()
+                .push(relationship.from_column);
+        }
     }
-}
 
-fn visit(
-    node: ObjectId,
-    edges: &HashMap<ObjectId, Vec<ObjectId>>,
-    marks: &mut HashMap<ObjectId, Mark>,
-) -> bool {
-    match marks.get(&node).copied().unwrap_or(Mark::White) {
-        Mark::Black => return false,
-        Mark::Grey => return true,
-        Mark::White => {}
+    fn visit(
+        node: ObjectId,
+        edges: &HashMap<ObjectId, Vec<ObjectId>>,
+        marks: &mut HashMap<ObjectId, Mark>,
+    ) -> bool {
+        match marks.get(&node).copied().unwrap_or(Mark::White) {
+            Mark::Black => return false,
+            Mark::Grey => return true,
+            Mark::White => {}
+        }
+        marks.insert(node, Mark::Grey);
+        for next in edges.get(&node).into_iter().flatten() {
+            if visit(*next, edges, marks) {
+                return true;
+            }
+        }
+        marks.insert(node, Mark::Black);
+        false
     }
-    marks.insert(node, Mark::Grey);
-    for next in edges.get(&node).into_iter().flatten() {
-        if visit(*next, edges, marks) {
+
+    let nodes: Vec<ObjectId> = edges.keys().copied().collect();
+    // El marcado se reinicia por raiz. Compartirlo entre raices hacia que una raiz ya
+    // terminada (negra) se confundiera con otra en curso (gris) cuando comparten columna.
+    for node in nodes {
+        let mut marks = HashMap::new();
+        if visit(node, &edges, &mut marks) {
             return true;
         }
     }
-    marks.insert(node, Mark::Black);
     false
-}
-
-let nodes: Vec<ObjectId> = edges.keys().copied().collect();
-    // El marcado se reinicia por raiz. Compartirlo entre raices hacia que una raiz ya
-    // terminada (negra) se confundiera con otra en curso (gris) cuando comparten columna.
-for node in nodes {
-    let mut marks = HashMap::new();
-    if visit(node, &edges, &mut marks) {
-        return true;
-    }
-}
-false
 }

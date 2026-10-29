@@ -28,22 +28,22 @@
 
 mod atom;
 mod cycle;
-mod time;
 mod filter;
 mod interp;
 mod modifiers;
+mod time;
 
 pub use atom::{Atom, AtomKind, AtomSet, Granularity, MeasureOutput, Shape};
+pub use cycle::has_bidirectional_cycle;
 pub use filter::{
-    distinct_propagation_results, propagate_ordered,
     ColumnInfo, Filter, FilterContext, FilterOperator, FilterSource, FilterValue,
+    distinct_propagation_results, propagate_ordered,
 };
 pub use interp::{
     CalculatedSource, CellResult, ColumnView, DataSource, DateColumn, IntColumn, InterpError,
     Interpreter, MemorySource, Scalar, TextColumn,
 };
 pub use modifiers::{Modifier, ModifierError, apply_modifiers};
-pub use cycle::has_bidirectional_cycle;
 pub use time::{
     CalendarUnit, DateRange, TimeError, TimeFunction, date_column, day_of, filters, format_date,
     month_of, parse_day, quarter_of, shift, year_of,
@@ -143,8 +143,15 @@ pub fn extract_atoms(
 /// cache.
 fn shape_label(expr: &CheckedExpr) -> String {
     match expr {
-        CheckedExpr::Binary { op, left, right, .. } => {
-            format!("({} {} {})", shape_label(left), op.as_str(), shape_label(right))
+        CheckedExpr::Binary {
+            op, left, right, ..
+        } => {
+            format!(
+                "({} {} {})",
+                shape_label(left),
+                op.as_str(),
+                shape_label(right)
+            )
         }
         CheckedExpr::Call { name, args, .. } => {
             let inner: Vec<String> = args.iter().take(1).map(shape_label).collect();

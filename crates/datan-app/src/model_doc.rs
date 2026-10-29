@@ -34,6 +34,8 @@ use serde::{Deserialize, Serialize};
 /// El archivo, con las dos listas que el formato TOML exige en la raiz.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct File {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fact_table: Option<String>,
     #[serde(default)]
     measure: Vec<MeasureDoc>,
     #[serde(default)]
@@ -54,6 +56,13 @@ pub struct MeasureDoc {
     pub format_string: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    /// Marca una medida propia como eliminada.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
 }
 
 impl MeasureDoc {
@@ -63,6 +72,9 @@ impl MeasureDoc {
             expression: expression.into(),
             format_string: None,
             description: None,
+            folder: None,
+            table: None,
+            deleted: None,
         }
     }
 }
@@ -95,6 +107,10 @@ pub struct ColumnDoc {
     pub sort_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_string: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// El texto DAX de una columna calculada. Se evalua FILA A FILA sobre su tabla.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
@@ -105,6 +121,19 @@ pub struct ColumnDoc {
 }
 
 impl ColumnDoc {
+    pub fn ajuste(table: impl Into<String>, column: impl Into<String>) -> Self {
+        Self {
+            table: table.into(),
+            column: column.into(),
+            sort_by: None,
+            is_hidden: None,
+            format_string: None,
+            description: None,
+            expression: None,
+            data_type: None,
+        }
+    }
+
     /// Una columna calculada: no esta en la base, la define el documento.
     ///
     /// La usa el bin de verificacion `informe_postgres`, que arma documentos a mano. Este
@@ -121,6 +150,8 @@ impl ColumnDoc {
             column: column.into(),
             sort_by: None,
             is_hidden: None,
+            format_string: None,
+            description: None,
             expression: Some(expression.into()),
             data_type: Some(data_type.into()),
         }
@@ -158,6 +189,10 @@ pub struct RelationshipDoc {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cardinality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
 }
 
 impl RelationshipDoc {
@@ -174,6 +209,8 @@ impl RelationshipDoc {
             to_column: to_column.into(),
             role: None,
             direction: None,
+            cardinality: None,
+            deleted: None,
         }
     }
 
@@ -183,11 +220,21 @@ impl RelationshipDoc {
         self
     }
 
+    pub fn con_cardinalidad(mut self, cardinality: impl Into<String>) -> Self {
+        self.cardinality = Some(cardinality.into());
+        self
+    }
+
+    pub fn eliminada(mut self) -> Self {
+        self.deleted = Some(true);
+        self
+    }
 }
 
 /// El documento. Se lee, se edita y se escribe entero: es un archivo de decenas de lineas.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelDoc {
+    pub fact_table: Option<String>,
     pub measures: Vec<MeasureDoc>,
     pub columns: Vec<ColumnDoc>,
     pub jerarquias: Vec<JerarquiaDoc>,
@@ -309,6 +356,7 @@ impl ModelDoc {
             source,
         })?;
         Ok(Self {
+            fact_table: file.fact_table,
             measures: file.measure,
             columns: file.column,
             jerarquias: file.jerarquia,
@@ -327,6 +375,7 @@ impl ModelDoc {
         }
 
         let file = File {
+            fact_table: self.fact_table.clone(),
             measure: self.measures.clone(),
             column: self.columns.clone(),
             jerarquia: self.jerarquias.clone(),
@@ -352,8 +401,67 @@ impl ModelDoc {
             .iter_mut()
             .find(|existing| existing.name.eq_ignore_ascii_case(&measure.name))
         {
-            Some(existing) => *existing = measure,
+            Some(existing) => {
+                let mut measure = measure;
+                if measure.folder.is_none() {
+                    measure.folder = existing.folder.clone();
+                }
+                if measure.table.is_none() {
+                    measure.table = existing.table.clone();
+                }
+                if measure.format_string.is_none() {
+                    measure.format_string = existing.format_string.clone();
+                }
+                if measure.description.is_none() {
+                    measure.description = existing.description.clone();
+                }
+                *existing = measure;
+            }
             None => self.measures.push(measure),
+        }
+    }
+
+    /// Marca como eliminada una medida que pertenece a este documento.
+    ///
+    /// Si no hay una entrada, la medida viene del modelo de origen y no se elimina aquí.
+    pub fn delete_measure(&mut self, name: &str) -> bool {
+        let Some(measure) = self
+            .measures
+            .iter_mut()
+            .find(|measure| measure.name.eq_ignore_ascii_case(name))
+        else {
+            return false;
+        };
+        measure.deleted = Some(true);
+        true
+    }
+
+    pub fn upsert_column(&mut self, column: ColumnDoc) {
+        match self.columns.iter_mut().find(|existing| {
+            existing.table.eq_ignore_ascii_case(&column.table)
+                && existing.column.eq_ignore_ascii_case(&column.column)
+        }) {
+            Some(existing) => {
+                if column.sort_by.is_some() {
+                    existing.sort_by = column.sort_by;
+                }
+                if column.is_hidden.is_some() {
+                    existing.is_hidden = column.is_hidden;
+                }
+                if column.format_string.is_some() {
+                    existing.format_string = column.format_string;
+                }
+                if column.description.is_some() {
+                    existing.description = column.description;
+                }
+                if column.expression.is_some() {
+                    existing.expression = column.expression;
+                }
+                if column.data_type.is_some() {
+                    existing.data_type = column.data_type;
+                }
+            }
+            None => self.columns.push(column),
         }
     }
 
@@ -364,15 +472,42 @@ impl ModelDoc {
     /// diciendo lo mismo si la introspeccion renumera.
     pub fn upsert_relationship(&mut self, relationship: RelationshipDoc) {
         let same = |existing: &RelationshipDoc| {
-            existing.from_table.eq_ignore_ascii_case(&relationship.from_table)
-                && existing.from_column.eq_ignore_ascii_case(&relationship.from_column)
-                && existing.to_table.eq_ignore_ascii_case(&relationship.to_table)
-                && existing.to_column.eq_ignore_ascii_case(&relationship.to_column)
+            existing
+                .from_table
+                .eq_ignore_ascii_case(&relationship.from_table)
+                && existing
+                    .from_column
+                    .eq_ignore_ascii_case(&relationship.from_column)
+                && existing
+                    .to_table
+                    .eq_ignore_ascii_case(&relationship.to_table)
+                && existing
+                    .to_column
+                    .eq_ignore_ascii_case(&relationship.to_column)
         };
         match self.relaciones.iter_mut().find(|existing| same(existing)) {
-            Some(existing) => *existing = relationship,
+            Some(existing) => {
+                if relationship.role.is_some() {
+                    existing.role = relationship.role.clone();
+                }
+                if relationship.direction.is_some() {
+                    existing.direction = relationship.direction.clone();
+                }
+                if relationship.cardinality.is_some() {
+                    existing.cardinality = relationship.cardinality.clone();
+                }
+                if relationship.deleted.is_some() {
+                    existing.deleted = relationship.deleted;
+                } else {
+                    existing.deleted = None;
+                }
+            }
             None => self.relaciones.push(relationship),
         }
+    }
+
+    pub fn delete_relationship(&mut self, relationship: RelationshipDoc) {
+        self.upsert_relationship(relationship.eliminada());
     }
 
     /// Aplica el documento encima del modelo y devuelve lo que no se pudo aplicar.
@@ -446,32 +581,54 @@ impl ModelDoc {
                     None => DataType::Text,
                 };
                 let id = next_column_id(model);
+                let sort_by = match doc.sort_by.as_deref() {
+                    None => None,
+                    Some(name) if name.trim().is_empty() => None,
+                    Some(name) => model
+                        .table_by_name(&doc.table)
+                        .and_then(|table| table.column_by_name(name))
+                        .map(|column| column.id),
+                };
+                if doc.sort_by.is_some()
+                    && sort_by.is_none()
+                    && doc
+                        .sort_by
+                        .as_deref()
+                        .is_some_and(|name| !name.trim().is_empty())
+                {
+                    avisos.push(format!(
+                        "el orden de `{}`[{}] no se aplico: la columna de orden no existe en la tabla",
+                        doc.table, doc.column
+                    ));
+                }
                 if let Some(table) = model.tables.iter_mut().find(|t| t.id == table_id) {
                     let mut column =
                         Column::calculated(id, doc.column.clone(), data_type, expression.clone());
-                    column.sort_by = doc
-                        .sort_by
-                        .as_ref()
-                        .and_then(|name| table.column_by_name(name))
-                        .map(|column| column.id);
+                    column.sort_by = sort_by;
                     column.is_hidden = doc.is_hidden.unwrap_or(false);
+                    column.format_string = doc.format_string.clone();
+                    column.description = doc.description.clone();
                     table.columns.push(column);
                 }
                 continue;
             }
 
-            // Los ids se resuelven antes de tocar nada: `table_by_name` presta el modelo, y
-            // la escritura necesita prestarlo mutable.
+            // Resuelve la columna antes de pedir acceso mutable al modelo. Un sort_by viejo
+            // debe avisar, pero no debe bloquear otros ajustes validos de la misma columna.
             let resolved = model.table_by_name(&doc.table).and_then(|table| {
                 let column = table.column_by_name(&doc.column)?;
-                let sort_by = match &doc.sort_by {
-                    Some(name) => Some(table.column_by_name(name)?.id),
+                let sort_by = match doc.sort_by.as_deref() {
+                    Some(name) if name.trim().is_empty() => Some(None),
+                    Some(name) => table.column_by_name(name).map(|column| Some(column.id)),
                     None => None,
                 };
-                Some((table.id, column.id, sort_by))
+                let invalid_sort_by = doc.sort_by.as_deref().is_some_and(|name| {
+                    !name.trim().is_empty() && table.column_by_name(name).is_none()
+                });
+                Some((table.id, column.id, sort_by, invalid_sort_by))
             });
 
-            let Some((table_id, column_id, sort_by)) = resolved else {
+            let Some((table_id, column_id, sort_by, invalid_sort_by)) = resolved else {
                 avisos.push(format!(
                     "la columna `{}`[{}] no esta en el modelo",
                     doc.table, doc.column
@@ -479,27 +636,54 @@ impl ModelDoc {
                 continue;
             };
 
+            if invalid_sort_by {
+                avisos.push(format!(
+                    "el orden de `{}`[{}] no se aplico: la columna de orden no existe en la tabla",
+                    doc.table, doc.column
+                ));
+            }
+
             if let Some(table) = model.tables.iter_mut().find(|t| t.id == table_id)
                 && let Some(column) = table.columns.iter_mut().find(|c| c.id == column_id)
             {
-                if sort_by.is_some() {
+                if let Some(sort_by) = sort_by {
                     column.sort_by = sort_by;
                 }
                 if let Some(hidden) = doc.is_hidden {
                     column.is_hidden = hidden;
                 }
+                if let Some(format_string) = &doc.format_string {
+                    column.format_string = Some(format_string.clone());
+                }
+                if let Some(description) = &doc.description {
+                    column.description = Some(description.clone());
+                }
             }
         }
 
         for doc in &self.measures {
-            if model.measure_by_name(&doc.name).is_some() {
+            if doc.deleted == Some(true) {
+                model
+                    .measures
+                    .retain(|measure| !measure.name.eq_ignore_ascii_case(&doc.name));
                 continue;
             }
             if let Err(error) = datan_dax_check::check(&doc.expression, model) {
                 avisos.push(format!("la medida `{}` no se aplico: {error}", doc.name));
                 continue;
             }
-            let mut measure = Measure::new(next_id(model), doc.name.clone(), doc.expression.clone());
+            if let Some(measure) = model
+                .measures
+                .iter_mut()
+                .find(|measure| measure.name.eq_ignore_ascii_case(&doc.name))
+            {
+                measure.expression = doc.expression.clone();
+                measure.format_string = doc.format_string.clone();
+                measure.description = doc.description.clone();
+                continue;
+            }
+            let mut measure =
+                Measure::new(next_id(model), doc.name.clone(), doc.expression.clone());
             measure.format_string = doc.format_string.clone();
             measure.description = doc.description.clone();
             model.measures.push(measure);
@@ -545,6 +729,27 @@ impl ModelDoc {
                 continue;
             };
 
+            if doc.deleted == Some(true) {
+                model.relationships.retain(|relationship| {
+                    relationship.from_column != from_column || relationship.to_column != to_column
+                });
+                continue;
+            }
+
+            let cardinality = match doc.cardinality.as_deref() {
+                Some(text) => match parse_cardinality(text) {
+                    Some(cardinality) => Some(cardinality),
+                    None => {
+                        avisos.push(format!(
+                            "la relacion `{}`[{}] -> `{}`[{}] no se aplico: la cardinalidad `{text}` no existe",
+                            doc.from_table, doc.from_column, doc.to_table, doc.to_column
+                        ));
+                        continue;
+                    }
+                },
+                None => None,
+            };
+
             let Some(role) = parse_role(doc.role.as_deref()) else {
                 avisos.push(format!(
                     "la relacion `{}`[{}] -> `{}`[{}] no se aplico: el rol `{}` no existe",
@@ -568,6 +773,40 @@ impl ModelDoc {
                 continue;
             };
 
+            // Las relaciones uno-a-varios necesitan una clave conocida del lado uno.
+            // Muchos-a-muchos acepta columnas sin clave declarada, como tablas de consulta.
+            let cardinality = cardinality.unwrap_or(Cardinality::OneToMany);
+            let from_has_keys = model
+                .table(from_table)
+                .is_some_and(|table| !table.key_columns.is_empty());
+            let from_is_key = model
+                .table(from_table)
+                .is_some_and(|table| table.key_columns.contains(&from_column));
+            let to_has_keys = model
+                .column(to_column)
+                .is_some_and(|(table, _)| !table.key_columns.is_empty());
+            let to_is_key = model
+                .column(to_column)
+                .is_some_and(|(table, _)| table.key_columns.contains(&to_column));
+            let valid_keys = match cardinality {
+                Cardinality::OneToOne => {
+                    (!from_has_keys || from_is_key) && (!to_has_keys || to_is_key)
+                }
+                Cardinality::OneToMany => !from_has_keys || from_is_key,
+                Cardinality::ManyToOne => !to_has_keys || to_is_key,
+                Cardinality::ManyToMany => true,
+            };
+            if !valid_keys {
+                avisos.push(format!(
+                    "la relacion `{}`[{}] -> `{}`[{}] no se aplico: la cardinalidad requiere una clave declarada en el lado uno",
+                    doc.from_table,
+                    doc.from_column,
+                    doc.to_table,
+                    doc.to_column
+                ));
+                continue;
+            }
+
             if let Some(existing) = model
                 .relationships
                 .iter_mut()
@@ -575,46 +814,64 @@ impl ModelDoc {
             {
                 existing.role = role;
                 existing.direction = direction;
-                continue;
-            }
-
-            // Una relacion NUEVA. La clave tiene que estar del lado UNO: si el usuario escribio
-            // el par al reves, la propagacion va en la direccion contraria y los numeros salen
-            // mal sin ningun error. Se avisa y no se aplica.
-            let has_keys = model
-                .table(from_table)
-                .is_some_and(|table| !table.key_columns.is_empty());
-            let is_key = model
-                .table(from_table)
-                .is_some_and(|table| table.key_columns.contains(&from_column));
-            if has_keys && !is_key {
-                avisos.push(format!(
-                    "la relacion `{}`[{}] -> `{}`[{}] no se aplico: `{}`[{}] no es la clave de su tabla,                      y el lado UNO de una relacion es la clave",
-                    doc.from_table,
-                    doc.from_column,
-                    doc.to_table,
-                    doc.to_column,
-                    doc.from_table,
-                    doc.from_column
-                ));
+                existing.cardinality = cardinality;
                 continue;
             }
 
             model.relationships.push(Relationship {
                 from_column,
                 to_column,
-                cardinality: Cardinality::OneToMany,
+                cardinality,
                 direction,
                 role,
                 assume_referential_integrity: false,
             });
+        }
+
+        // Una sola relacion activa puede propagar filtros entre el mismo par de tablas.
+        // Conserva la primera activa para que un modelo antiguo con varias no cree rutas
+        // ambiguas al volver a abrirlo.
+        let table_by_column: std::collections::HashMap<ObjectId, ObjectId> = model
+            .tables
+            .iter()
+            .flat_map(|table| table.columns.iter().map(|column| (column.id, table.id)))
+            .collect();
+        let mut active_pairs = Vec::new();
+        for relationship in &mut model.relationships {
+            if relationship.role != RelationshipRole::Active {
+                continue;
+            }
+            let (Some(from_table), Some(to_table)) = (
+                table_by_column.get(&relationship.from_column).copied(),
+                table_by_column.get(&relationship.to_column).copied(),
+            ) else {
+                continue;
+            };
+            let pair = if from_table <= to_table {
+                (from_table, to_table)
+            } else {
+                (to_table, from_table)
+            };
+            if active_pairs.contains(&pair) {
+                relationship.role = RelationshipRole::Inactive;
+            } else {
+                active_pairs.push(pair);
+            }
         }
     }
 }
 
 /// El id de la proxima medida. Las del modelo arrancan en 100; las del usuario, mas arriba.
 fn next_id(model: &Model) -> ObjectId {
-    ObjectId(model.measures.iter().map(|m| m.id.0).max().unwrap_or(10_000) + 1)
+    ObjectId(
+        model
+            .measures
+            .iter()
+            .map(|m| m.id.0)
+            .max()
+            .unwrap_or(10_000)
+            + 1,
+    )
 }
 
 /// El id de la proxima columna. Por encima de todas las de la introspeccion, para no chocar
@@ -661,6 +918,16 @@ fn parse_direction(text: Option<&str>) -> Option<FilterDirection> {
     }
 }
 
+fn parse_cardinality(text: &str) -> Option<Cardinality> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "uno-a-uno" | "one-to-one" => Some(Cardinality::OneToOne),
+        "varios-a-uno" | "many-to-one" => Some(Cardinality::ManyToOne),
+        "uno-a-varios" | "one-to-many" => Some(Cardinality::OneToMany),
+        "varios-a-varios" | "many-to-many" => Some(Cardinality::ManyToMany),
+        _ => None,
+    }
+}
+
 /// El tipo de una columna calculada, en el espanol del documento.
 fn parse_data_type(text: &str) -> Option<DataType> {
     match text.trim().to_lowercase().as_str() {
@@ -683,6 +950,7 @@ mod tests {
     #[test]
     fn la_jerarquia_viaja_en_el_archivo() {
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![],
             relaciones: vec![],
@@ -692,14 +960,28 @@ mod tests {
                 levels: vec!["categoria".to_string(), "nombre".to_string()],
             }],
         };
-        let ruta = std::env::temp_dir().join(format!(
-            "datan-jerarquia-{}.toml",
-            std::process::id()
-        ));
+        let ruta =
+            std::env::temp_dir().join(format!("datan-jerarquia-{}.toml", std::process::id()));
         documento.save_to(&ruta).expect("guarda");
         let leido = ModelDoc::load_from(&ruta).expect("lee");
         let _ = std::fs::remove_file(&ruta);
         assert_eq!(leido, documento);
+    }
+
+    #[test]
+    fn la_tabla_de_hechos_elegida_viaja_en_el_archivo() {
+        let path =
+            std::env::temp_dir().join(format!("datan-fact-table-{}.toml", std::process::id()));
+        let document = ModelDoc {
+            fact_table: Some("ventas_detalle".to_string()),
+            ..ModelDoc::default()
+        };
+
+        document.save_to(&path).expect("guarda");
+        let loaded = ModelDoc::load_from(&path).expect("lee");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded.fact_table.as_deref(), Some("ventas_detalle"));
     }
 
     #[test]
@@ -727,8 +1009,18 @@ mod tests {
         };
 
         assert!(corta.resolver(&model).unwrap_err().contains("dos niveles"));
-        assert!(sin_tabla.resolver(&model).unwrap_err().contains("otra_tabla"));
-        assert!(sin_columna.resolver(&model).unwrap_err().contains("no_existe"));
+        assert!(
+            sin_tabla
+                .resolver(&model)
+                .unwrap_err()
+                .contains("otra_tabla")
+        );
+        assert!(
+            sin_columna
+                .resolver(&model)
+                .unwrap_err()
+                .contains("no_existe")
+        );
         assert_eq!(buena.resolver(&model), Ok(vec![ObjectId(11), ObjectId(11)]));
     }
 
@@ -775,13 +1067,72 @@ mod tests {
         }
     }
 
+    fn modelo_con_dos_relaciones_entre_tablas() -> Model {
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .extend([
+                Column::new(ObjectId(12), "producto_id", DataType::Integer),
+                Column::new(ObjectId(13), "producto_alt_id", DataType::Integer),
+            ]);
+        model.relationships = [ObjectId(12), ObjectId(13)]
+            .into_iter()
+            .map(|to_column| Relationship {
+                from_column: ObjectId(20),
+                to_column,
+                cardinality: Cardinality::OneToMany,
+                direction: FilterDirection::Single,
+                role: RelationshipRole::Active,
+                assume_referential_integrity: false,
+            })
+            .collect();
+        model
+    }
+
+    #[test]
+    fn aplicar_modelo_conserva_una_relacion_activa_por_par_de_tablas() {
+        let mut model = modelo_con_dos_relaciones_entre_tablas();
+
+        assert!(ModelDoc::default().apply(&mut model).is_empty());
+
+        assert_eq!(
+            model
+                .relationships
+                .iter()
+                .filter(|relationship| relationship.role == RelationshipRole::Active)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn aplicar_documento_puede_cambiar_la_relacion_activa_del_par() {
+        let mut model = modelo_con_dos_relaciones_entre_tablas();
+        let document = relaciones(vec![
+            RelationshipDoc::new("productos", "id", "ventas", "producto_id").con_rol("inactiva"),
+            RelationshipDoc::new("productos", "id", "ventas", "producto_alt_id").con_rol("activa"),
+        ]);
+
+        assert!(document.apply(&mut model).is_empty());
+
+        assert_eq!(model.relationships[0].role, RelationshipRole::Inactive);
+        assert_eq!(model.relationships[1].role, RelationshipRole::Active);
+    }
+
     #[test]
     fn declarar_una_relacion_que_la_base_no_trae() {
         // La introspeccion solo lee foreign keys. Sin constraint declarada, el modelo llega
         // sin relaciones y no hay forma de agrupar los hechos por una dimension.
         let mut model = modelo_con_dimension();
         let documento = relaciones(vec![RelationshipDoc::new(
-            "productos", "id", "ventas", "producto_id",
+            "productos",
+            "id",
+            "ventas",
+            "producto_id",
         )]);
         // La columna de los hechos existe en el modelo, con otro id.
         model
@@ -823,14 +1174,99 @@ mod tests {
         });
 
         let documento = relaciones(vec![
-            RelationshipDoc::new("productos", "id", "ventas", "producto_id")
-                .con_rol("inactiva"),
+            RelationshipDoc::new("productos", "id", "ventas", "producto_id").con_rol("inactiva"),
         ]);
         let avisos = documento.apply(&mut model);
 
         assert!(avisos.is_empty(), "{avisos:?}");
         assert_eq!(model.relationships.len(), 1);
         assert_eq!(model.relationships[0].role, RelationshipRole::Inactive);
+    }
+
+    #[test]
+    fn cardinalidad_se_guarda_y_se_aplica_a_una_relacion_existente() {
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+        model.relationships.push(Relationship {
+            from_column: ObjectId(20),
+            to_column: ObjectId(12),
+            cardinality: Cardinality::OneToMany,
+            direction: FilterDirection::Single,
+            role: RelationshipRole::Active,
+            assume_referential_integrity: false,
+        });
+        let doc = RelationshipDoc::new("productos", "id", "ventas", "producto_id")
+            .con_cardinalidad("varios-a-uno");
+        let document = relaciones(vec![doc.clone()]);
+        let warnings = document.apply(&mut model);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(model.relationships.len(), 1);
+        assert_eq!(model.relationships[0].cardinality, Cardinality::ManyToOne);
+
+        let file = File {
+            fact_table: None,
+            measure: vec![],
+            column: vec![],
+            jerarquia: vec![],
+            relacion: vec![doc],
+        };
+        let text = toml::to_string(&file).expect("serializa");
+        let back: File = toml::from_str(&text).expect("lee");
+        assert_eq!(
+            back.relacion[0].cardinality.as_deref(),
+            Some("varios-a-uno")
+        );
+    }
+
+    #[test]
+    fn borrar_una_relacion_aplica_un_tombstone_y_permite_restaurarla() {
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+        model.relationships.push(Relationship {
+            from_column: ObjectId(20),
+            to_column: ObjectId(12),
+            cardinality: Cardinality::OneToMany,
+            direction: FilterDirection::Single,
+            role: RelationshipRole::Active,
+            assume_referential_integrity: false,
+        });
+        let deleted = RelationshipDoc::new("productos", "id", "ventas", "producto_id").eliminada();
+        let mut document = ModelDoc::default();
+        document.delete_relationship(deleted.clone());
+        assert!(document.apply(&mut model).is_empty());
+        assert!(model.relationships.is_empty());
+
+        let text = toml::to_string(&File {
+            fact_table: None,
+            measure: vec![],
+            column: vec![],
+            jerarquia: vec![],
+            relacion: document.relaciones.clone(),
+        })
+        .expect("serializa");
+        let back: File = toml::from_str(&text).expect("lee");
+        assert_eq!(back.relacion[0].deleted, Some(true));
+
+        document.upsert_relationship(RelationshipDoc::new(
+            "productos",
+            "id",
+            "ventas",
+            "producto_id",
+        ));
+        assert_eq!(document.relaciones[0].deleted, None);
+        assert_eq!(document.relaciones.len(), 1);
     }
 
     #[test]
@@ -847,13 +1283,68 @@ mod tests {
             .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
 
         let documento = relaciones(vec![RelationshipDoc::new(
-            "productos", "nombre", "ventas", "producto_id",
+            "productos",
+            "nombre",
+            "ventas",
+            "producto_id",
         )]);
         let avisos = documento.apply(&mut model);
 
         assert_eq!(avisos.len(), 1);
         assert!(avisos[0].contains("clave"), "{avisos:?}");
         assert!(model.relationships.is_empty());
+    }
+
+    #[test]
+    fn varios_a_varios_acepta_campos_sin_claves_declaradas() {
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+
+        let document = relaciones(vec![
+            RelationshipDoc::new("ventas", "producto_id", "productos", "id")
+                .con_cardinalidad("varios-a-varios"),
+        ]);
+        let warnings = document.apply(&mut model);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(model.relationships.len(), 1);
+        assert_eq!(model.relationships[0].cardinality, Cardinality::ManyToMany);
+    }
+
+    #[test]
+    fn cardinalidad_invalida_no_modifica_una_relacion_existente() {
+        let mut model = modelo_con_dimension();
+        model
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "ventas")
+            .expect("la tabla")
+            .columns
+            .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
+        model.relationships.push(Relationship {
+            from_column: ObjectId(21),
+            to_column: ObjectId(12),
+            cardinality: Cardinality::ManyToMany,
+            direction: FilterDirection::Single,
+            role: RelationshipRole::Active,
+            assume_referential_integrity: false,
+        });
+
+        let document = relaciones(vec![
+            RelationshipDoc::new("productos", "nombre", "ventas", "producto_id")
+                .con_cardinalidad("uno-a-varios"),
+        ]);
+        let warnings = document.apply(&mut model);
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(model.relationships.len(), 1);
+        assert_eq!(model.relationships[0].cardinality, Cardinality::ManyToMany);
     }
 
     #[test]
@@ -871,7 +1362,10 @@ mod tests {
             .push(Column::new(ObjectId(12), "producto_id", DataType::Integer));
 
         let documento = relaciones(vec![RelationshipDoc::new(
-            "ventas", "producto_id", "productos", "id",
+            "ventas",
+            "producto_id",
+            "productos",
+            "id",
         )]);
         let avisos = documento.apply(&mut model);
 
@@ -883,7 +1377,10 @@ mod tests {
     fn una_relacion_a_una_columna_que_no_esta_avisa() {
         let mut model = modelo_con_dimension();
         let documento = relaciones(vec![RelationshipDoc::new(
-            "productos", "id", "ventas", "no_existe",
+            "productos",
+            "id",
+            "ventas",
+            "no_existe",
         )]);
         let avisos = documento.apply(&mut model);
 
@@ -914,11 +1411,11 @@ mod tests {
 
     #[test]
     fn la_relacion_da_la_vuelta_por_disco() {
-        let documento = relaciones(vec![RelationshipDoc::new(
-            "productos", "id", "ventas", "producto_id",
-        )
-        .con_rol("inactiva")]);
+        let documento = relaciones(vec![
+            RelationshipDoc::new("productos", "id", "ventas", "producto_id").con_rol("inactiva"),
+        ]);
         let file = File {
+            fact_table: None,
             measure: vec![],
             column: vec![],
             jerarquia: vec![],
@@ -935,6 +1432,7 @@ mod tests {
 
     fn doc(measures: Vec<MeasureDoc>) -> ModelDoc {
         ModelDoc {
+            fact_table: None,
             measures,
             columns: vec![],
             jerarquias: vec![],
@@ -964,25 +1462,133 @@ mod tests {
     }
 
     #[test]
-    fn una_medida_del_modelo_no_se_pisa() {
+    fn la_medida_del_documento_actualiza_la_medida_existente_y_conserva_su_id() {
         let mut model = modelo();
         model.measures.push(Measure::new(
             ObjectId(100),
             "Ventas",
             "SUM('ventas'[total])",
         ));
-        // La introspeccion ya trae `Ventas`. El documento tiene otra definicion con ese
-        // nombre, y la del modelo manda.
+        // El documento ya es dueño de `Ventas`, por eso su definicion actualiza la medida
+        // introspectada y conserva su identidad.
         doc(vec![MeasureDoc::new("Ventas", "COUNTROWS('ventas')")]).apply(&mut model);
 
         assert_eq!(model.measures.len(), 1);
+        assert_eq!(model.measures[0].id, ObjectId(100));
+        assert_eq!(model.measures[0].expression, "COUNTROWS('ventas')");
+    }
+
+    #[test]
+    fn borrar_medida_solo_borra_una_medida_del_documento() {
+        let mut model = modelo();
+        model
+            .measures
+            .push(Measure::new(ObjectId(100), "Base", "SUM('ventas'[total])"));
+        let mut documento = doc(vec![MeasureDoc::new("Propia", "COUNTROWS('ventas')")]);
+        assert!(!documento.delete_measure("Base"));
+        assert!(documento.delete_measure("Propia"));
+        documento.apply(&mut model);
+
+        assert_eq!(model.measures.len(), 1);
+        assert_eq!(model.measures[0].name, "Base");
+    }
+
+    #[test]
+    fn tombstone_de_medida_se_guarda_y_se_aplica_al_reconectar() {
+        let mut documento = doc(vec![MeasureDoc::new("Propia", "COUNTROWS('ventas')")]);
+        assert!(documento.delete_measure("Propia"));
+        let file = File {
+            fact_table: None,
+            measure: documento.measures.clone(),
+            column: vec![],
+            jerarquia: vec![],
+            relacion: vec![],
+        };
+        let text = toml::to_string(&file).expect("serializa");
+        let back: File = toml::from_str(&text).expect("lee");
+        let reloaded = ModelDoc {
+            fact_table: None,
+            measures: back.measure,
+            ..ModelDoc::default()
+        };
+        let mut model = modelo();
+        model.measures.push(Measure::new(
+            ObjectId(100),
+            "Propia",
+            "SUM('ventas'[total])",
+        ));
+        reloaded.apply(&mut model);
+
+        assert!(model.measures.is_empty());
+        assert!(text.contains("deleted = true"));
+    }
+
+    #[test]
+    fn el_toml_anterior_de_medidas_sigue_siendose_leyendo() {
+        let file: File =
+            toml::from_str("[[measure]]\nname = 'Ventas'\nexpression = \"SUM('ventas'[total])\"\n")
+                .expect("lee el formato anterior");
+
+        assert_eq!(file.measure.len(), 1);
+        assert_eq!(file.measure[0].deleted, None);
+        assert_eq!(file.measure[0].folder, None);
+        assert_eq!(file.measure[0].table, None);
+    }
+
+    #[test]
+    fn los_metadatos_de_medida_se_guardan_y_upsert_los_conserva() {
+        let mut measure = MeasureDoc::new("Ventas", "SUM('ventas'[total])");
+        measure.folder = Some("Comercial".to_string());
+        measure.table = Some("ventas".to_string());
+        measure.format_string = Some("#,0 €".to_string());
+        measure.description = Some("Total facturado".to_string());
+        let file = File {
+            fact_table: None,
+            measure: vec![measure],
+            column: vec![],
+            jerarquia: vec![],
+            relacion: vec![],
+        };
+        let text = toml::to_string(&file).expect("serializa");
+        let back: File = toml::from_str(&text).expect("lee");
+
+        assert_eq!(back.measure[0].folder.as_deref(), Some("Comercial"));
+        assert_eq!(back.measure[0].table.as_deref(), Some("ventas"));
+
+        let mut document = doc(back.measure);
+        document.upsert_measure(MeasureDoc::new("Ventas", "COUNTROWS('ventas')"));
+
+        assert_eq!(document.measures[0].expression, "COUNTROWS('ventas')");
+        assert_eq!(document.measures[0].folder.as_deref(), Some("Comercial"));
+        assert_eq!(document.measures[0].table.as_deref(), Some("ventas"));
+        assert_eq!(document.measures[0].format_string.as_deref(), Some("#,0 €"));
+        assert_eq!(
+            document.measures[0].description.as_deref(),
+            Some("Total facturado")
+        );
+    }
+
+    #[test]
+    fn medida_documentada_invalida_no_modifica_la_medida_existente() {
+        let mut model = modelo();
+        model.measures.push(Measure::new(
+            ObjectId(100),
+            "Ventas",
+            "SUM('ventas'[total])",
+        ));
+        let warnings =
+            doc(vec![MeasureDoc::new("Ventas", "SUM('ventas'[no_existe])")]).apply(&mut model);
+
+        assert_eq!(model.measures[0].id, ObjectId(100));
         assert_eq!(model.measures[0].expression, "SUM('ventas'[total])");
+        assert_eq!(warnings.len(), 1);
     }
 
     #[test]
     fn una_medida_que_no_chequea_se_salta_con_aviso() {
         let mut model = modelo();
-        let avisos = doc(vec![MeasureDoc::new("Rota", "SUM('ventas'[no_existe])")]).apply(&mut model);
+        let avisos =
+            doc(vec![MeasureDoc::new("Rota", "SUM('ventas'[no_existe])")]).apply(&mut model);
 
         assert!(model.measures.is_empty());
         assert_eq!(avisos.len(), 1);
@@ -1033,12 +1639,15 @@ mod tests {
     fn ocultar_una_columna_se_aplica_por_nombre() {
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![ColumnDoc {
                 table: "ventas".to_string(),
                 column: "mes".to_string(),
                 sort_by: None,
                 is_hidden: Some(true),
+                format_string: None,
+                description: None,
                 expression: None,
                 data_type: None,
             }],
@@ -1054,15 +1663,76 @@ mod tests {
     }
 
     #[test]
+    fn propiedades_de_columna_se_actualizan_y_sort_by_se_puede_limpiar() {
+        let mut model = modelo();
+        let document = ModelDoc {
+            fact_table: None,
+            columns: vec![ColumnDoc {
+                table: "ventas".to_string(),
+                column: "mes".to_string(),
+                sort_by: Some("".to_string()),
+                is_hidden: Some(true),
+                format_string: Some("yyyy-MM".to_string()),
+                description: Some("Mes de venta".to_string()),
+                expression: None,
+                data_type: None,
+            }],
+            ..ModelDoc::default()
+        };
+        assert!(document.apply(&mut model).is_empty());
+        let column = model
+            .column_by_name("ventas", "mes")
+            .map(|(_, column)| column)
+            .expect("columna");
+        assert!(column.is_hidden);
+        assert_eq!(column.sort_by, None);
+        assert_eq!(column.format_string.as_deref(), Some("yyyy-MM"));
+        assert_eq!(column.description.as_deref(), Some("Mes de venta"));
+    }
+
+    #[test]
+    fn sort_by_obsoleto_avisa_y_no_bloquea_otras_propiedades() {
+        let mut model = modelo();
+        let document = ModelDoc {
+            fact_table: None,
+            columns: vec![ColumnDoc {
+                table: "ventas".to_string(),
+                column: "mes".to_string(),
+                sort_by: Some("columna_borrada".to_string()),
+                is_hidden: Some(true),
+                format_string: Some("yyyy-MM".to_string()),
+                description: Some("Mes de venta".to_string()),
+                expression: None,
+                data_type: None,
+            }],
+            ..ModelDoc::default()
+        };
+
+        let warnings = document.apply(&mut model);
+        let column = model
+            .column_by_name("ventas", "mes")
+            .map(|(_, column)| column)
+            .expect("columna");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("orden"), "{warnings:?}");
+        assert!(column.is_hidden);
+        assert_eq!(column.format_string.as_deref(), Some("yyyy-MM"));
+        assert_eq!(column.description.as_deref(), Some("Mes de venta"));
+    }
+
+    #[test]
     fn una_columna_que_no_esta_avisa_y_no_toca_nada() {
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![ColumnDoc {
                 table: "ventas".to_string(),
                 column: "anio".to_string(),
                 sort_by: None,
                 is_hidden: Some(true),
+                format_string: None,
+                description: None,
                 expression: None,
                 data_type: None,
             }],
@@ -1079,6 +1749,7 @@ mod tests {
     fn aplicar_agrega_una_columna_calculada() {
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![ColumnDoc::calculada(
                 "ventas",
@@ -1108,6 +1779,7 @@ mod tests {
     fn una_columna_calculada_puede_usar_otra_calculada() {
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![
                 ColumnDoc::calculada("ventas", "doble", "total * 2", "moneda"),
@@ -1119,16 +1791,19 @@ mod tests {
         let avisos = documento.apply(&mut model);
 
         assert!(avisos.is_empty(), "{avisos:?}");
-        assert!(model
-            .table_by_name("ventas")
-            .and_then(|table| table.column_by_name("cuadruple"))
-            .is_some());
+        assert!(
+            model
+                .table_by_name("ventas")
+                .and_then(|table| table.column_by_name("cuadruple"))
+                .is_some()
+        );
     }
 
     #[test]
     fn una_columna_calculada_que_no_chequea_se_avisa() {
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![ColumnDoc::calculada(
                 "ventas",
@@ -1143,10 +1818,12 @@ mod tests {
 
         assert_eq!(avisos.len(), 1);
         assert!(avisos[0].contains("rota"), "{avisos:?}");
-        assert!(model
-            .table_by_name("ventas")
-            .and_then(|table| table.column_by_name("rota"))
-            .is_none());
+        assert!(
+            model
+                .table_by_name("ventas")
+                .and_then(|table| table.column_by_name("rota"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1154,6 +1831,7 @@ mod tests {
         // La base manda. Una columna con ese nombre ya esta, y su valor sale de la tabla.
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![ColumnDoc::calculada("ventas", "mes", "total * 2", "texto")],
             jerarquias: vec![],
@@ -1163,19 +1841,27 @@ mod tests {
 
         assert_eq!(avisos.len(), 1);
         assert!(avisos[0].contains("ya existe"), "{avisos:?}");
-        assert!(!model
-            .table_by_name("ventas")
-            .and_then(|table| table.column_by_name("mes"))
-            .expect("la columna")
-            .is_calculated());
+        assert!(
+            !model
+                .table_by_name("ventas")
+                .and_then(|table| table.column_by_name("mes"))
+                .expect("la columna")
+                .is_calculated()
+        );
     }
 
     #[test]
     fn un_tipo_que_no_existe_avisa() {
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
-            columns: vec![ColumnDoc::calculada("ventas", "rara", "total * 2", "magico")],
+            columns: vec![ColumnDoc::calculada(
+                "ventas",
+                "rara",
+                "total * 2",
+                "magico",
+            )],
             jerarquias: vec![],
             relaciones: vec![],
         };
@@ -1191,6 +1877,7 @@ mod tests {
         let mut column_doc = ColumnDoc::calculada("ventas", "sin_tipo", "total * 2", "texto");
         column_doc.data_type = None;
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![column_doc],
             jerarquias: vec![],
@@ -1212,8 +1899,14 @@ mod tests {
         // hasta que este documento la crea, y la medida que la suma tiene que encontrarla.
         let mut model = modelo();
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![MeasureDoc::new("Doble", "SUM('ventas'[doble])")],
-            columns: vec![ColumnDoc::calculada("ventas", "doble", "total * 2", "moneda")],
+            columns: vec![ColumnDoc::calculada(
+                "ventas",
+                "doble",
+                "total * 2",
+                "moneda",
+            )],
             jerarquias: vec![],
             relaciones: vec![],
         };
@@ -1228,12 +1921,20 @@ mod tests {
         // Una medida no tiene valor fila a fila. El chequeo lo permite con un aviso, y una
         // columna que la use no puede dar valor nunca: mejor decirlo al aplicar.
         let mut model = modelo();
-        model
-            .measures
-            .push(Measure::new(ObjectId(100), "TotalVentas", "SUM('ventas'[total])"));
+        model.measures.push(Measure::new(
+            ObjectId(100),
+            "TotalVentas",
+            "SUM('ventas'[total])",
+        ));
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
-            columns: vec![ColumnDoc::calculada("ventas", "rota", "[TotalVentas] + 1", "moneda")],
+            columns: vec![ColumnDoc::calculada(
+                "ventas",
+                "rota",
+                "[TotalVentas] + 1",
+                "moneda",
+            )],
             jerarquias: vec![],
             relaciones: vec![],
         };
@@ -1242,10 +1943,12 @@ mod tests {
         assert_eq!(avisos.len(), 1);
         assert!(avisos[0].contains("rota"), "{avisos:?}");
         assert!(avisos[0].contains("medida"), "{avisos:?}");
-        assert!(model
-            .table_by_name("ventas")
-            .and_then(|table| table.column_by_name("rota"))
-            .is_none());
+        assert!(
+            model
+                .table_by_name("ventas")
+                .and_then(|table| table.column_by_name("rota"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1255,6 +1958,7 @@ mod tests {
         column_doc.sort_by = Some("mes".to_string());
         column_doc.is_hidden = Some(true);
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![column_doc],
             jerarquias: vec![],
@@ -1273,6 +1977,7 @@ mod tests {
     #[test]
     fn una_columna_calculada_da_la_vuelta_por_disco() {
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![],
             columns: vec![ColumnDoc::calculada(
                 "ventas",
@@ -1284,6 +1989,7 @@ mod tests {
             relaciones: vec![],
         };
         let file = File {
+            fact_table: None,
             measure: vec![],
             column: documento.columns.clone(),
             jerarquia: vec![],
@@ -1316,12 +2022,15 @@ mod tests {
         // El archivo lo escribe una app y lo leen ojos. Sin el envoltorio, el TOML no acepta
         // un array en la raiz y `to_string` falla en tiempo de ejecucion, no al compilar.
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![MeasureDoc::new("Ventas", "SUM('ventas'[total])")],
             columns: vec![ColumnDoc {
                 table: "ventas".to_string(),
                 column: "mes".to_string(),
                 sort_by: None,
                 is_hidden: Some(true),
+                format_string: None,
+                description: None,
                 expression: None,
                 data_type: None,
             }],
@@ -1329,6 +2038,7 @@ mod tests {
             relaciones: vec![],
         };
         let file = File {
+            fact_table: None,
             measure: documento.measures.clone(),
             column: documento.columns.clone(),
             jerarquia: documento.jerarquias.clone(),
@@ -1353,6 +2063,7 @@ mod tests {
     fn el_documento_da_la_vuelta_por_disco() {
         let path = std::env::temp_dir().join("datan_model_doc_prueba.toml");
         let documento = ModelDoc {
+            fact_table: None,
             measures: vec![MeasureDoc::new("Ventas", "SUM('ventas'[total])")],
             columns: vec![],
             jerarquias: vec![],
@@ -1380,6 +2091,9 @@ mod tests {
 
         assert!(path.to_string_lossy().contains(".datan"), "{path:?}");
         assert!(path.to_string_lossy().contains("models"), "{path:?}");
-        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("datan_bench.toml"));
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("datan_bench.toml")
+        );
     }
 }

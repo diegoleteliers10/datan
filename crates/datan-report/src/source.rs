@@ -12,16 +12,17 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use datan_dax_eval::{ColumnView, DataSource, Scalar};
-use datan_dax_sql::{quote_identifier, quote_qualified, SourceMap};
+use datan_dax_eval::{
+    ColumnView, DataSource, FilterContext, FilterOperator, FilterSource, FilterValue, Scalar,
+};
+use datan_dax_sql::{SourceMap, quote_identifier, quote_qualified};
 use datan_model::{Model, ObjectId};
 use datan_storage::{
-    arrow,
+    Engine, StorageError, arrow,
     arrow::array::{
         Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
         StringArray,
     },
-    Engine,
 };
 
 /// Una columna leida de DuckDB una vez y servida desde memoria.
@@ -60,6 +61,7 @@ pub struct DuckSource<'a> {
     /// pide una columna por vez, y dos `SELECT` sueltos no tienen por que devolver las filas
     /// en el mismo orden. Con un `ORDER BY` sobre la clave, si lo tienen.
     keys: HashMap<ObjectId, Vec<String>>,
+    sort_by: HashMap<ObjectId, ObjectId>,
     columns: Mutex<HashMap<ObjectId, Arc<DuckColumn>>>,
     lengths: Mutex<HashMap<ObjectId, usize>>,
 }
@@ -71,11 +73,22 @@ impl<'a> DuckSource<'a> {
     pub fn new(engine: &'a Engine, model: &Model, qualifier: &str) -> Self {
         let sources = SourceMap::from_model(model).with_qualifier(qualifier);
         let mut keys = HashMap::new();
+        let sort_by = model
+            .tables
+            .iter()
+            .flat_map(|table| &table.columns)
+            .filter_map(|column| column.sort_by.map(|sort| (column.id, sort)))
+            .collect();
         for table in &model.tables {
             let names: Vec<String> = table
                 .key_columns
                 .iter()
-                .filter_map(|key| sources.column(*key).ok().map(|(physical, _)| physical.to_string()))
+                .filter_map(|key| {
+                    sources
+                        .column(*key)
+                        .ok()
+                        .map(|(physical, _)| physical.to_string())
+                })
                 .collect();
             if !names.is_empty() {
                 keys.insert(table.id, names);
@@ -85,9 +98,146 @@ impl<'a> DuckSource<'a> {
             engine,
             sources,
             keys,
+            sort_by,
             columns: Mutex::new(HashMap::new()),
             lengths: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Lee solo los primeros valores distintos que puede mostrar el selector.
+    pub fn distinct_values(&self, column: ObjectId, limit: usize) -> Result<Vec<Scalar>, String> {
+        self.distinct_values_page(column, 0, limit)
+    }
+
+    /// Lee una pagina de valores distintos en el orden del modelo.
+    pub fn distinct_values_page(
+        &self,
+        column: ObjectId,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Scalar>, String> {
+        self.distinct_values_page_where(column, offset, limit, None)
+    }
+
+    /// Lee valores distintos con filtros simples de la misma tabla. Devuelve `None` cuando
+    /// el contexto necesita semantica DAX o filtros entre tablas.
+    pub fn distinct_values_page_filtered(
+        &self,
+        column: ObjectId,
+        offset: usize,
+        limit: usize,
+        filters: &FilterContext,
+    ) -> Result<Option<Vec<Scalar>>, String> {
+        if limit == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let (_, table) = self
+            .sources
+            .column(column)
+            .map_err(|error| error.to_string())?;
+        let filters = filters
+            .filtered_columns()
+            .flat_map(|column| filters.filters_on(column))
+            .collect::<Vec<_>>();
+        if filters.is_empty() {
+            return Ok(None);
+        }
+
+        let mut clauses = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let Ok((physical, filter_table)) = self.sources.column(filter.column) else {
+                return Ok(None);
+            };
+            if filter_table != table {
+                return Ok(None);
+            }
+            let FilterSource::Concrete(values) = &filter.source else {
+                return Ok(None);
+            };
+            let Some(values) = valores_sql(values) else {
+                return Ok(None);
+            };
+            let name = quote_identifier(physical);
+            let clause = match filter.operator {
+                FilterOperator::Equal if values.len() == 1 => {
+                    format!("{name} = {}", values[0])
+                }
+                FilterOperator::In => {
+                    if values.is_empty() {
+                        "FALSE".to_string()
+                    } else {
+                        format!("{name} IN ({})", values.join(", "))
+                    }
+                }
+                _ => return Ok(None),
+            };
+            clauses.push(clause);
+        }
+        if self
+            .sort_by
+            .get(&column)
+            .filter(|sort| **sort != column)
+            .and_then(|sort| self.sources.column(*sort).ok())
+            .is_some_and(|(_, sort_table)| sort_table != table)
+        {
+            return Ok(None);
+        }
+        self.distinct_values_page_where(column, offset, limit, Some(clauses.join(" AND ")))
+            .map(Some)
+    }
+
+    fn distinct_values_page_where(
+        &self,
+        column: ObjectId,
+        offset: usize,
+        limit: usize,
+        where_clause: Option<String>,
+    ) -> Result<Vec<Scalar>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (physical, table) = self
+            .sources
+            .column(column)
+            .map_err(|error| error.to_string())?;
+        let (qualified, _) = self
+            .sources
+            .qualified(table)
+            .map_err(|error| error.to_string())?;
+        let value = quote_identifier(physical);
+        let sort = self
+            .sort_by
+            .get(&column)
+            .filter(|sort| **sort != column)
+            .map(|sort| {
+                self.sources
+                    .column(*sort)
+                    .map(|(physical, _)| quote_identifier(physical))
+                    .map(|physical| format!("MIN({physical}) NULLS LAST, "))
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let where_clause = where_clause
+            .map(|clause| format!(" WHERE {clause}"))
+            .unwrap_or_default();
+        let sql = format!(
+            "SELECT {value} FROM {}{where_clause} GROUP BY {value} ORDER BY ({value} IS NULL), {sort}{value} NULLS LAST LIMIT {limit} OFFSET {offset}",
+            quote_qualified(&qualified)
+        );
+        let batches = match self.engine.query_arrow(&sql) {
+            Ok(batches) => batches,
+            Err(StorageError::EmptyResult) => return Ok(Vec::new()),
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut values = Vec::with_capacity(limit);
+        for batch in &batches {
+            if batch.num_columns() != 1 {
+                return Err("la consulta de valores devolvio mas de una columna".to_string());
+            }
+            read_array(batch.column(0).as_ref(), &mut values);
+        }
+        Ok(values)
     }
 
     /// El `ORDER BY` que alinea las lecturas de una tabla, o vacio si no tiene clave.
@@ -149,11 +299,7 @@ impl<'a> DuckSource<'a> {
         }
 
         let non_blank = values.iter().filter(|value| !value.is_blank()).count();
-        let distinct: BTreeSet<String> = values
-            .iter()
-            .filter(|value| !value.is_blank())
-            .map(|value| format!("{value:?}"))
-            .collect();
+        let distinct: BTreeSet<String> = values.iter().map(|value| format!("{value:?}")).collect();
         Some(DuckColumn {
             values,
             non_blank,
@@ -162,8 +308,26 @@ impl<'a> DuckSource<'a> {
     }
 
     fn columns(&self) -> MutexGuard<'_, HashMap<ObjectId, Arc<DuckColumn>>> {
-        self.columns.lock().unwrap_or_else(|error| error.into_inner())
+        self.columns
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
+}
+
+fn valores_sql(values: &[FilterValue]) -> Option<Vec<String>> {
+    values
+        .iter()
+        .map(|value| match value {
+            FilterValue::Text(value) if !value.is_empty() => {
+                Some(format!("'{}'", value.replace('\'', "''")))
+            }
+            FilterValue::Integer(value) if *value != 0 => Some(value.to_string()),
+            FilterValue::Decimal(value) if value.is_finite() && *value != 0.0 => {
+                Some(value.to_string())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Un candado emponzonado no tiene que tumbar el informe: el cache sigue siendo util.
@@ -310,7 +474,17 @@ fn read_array(array: &dyn Array, out: &mut Vec<Scalar>) {
 mod tests {
     use super::*;
     use datan_dax_eval::{FilterContext, FilterValue, Interpreter, extract_atoms};
-    use datan_testkit::{engine, model, PRODUCT, PRODUCT_REGION};
+    use datan_testkit::{PRODUCT, PRODUCT_REGION, engine, model};
+
+    #[test]
+    fn valores_sql_escapa_texto_y_usa_fallback_para_blank_y_cero() {
+        assert_eq!(
+            valores_sql(&[FilterValue::Text("O'Brien".to_string())]),
+            Some(vec!["'O''Brien'".to_string()])
+        );
+        assert_eq!(valores_sql(&[FilterValue::Blank]), None);
+        assert_eq!(valores_sql(&[FilterValue::Integer(0)]), None);
+    }
 
     #[test]
     fn el_orden_de_lectura_sale_de_la_clave_de_la_tabla() {

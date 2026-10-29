@@ -63,11 +63,7 @@ fn model() -> Model {
                 is_date_table: true,
             },
         ],
-        measures: vec![Measure::new(
-            ObjectId(100),
-            "Qty",
-            "SUM('Fact Sales'[Qty])",
-        )],
+        measures: vec![Measure::new(ObjectId(100), "Qty", "SUM('Fact Sales'[Qty])")],
         relationships: vec![
             Relationship {
                 from_column: PRODUCT_ID,
@@ -104,13 +100,7 @@ fn baja_una_agregacion_simple_a_un_solo_select() {
     )
     .expect("extrae");
 
-    let plan = lower(
-        &model,
-        &sources(&model),
-        &atoms,
-        &FilterContext::empty(),
-    )
-    .expect("baja");
+    let plan = lower(&model, &sources(&model), &atoms, &FilterContext::empty()).expect("baja");
 
     assert_eq!(
         plan.sql,
@@ -119,20 +109,62 @@ fn baja_una_agregacion_simple_a_un_solo_select() {
 }
 
 #[test]
+fn baja_agregaciones_estadisticas_con_semantica_de_muestra() {
+    let model = model();
+
+    for (expression, sql_function) in [
+        ("MEDIAN('Fact Sales'[Qty])", "MEDIAN(t0.\"Qty\")"),
+        ("VAR.S('Fact Sales'[Qty])", "VAR_SAMP(t0.\"Qty\")"),
+        ("STDEV.S('Fact Sales'[Qty])", "STDDEV_SAMP(t0.\"Qty\")"),
+    ] {
+        let atoms = extract_atoms(expression, &model, &FilterContext::empty(), &[FACT_QTY])
+            .expect("extrae");
+        let plan = lower(&model, &sources(&model), &atoms, &FilterContext::empty()).expect("baja");
+        assert!(plan.sql.contains(sql_function), "{}", plan.sql);
+    }
+    let atoms = extract_atoms(
+        "VAR.S('Fact Sales'[Qty])",
+        &model,
+        &FilterContext::empty(),
+        &[FACT_QTY],
+    )
+    .expect("extrae");
+    let plan = lower(&model, &sources(&model), &atoms, &FilterContext::empty()).expect("baja");
+    assert!(plan.sql.contains("COUNT(t0.\"Qty\") < 2"), "{}", plan.sql);
+}
+
+#[test]
+fn distinctcount_cuenta_blanks_y_devuelve_null_sin_filas() {
+    let model = model();
+    let atoms = extract_atoms(
+        "DISTINCTCOUNT('Fact Sales'[Qty])",
+        &model,
+        &FilterContext::empty(),
+        &[FACT_QTY],
+    )
+    .expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &FilterContext::empty()).expect("baja");
+
+    assert!(
+        plan.sql.contains(
+            "CASE WHEN COUNT(*) = 0 THEN NULL ELSE COUNT(DISTINCT t0.\"Qty\") + CASE WHEN COUNT(*) > COUNT(t0.\"Qty\") THEN 1 ELSE 0 END END"
+        ),
+        "{}",
+        plan.sql
+    );
+}
+
+#[test]
 fn el_filtro_de_la_dimension_se_vuelve_un_in_no_un_join() {
     // El detalle que importa: un JOIN con la dimension duplica filas y rompe
     // `COUNT(DISTINCT)` y los SUM sobre columnas de la dimension. Un IN es semijoin.
     let model = model();
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
 
-    let atoms = extract_atoms(
-        "SUM('Fact Sales'[Qty])",
-        &model,
-        &filters,
-        &[FACT_QTY],
-    )
-    .expect("extrae");
+    let atoms =
+        extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY]).expect("extrae");
 
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
 
@@ -146,7 +178,71 @@ fn el_filtro_de_la_dimension_se_vuelve_un_in_no_un_join() {
         "no deberia hacer JOIN:\n{}",
         plan.sql
     );
-    assert!(plan.sql.contains("\"ProductId\" IN (SELECT \"ProductId\" FROM \"Dim Product\" WHERE \"Region\" = 'Norte')"));
+    assert!(plan.sql.contains(
+        "\"ProductId\" IN (SELECT \"ProductId\" FROM \"Dim Product\" WHERE \"Region\" = 'Norte')"
+    ));
+}
+
+#[test]
+fn los_filtros_de_fecha_en_timestamp_comparan_el_dia_completo() {
+    let mut model = model();
+    model.tables[0]
+        .columns
+        .iter_mut()
+        .find(|column| column.id == FACT_SALE_DATE)
+        .expect("fecha de venta")
+        .data_type = DataType::DateTime;
+
+    let filters = FilterContext::empty()
+        .with_greater_equal(FACT_SALE_DATE, FilterValue::Date(20_000))
+        .with_less_equal(FACT_SALE_DATE, FilterValue::Date(20_030));
+    let atoms =
+        extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY]).expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+
+    assert!(
+        plan.sql
+            .contains("CAST(t0.\"SaleDate\" AS DATE) >= DATE '2024-10-04'"),
+        "el limite inferior debe incluir todas las horas del primer dia:\n{}",
+        plan.sql
+    );
+    assert!(
+        plan.sql
+            .contains("CAST(t0.\"SaleDate\" AS DATE) <= DATE '2024-11-03'"),
+        "el limite superior debe incluir todas las horas del ultimo dia:\n{}",
+        plan.sql
+    );
+}
+
+#[test]
+fn la_propagacion_de_fecha_compara_timestamp_como_dia_en_los_dos_lados() {
+    let mut model = model();
+    model.tables[0]
+        .columns
+        .iter_mut()
+        .find(|column| column.id == FACT_SALE_DATE)
+        .expect("fecha de venta")
+        .data_type = DataType::DateTime;
+    model.tables[2]
+        .columns
+        .iter_mut()
+        .find(|column| column.id == ObjectId(40))
+        .expect("fecha de calendario")
+        .data_type = DataType::DateTime;
+
+    let filters = FilterContext::empty().with_equal(ObjectId(40), FilterValue::Date(20_000));
+    let atoms =
+        extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY]).expect("extrae");
+
+    let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
+
+    assert!(
+        plan.sql
+            .contains("CAST(t0.\"SaleDate\" AS DATE) IN (SELECT CAST(\"Date\" AS DATE)"),
+        "la clave propagada debe comparar fechas y no horas:\n{}",
+        plan.sql
+    );
 }
 
 #[test]
@@ -154,8 +250,8 @@ fn el_sql_generado_no_tiene_subconsulta_por_celda() {
     // El criterio del dia 2 del spike: un HASH_GROUP_BY y ninguna subconsulta correlacionada
     // por celda de grupo. El `IN` es un semijoin sobre la dimension, no por celda.
     let model = model();
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
 
     let atoms = extract_atoms(
         "SUM('Fact Sales'[Qty])",
@@ -200,14 +296,12 @@ fn varios_atomos_salen_en_la_misma_pasada() {
     .expect("extrae");
 
     assert_eq!(atoms.atoms.len(), 2, "dos hojas");
-    assert_eq!(atoms.outputs.len(), 1, "pero UNA columna: la suma es una medida");
-    let plan = lower(
-        &model,
-        &sources(&model),
-        &atoms,
-        &FilterContext::empty(),
-    )
-    .expect("baja");
+    assert_eq!(
+        atoms.outputs.len(),
+        1,
+        "pero UNA columna: la suma es una medida"
+    );
+    let plan = lower(&model, &sources(&model), &atoms, &FilterContext::empty()).expect("baja");
 
     assert_eq!(
         plan.sql.matches("SELECT").count(),
@@ -218,7 +312,8 @@ fn varios_atomos_salen_en_la_misma_pasada() {
     // Una columna, no dos. `SUM(a) + COUNT(b)` es una medida, y una medida es una celda.
     // Antes eran `atom_0` y `atom_1` y el informe tenia una columna invisible en medio.
     assert!(
-        plan.sql.contains("(SUM(t0.\"Qty\") + COUNT(t0.\"SaleId\")) AS \"atom_0\""),
+        plan.sql
+            .contains("(SUM(t0.\"Qty\") + COUNT(t0.\"SaleId\")) AS \"atom_0\""),
         "las dos hojas van en una sola columna:\n{}",
         plan.sql
     );
@@ -242,13 +337,7 @@ fn las_columnas_de_salida_tienen_nombre_estable() {
     )
     .expect("extrae");
 
-    let plan = lower(
-        &model,
-        &sources(&model),
-        &atoms,
-        &FilterContext::empty(),
-    )
-    .expect("baja");
+    let plan = lower(&model, &sources(&model), &atoms, &FilterContext::empty()).expect("baja");
 
     assert_eq!(plan.columns.len(), 2, "la agrupacion y la medida");
     assert_eq!(plan.columns[0].name, "Qty");
@@ -275,13 +364,8 @@ fn una_medida_sin_forma_sigue_emitiendo_una_columna_por_atomo() {
     // para las medidas que si bajan sin forma.
     let model = model();
     let filters = FilterContext::empty();
-    let atoms = extract_atoms(
-        "SUM('Fact Sales'[Qty])",
-        &model,
-        &filters,
-        &[FACT_QTY],
-    )
-    .expect("extrae");
+    let atoms =
+        extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY]).expect("extrae");
 
     assert_eq!(atoms.outputs.len(), 1);
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
@@ -303,13 +387,8 @@ fn un_calculate_con_modificadores_no_se_baja() {
     .expect("extrae");
 
     assert!(atoms.needs_interpreter());
-    let error = lower(
-        &model,
-        &sources(&model),
-        &atoms,
-        &FilterContext::empty(),
-    )
-    .expect_err("deberia fallar");
+    let error = lower(&model, &sources(&model), &atoms, &FilterContext::empty())
+        .expect_err("deberia fallar");
     assert!(matches!(error, datan_dax_sql::LowerError::Unsupported(_)));
 }
 
@@ -322,8 +401,8 @@ fn un_valor_con_comilla_simple_no_rompe_el_sql() {
         PRODUCT_REGION,
         FilterValue::Text("Robert'); DROP TABLE fact; --".to_string()),
     );
-    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY])
-        .expect("extrae");
+    let atoms =
+        extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY]).expect("extrae");
 
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
 
@@ -351,10 +430,10 @@ fn el_mapeo_fisico_sepuede_sobrescribir() {
     // resuelve sin tocar el modelo.
     let model = model();
     let sources = SourceMap::from_model(&model).with_table(PRODUCT, "dim_product");
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
-    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY])
-        .expect("extrae");
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let atoms =
+        extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY]).expect("extrae");
 
     let plan = lower(&model, &sources, &atoms, &filters).expect("baja");
     assert!(plan.sql.contains("FROM \"dim_product\""));
@@ -366,10 +445,9 @@ fn una_columna_de_agrupamiento_no_aparece_en_el_where() {
     // Si la columna agrupa y tambien filtra con el mismo valor, el filtro es redundante. Y
     // si el valor cambia, es una contradiccion que no se puede escribir en SQL.
     let model = model();
-    let filters = FilterContext::empty()
-        .with_equal(FACT_QTY, FilterValue::Integer(5));
-    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY])
-        .expect("extrae");
+    let filters = FilterContext::empty().with_equal(FACT_QTY, FilterValue::Integer(5));
+    let atoms =
+        extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[FACT_QTY]).expect("extrae");
 
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
     assert!(
@@ -395,19 +473,23 @@ fn escapa_identificadores() {
 /// cualquier informe real, y ninguna baja si el atomo solo puede llevar una columna.
 fn business_model() -> Model {
     let mut model = model();
-    model.tables[0].columns.push(Column::new(
-        ObjectId(14),
-        "Price",
-        DataType::Moneda,
-    ));
-    model.tables[1].columns.push(Column::new(
-        ObjectId(24),
-        "Cost",
-        DataType::Moneda,
-    ));
+    model.tables[0]
+        .columns
+        .push(Column::new(ObjectId(14), "Price", DataType::Moneda));
+    model.tables[1]
+        .columns
+        .push(Column::new(ObjectId(24), "Cost", DataType::Moneda));
     model.measures = vec![
-        Measure::new(ObjectId(100), "Revenue", "SUM('Fact Sales'[Qty] * 'Fact Sales'[Price])"),
-        Measure::new(ObjectId(101), "COGS", "SUM('Fact Sales'[Qty] * 'Dim Product'[Cost])"),
+        Measure::new(
+            ObjectId(100),
+            "Revenue",
+            "SUM('Fact Sales'[Qty] * 'Fact Sales'[Price])",
+        ),
+        Measure::new(
+            ObjectId(101),
+            "COGS",
+            "SUM('Fact Sales'[Qty] * 'Dim Product'[Cost])",
+        ),
         Measure::new(ObjectId(102), "Qty", "SUM('Fact Sales'[Qty])"),
     ];
     model
@@ -521,10 +603,19 @@ fn margin_baja_a_sql_repitiendo_la_expresion_del_agregado() {
     // en `probe_measures`, con un solo `HASH_GROUP_BY`.
     let model = business_model();
     let filters = FilterContext::empty();
-    let atoms = extract_atoms("([Revenue] - [COGS]) / [Revenue]", &model, &filters, &[PRODUCT_REGION])
-        .expect("extrae");
+    let atoms = extract_atoms(
+        "([Revenue] - [COGS]) / [Revenue]",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
 
-    assert_eq!(atoms.atoms.len(), 2, "dos hojas, no tres: Revenue sale dos veces");
+    assert_eq!(
+        atoms.atoms.len(),
+        2,
+        "dos hojas, no tres: Revenue sale dos veces"
+    );
     assert_eq!(atoms.outputs.len(), 1, "una columna de salida");
 
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
@@ -547,8 +638,13 @@ fn la_division_por_cero_produce_null_y_no_un_numero() {
     // caminos, y por eso los dos tienen que convertir.
     let model = business_model();
     let filters = FilterContext::empty();
-    let atoms = extract_atoms("([Revenue] - [COGS]) / [Revenue]", &model, &filters, &[PRODUCT_REGION])
-        .expect("extrae");
+    let atoms = extract_atoms(
+        "([Revenue] - [COGS]) / [Revenue]",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
 
     // `NULLIF(denominador, 0)`: el denominador va entre parentesis y luego el `, 0`.
@@ -565,13 +661,8 @@ fn una_forma_binaria_por_nivel_mantiene_la_precedencia() {
     // `SUM(a + b * c)` no es `SUM(a) + SUM(b) * SUM(c)`. Los parentesis vienen del arbol.
     let model = business_model();
     let filters = FilterContext::empty();
-    let atoms = extract_atoms(
-        "[Qty] + [Qty] * [Qty]",
-        &model,
-        &filters,
-        &[PRODUCT_REGION],
-    )
-    .expect("extrae");
+    let atoms = extract_atoms("[Qty] + [Qty] * [Qty]", &model, &filters, &[PRODUCT_REGION])
+        .expect("extrae");
 
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
     let rendered = plan.sql.replace(' ', "");
@@ -590,8 +681,13 @@ fn el_sql_ordena_por_las_columnas_de_agrupamiento() {
     // diverge en todas las medidas no aditivas solo por el orden.
     let model = model();
     let filters = FilterContext::empty();
-    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[PRODUCT_REGION])
-        .expect("extrae");
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty])",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
 
     let plan = lower(&model, &sources(&model), &atoms, &filters).expect("baja");
     assert!(
@@ -618,8 +714,13 @@ fn un_filtro_concreto_no_lo_tira_la_propagacion() {
     let filters = FilterContext::empty()
         .with_equal(FACT_PRODUCT_ID, FilterValue::Integer(3))
         .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
-    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[PRODUCT_REGION])
-        .expect("extrae");
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty])",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
 
     let on_fact = atoms.atoms[0].context.filters_on(FACT_PRODUCT_ID);
     assert!(
@@ -644,8 +745,13 @@ fn el_total_de_una_medida_no_lleva_group_by() {
     // es el promedio.
     let model = business_model();
     let filters = FilterContext::empty();
-    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &filters, &[PRODUCT_REGION])
-        .expect("extrae");
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty])",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
 
     let plan = lower_scalar(&model, &sources(&model), &atoms, &filters).expect("baja");
     assert!(
@@ -664,8 +770,13 @@ fn el_total_de_una_medida_no_lleva_group_by() {
 fn el_total_de_margin_baja_con_nullif_y_sin_group_by() {
     let model = business_model();
     let filters = FilterContext::empty();
-    let atoms = extract_atoms("([Revenue] - [COGS]) / [Revenue]", &model, &filters, &[PRODUCT_REGION])
-        .expect("extrae");
+    let atoms = extract_atoms(
+        "([Revenue] - [COGS]) / [Revenue]",
+        &model,
+        &filters,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
 
     let plan = lower_scalar(&model, &sources(&model), &atoms, &filters).expect("baja");
     assert!(plan.sql.contains("NULLIF"), "\n{}", plan.sql);

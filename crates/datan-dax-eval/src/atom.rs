@@ -27,6 +27,9 @@ pub enum AtomKind {
     Max,
     Average,
     DistinctCount,
+    Median,
+    Variance,
+    StandardDeviation,
     /// Una agregacion sobre una expresion, no sobre una columna simple. `SUMX` cae aqui.
     Expression,
 }
@@ -233,8 +236,6 @@ pub(crate) struct Extractor<'a> {
     pub(crate) pending_modifiers: Vec<Modifier>,
 }
 
-
-
 impl Extractor<'_> {
     /// Convierte la expresion de una medida en una forma sobre atomos.
     ///
@@ -245,15 +246,13 @@ impl Extractor<'_> {
     /// Una referencia a medida se INLINA: `Revenue` dentro de `Margin` es la forma de la
     /// definicion de `Revenue`, no un nodo opaco. Sin el inlining, `Margin` seria un arbol de
     /// referencias y el lowering tendria que resolverlas en SQL, que es lo que no se quiere.
-    pub fn shape_of(
-        &mut self,
-        expr: &CheckedExpr,
-        context: &FilterContext,
-    ) -> Option<Shape> {
+    pub fn shape_of(&mut self, expr: &CheckedExpr, context: &FilterContext) -> Option<Shape> {
         match expr {
             CheckedExpr::Number { value, .. } => Some(Shape::Number(*value)),
 
-            CheckedExpr::Binary { op, left, right, .. } => Some(Shape::Binary {
+            CheckedExpr::Binary {
+                op, left, right, ..
+            } => Some(Shape::Binary {
                 op: *op,
                 left: Box::new(self.shape_of(left, context)?),
                 right: Box::new(self.shape_of(right, context)?),
@@ -304,7 +303,10 @@ impl Extractor<'_> {
                 let argument = args.first()?;
                 let before = self.atoms.len();
                 let label = format!("{name}({})", self.label_of(argument));
-                if self.emit_dedup(kind, argument, context, name, &label).is_err() {
+                if self
+                    .emit_dedup(kind, argument, context, name, &label)
+                    .is_err()
+                {
                     return None;
                 }
                 if self.atoms.len() > before {
@@ -366,11 +368,7 @@ impl Extractor<'_> {
     /// Un modificador que no se resuelve a un filtro concreto devuelve `None`, y entonces el
     /// camino es el viejo: `extract` vuelve a correr y reporta el error. No se pierde el
     /// filtro en silencio.
-    fn calculate_shape(
-        &mut self,
-        args: &[CheckedExpr],
-        context: &FilterContext,
-    ) -> Option<Shape> {
+    fn calculate_shape(&mut self, args: &[CheckedExpr], context: &FilterContext) -> Option<Shape> {
         let body = args.first()?;
         let mut effective = context.clone();
         let mut resolved = Vec::new();
@@ -391,11 +389,7 @@ impl Extractor<'_> {
         // dentro, que es el orden con el que `apply_modifiers` los re-aplicara sobre la
         // celda. Sin el apilado, el cuerpo de un CALCULATE interior perderia los de fuera.
         let saved = std::mem::take(&mut self.pending_modifiers);
-        self.pending_modifiers = saved
-            .iter()
-            .chain(resolved.iter())
-            .cloned()
-            .collect();
+        self.pending_modifiers = saved.iter().chain(resolved.iter()).cloned().collect();
         let shape = self.shape_of(body, &effective);
         self.pending_modifiers = saved;
         let shape = shape?;
@@ -561,12 +555,7 @@ impl Extractor<'_> {
             // lo que hace que `[Qty] + [Qty]` genere los atomos del `SUM` de dentro, dos
             // veces, y que se puedan deduplicar despues.
             CheckedExpr::Measure { measure, .. } => {
-                let Some(definition) = self
-                    .model
-                    .measures
-                    .iter()
-                    .find(|m| m.id == *measure)
-                else {
+                let Some(definition) = self.model.measures.iter().find(|m| m.id == *measure) else {
                     return Ok(());
                 };
                 // Un ciclo entre medidas ya lo detecta `datan-dax-check`. Aqui solo se
@@ -730,8 +719,15 @@ impl Extractor<'_> {
         match expr {
             CheckedExpr::Column { name, .. } => name.clone(),
             CheckedExpr::Measure { name, .. } => name.clone(),
-            CheckedExpr::Binary { left, right, op, .. } => {
-                format!("({} {} {})", self.label_of(left), op.as_str(), self.label_of(right))
+            CheckedExpr::Binary {
+                left, right, op, ..
+            } => {
+                format!(
+                    "({} {} {})",
+                    self.label_of(left),
+                    op.as_str(),
+                    self.label_of(right)
+                )
             }
             CheckedExpr::Call { name, args, .. } => {
                 let inner: Vec<String> = args.iter().map(|a| self.label_of(a)).collect();
@@ -751,6 +747,9 @@ fn aggregation_of(name: &str) -> Option<AtomKind> {
         "MAX" => AtomKind::Max,
         "AVERAGE" => AtomKind::Average,
         "DISTINCTCOUNT" => AtomKind::DistinctCount,
+        "MEDIAN" => AtomKind::Median,
+        "VAR.S" => AtomKind::Variance,
+        "STDEV.S" => AtomKind::StandardDeviation,
         "SUMX" => AtomKind::Expression,
         "AVERAGEX" => AtomKind::Expression,
         "MAXX" => AtomKind::Expression,

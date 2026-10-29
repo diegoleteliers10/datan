@@ -89,7 +89,10 @@ pub struct ColumnarTable {
 /// El `RecordBatch` de arrow 58 devuelve `Option` en `column_by_name`, no `Result`.
 /// Los valores de texto repetidos se internan: una columna categorica de 1M filas con 40
 /// valores distintos cuesta 40 asignaciones, no 1M.
-pub fn extract_columns(batches: &[RecordBatch], names: &[(&str, ColumnKind)]) -> Result<ColumnarTable> {
+pub fn extract_columns(
+    batches: &[RecordBatch],
+    names: &[(&str, ColumnKind)],
+) -> Result<ColumnarTable> {
     let mut columns: Vec<Column> = names
         .iter()
         .map(|(name, kind)| Column {
@@ -276,7 +279,10 @@ impl Engine {
     /// nativos. En Windows las barras invertidas hay que escapear.
     pub fn open_with_bundled_extensions(db_path: &str, extension_root: &Path) -> Result<Self> {
         let engine = Self::open(db_path)?;
-        let escaped = extension_root.to_string_lossy().replace('\\', "\\\\").replace('\'', "''");
+        let escaped = extension_root
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('\'', "''");
         engine.execute("SET autoinstall_known_extensions = false")?;
         engine.execute("SET autoinstall_extension_repository = ''")?;
         engine.execute(&format!("SET extension_directory = '{escaped}'"))?;
@@ -304,11 +310,7 @@ impl Engine {
         };
         for batch in &batches {
             for field in 0..batch.num_columns() {
-                let Some(array) = batch
-                    .column(field)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                else {
+                let Some(array) = batch.column(field).as_any().downcast_ref::<StringArray>() else {
                     continue;
                 };
                 for value in array.iter().flatten() {
@@ -321,34 +323,34 @@ impl Engine {
     }
 
     /// Lee el primer valor de la primera fila de una consulta, como texto.
-///
-/// Es para diagnostico y comparacion. La app usa [`Engine::query_arrow`] y
-/// [`extract_columns`], que dan la forma columnar que el grid necesita.
-pub fn scalar(&self, sql: &str, column: usize) -> Result<Option<String>> {
-    // Un filtro que no deja filas devuelve cero filas, y eso NO es un error: es un
-    // resultado valido. `query_arrow` lo marca como `EmptyResult`, asi que aqui se
-    // distingue "sin filas" de "la consulta fallo".
-    let batches = match self.query_arrow(sql) {
-        Ok(batches) => batches,
-        Err(StorageError::EmptyResult) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let Some(batch) = batches.first() else {
-        return Ok(None);
-    };
-    if column >= batch.num_columns() {
-        return Ok(None);
+    ///
+    /// Es para diagnostico y comparacion. La app usa [`Engine::query_arrow`] y
+    /// [`extract_columns`], que dan la forma columnar que el grid necesita.
+    pub fn scalar(&self, sql: &str, column: usize) -> Result<Option<String>> {
+        // Un filtro que no deja filas devuelve cero filas, y eso NO es un error: es un
+        // resultado valido. `query_arrow` lo marca como `EmptyResult`, asi que aqui se
+        // distingue "sin filas" de "la consulta fallo".
+        let batches = match self.query_arrow(sql) {
+            Ok(batches) => batches,
+            Err(StorageError::EmptyResult) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(batch) = batches.first() else {
+            return Ok(None);
+        };
+        if column >= batch.num_columns() {
+            return Ok(None);
+        }
+        let array = batch.column(column);
+        let Some(array) = array.as_any().downcast_ref::<StringArray>() else {
+            // Un valor numerico llega aqui cuando el harness compara un `SUM` de enteros.
+            // Se castea a texto en la consulta, pero si no, se devuelve el tipo.
+            return Ok(Some(format!("{:?}", array.data_type())));
+        };
+        Ok(array.iter().next().flatten().map(|value| value.to_string()))
     }
-    let array = batch.column(column);
-    let Some(array) = array.as_any().downcast_ref::<StringArray>() else {
-        // Un valor numerico llega aqui cuando el harness compara un `SUM` de enteros.
-        // Se castea a texto en la consulta, pero si no, se devuelve el tipo.
-        return Ok(Some(format!("{:?}", array.data_type())));
-    };
-    Ok(array.iter().next().flatten().map(|value| value.to_string()))
-}
 
-/// Genera el handle que permite cancelar la consulta en curso desde otro hilo.
+    /// Genera el handle que permite cancelar la consulta en curso desde otro hilo.
     ///
     /// Es lo que hace que el usuario pueda seguir filtrando y editando mientras una query
     /// corre. Apuesta 5 de PLAN.md.
@@ -434,7 +436,10 @@ mod tests {
             )
             .expect("lee el setting");
         assert_eq!(
-            text_of_first_column(&setting).trim().trim_end_matches(',').trim(),
+            text_of_first_column(&setting)
+                .trim()
+                .trim_end_matches(',')
+                .trim(),
             "false",
             "autoinstall deberia estar desactivado: la app no puede descargar en el primer uso"
         );
@@ -509,7 +514,8 @@ mod explain_tests {
             )
             .expect("crea tablas");
 
-        let plan = engine.explain("SELECT f.g, SUM(f.qty * d.id) FROM f JOIN d USING (g) GROUP BY f.g");
+        let plan =
+            engine.explain("SELECT f.g, SUM(f.qty * d.id) FROM f JOIN d USING (g) GROUP BY f.g");
         assert!(
             !plan.contains("DELIM_JOIN") && !plan.contains("IE_JOIN"),
             "la forma simple no deberia tener subconsultas correlacionadas:\n{plan}"
@@ -529,11 +535,7 @@ mod explain_tests {
 /// `NULL`. El caracter de separacion de unidad no aparece en un catalogo real.
 pub const CELDA_EN_BLANCO: &str = "\u{1f}";
 
-fn render_cell(
-    batch: &arrow::record_batch::RecordBatch,
-    column: usize,
-    row: usize,
-) -> String {
+fn render_cell(batch: &arrow::record_batch::RecordBatch, column: usize, row: usize) -> String {
     use arrow::array::{
         Array, Date32Array, Date64Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
         LargeStringArray, StringArray,

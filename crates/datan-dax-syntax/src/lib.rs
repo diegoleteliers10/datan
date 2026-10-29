@@ -12,7 +12,7 @@ mod parser;
 
 pub use ast::{BinaryOp, Expr, Modifier, TableExpr, UnaryOp, VarBinding};
 pub use lexer::{Lexer, Token, TokenKind};
-pub use parser::{parse_expression, ParseError};
+pub use parser::{ParseError, parse_expression};
 
 /// Posicion de un token en el texto fuente.
 ///

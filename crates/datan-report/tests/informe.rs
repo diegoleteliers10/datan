@@ -10,7 +10,8 @@ use datan_model::{Column, DataType, Measure, ObjectId};
 use datan_report::source::DuckSource;
 use datan_report::{Header, Matrix, Report, RowKind, TopN, Totales};
 use datan_testkit::{
-    engine, engine_con_region_nula, memory_source, memory_source_con_region_nula, model, Y2024,
+    FACT_QTY, PRODUCT_CATEGORY, PRODUCT_ID, PRODUCT_REGION, Y2024, engine, engine_con_region_nula,
+    memory_source, memory_source_con_region_nula, model,
 };
 
 fn measure(id: &str) -> ObjectId {
@@ -27,7 +28,142 @@ fn matrix() -> Matrix {
     let report = Report::new(model())
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty"), measure("Amount"), measure("Margin")]);
-    report.execute(&engine().expect("motor"), None).expect("corre")
+    report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre")
+}
+
+#[test]
+fn el_filtro_de_un_visual_no_cambia_la_matriz_del_otro() {
+    let engine = engine().expect("motor");
+    let page = Report::new(model())
+        .with_dimensions(vec![PRODUCT_REGION])
+        .with_measures(vec![measure("Qty")])
+        .filtered_to(PRODUCT_REGION, vec![FilterValue::Text("Norte".to_string())]);
+    let untargeted = page
+        .execute(&engine, None)
+        .expect("matriz sin filtro visual");
+    let targeted = page
+        .filtered_to(PRODUCT_CATEGORY, vec![FilterValue::Text("A".to_string())])
+        .execute(&engine, None)
+        .expect("matriz con filtro visual");
+
+    assert_eq!(untargeted.row_count(), 1);
+    assert_eq!(targeted.row_count(), 1);
+    assert_eq!(untargeted.cell(0, 0), Some("Norte"));
+    assert_eq!(targeted.cell(0, 0), Some("Norte"));
+    assert_ne!(untargeted.cell(0, 1), targeted.cell(0, 1));
+}
+
+#[test]
+fn distinct_values_respeta_el_orden_y_el_limite() {
+    let report = Report::new(model());
+    let values = report
+        .distinct_values(&engine().expect("motor"), ObjectId(21), 2)
+        .expect("lee los valores");
+
+    assert_eq!(
+        values,
+        vec![
+            FilterValue::Text("Este".to_string()),
+            FilterValue::Text("Norte".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn distinct_values_pagea_sin_cambiar_el_orden_del_modelo() {
+    let report = Report::new(model());
+    let values = report
+        .distinct_values_page(&engine().expect("motor"), ObjectId(21), 1, 2)
+        .expect("lee la segunda pagina");
+
+    assert_eq!(
+        values,
+        vec![
+            FilterValue::Text("Norte".to_string()),
+            FilterValue::Text("Sur".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn distinct_values_respeta_los_filtros_de_la_tabla() {
+    let report = Report::new(model()).filtered_to(PRODUCT_ID, vec![FilterValue::Integer(2)]);
+    let values = report
+        .distinct_values_page(&engine().expect("motor"), PRODUCT_REGION, 0, 10)
+        .expect("lee las regiones filtradas");
+
+    assert_eq!(values, vec![FilterValue::Text("Este".to_string()),]);
+}
+
+#[test]
+fn distinct_values_filtra_con_in_y_conserva_el_orden_alfabetico() {
+    let report = Report::new(model()).filtered_to(
+        PRODUCT_ID,
+        vec![FilterValue::Integer(1), FilterValue::Integer(2)],
+    );
+    let values = report
+        .distinct_values_page(&engine().expect("motor"), PRODUCT_REGION, 0, 10)
+        .expect("lee las regiones filtradas");
+
+    assert_eq!(
+        values,
+        vec![
+            FilterValue::Text("Este".to_string()),
+            FilterValue::Text("Sur".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn distinct_values_conserva_el_fallback_para_filtros_entre_tablas() {
+    let report = Report::new(model()).filtered_to(PRODUCT_ID, vec![FilterValue::Integer(2)]);
+    let values = report
+        .distinct_values_page(&engine().expect("motor"), FACT_QTY, 0, 10)
+        .expect("lee los valores de la tabla de hechos");
+
+    assert_eq!(
+        values,
+        vec![
+            FilterValue::Integer(2),
+            FilterValue::Integer(5),
+            FilterValue::Integer(8),
+            FilterValue::Blank,
+        ]
+    );
+}
+
+#[test]
+fn distinct_values_deja_blank_al_final() {
+    let report = Report::new(model());
+    let values = report
+        .distinct_values(&engine_con_region_nula().expect("motor"), ObjectId(21), 10)
+        .expect("lee los valores");
+
+    assert_eq!(
+        values,
+        vec![
+            FilterValue::Text("Este".to_string()),
+            FilterValue::Text("Norte".to_string()),
+            FilterValue::Text("Sur".to_string()),
+            FilterValue::Blank,
+        ]
+    );
+}
+
+#[test]
+fn distinct_values_devuelve_vacio_si_la_columna_no_tiene_filas() {
+    let engine = datan_storage::Engine::open(":memory:").expect("motor");
+    engine
+        .execute("CREATE TABLE dim_product (region VARCHAR)")
+        .expect("tabla vacia");
+
+    let values = Report::new(model())
+        .distinct_values(&engine, ObjectId(21), 10)
+        .expect("lee una columna vacia");
+
+    assert!(values.is_empty());
 }
 
 #[test]
@@ -51,7 +187,11 @@ fn las_filas_traen_el_valor_de_la_dimension_primero() {
     let regions: Vec<&str> = (0..matrix.row_count())
         .filter_map(|row| matrix.cell(row, 0))
         .collect();
-    assert_eq!(regions, vec!["Este", "Norte", "Sur"], "ordenado, no en hash");
+    assert_eq!(
+        regions,
+        vec!["Este", "Norte", "Sur"],
+        "ordenado, no en hash"
+    );
 }
 
 #[test]
@@ -84,7 +224,10 @@ fn el_total_de_la_matriz_es_la_suma_de_sus_filas() {
     let matrix = matrix();
     let mut total = 0.0f64;
     for row in 0..matrix.row_count() {
-        total += matrix.cell(row, 2).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        total += matrix
+            .cell(row, 2)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
     }
     assert_eq!(total, 74000.0, "el total de Amount en la suite");
 
@@ -101,10 +244,23 @@ fn margin_no_es_qty_repetido() {
     // distinto: es `(Qty - Amount) / Qty`.
     let matrix = matrix();
     for row in 0..matrix.row_count() {
-        let qty: f64 = matrix.cell(row, 1).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let amount: f64 = matrix.cell(row, 2).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let margin: f64 = matrix.cell(row, 3).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let expected = if qty == 0.0 { 0.0 } else { (qty - amount) / qty };
+        let qty: f64 = matrix
+            .cell(row, 1)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let amount: f64 = matrix
+            .cell(row, 2)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let margin: f64 = matrix
+            .cell(row, 3)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let expected = if qty == 0.0 {
+            0.0
+        } else {
+            (qty - amount) / qty
+        };
         assert!(
             (margin - expected).abs() < 1e-6,
             "fila {row}: margin {margin}, esperado {expected} con qty {qty} y amount {amount}"
@@ -122,12 +278,23 @@ fn una_medida_con_divide_no_es_su_primera_hoja() {
     let report = Report::new(model.clone())
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty"), measure("Amount"), measure("Ratio")]);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
 
     for row in 0..matrix.row_count() {
-        let qty: f64 = matrix.cell(row, 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let amount: f64 = matrix.cell(row, 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let ratio: f64 = matrix.cell(row, 3).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let qty: f64 = matrix
+            .cell(row, 1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let amount: f64 = matrix
+            .cell(row, 2)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let ratio: f64 = matrix
+            .cell(row, 3)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
         let expected = if amount == 0.0 { 0.0 } else { qty / amount };
         assert!(
             (ratio - expected).abs() < 1e-9,
@@ -144,11 +311,19 @@ fn una_medida_con_if_elige_por_fila_y_no_copia_su_hoja() {
     let report = Report::new(model.clone())
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty"), measure("Condicional")]);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
 
     for row in 0..matrix.row_count() {
-        let qty: f64 = matrix.cell(row, 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let condicional: f64 = matrix.cell(row, 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let qty: f64 = matrix
+            .cell(row, 1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let condicional: f64 = matrix
+            .cell(row, 2)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
         let expected = if qty > 50.0 { qty } else { 0.0 };
         assert_eq!(
             condicional, expected,
@@ -183,14 +358,20 @@ fn pinchar_una_celda_filtra_todas_las_medidas() {
     let report = Report::new(model())
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty"), measure("Amount"), measure("Margin")]);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
 
     // La celda (Norte, 0) es la region. Pinchar ahi filtra el informe entero.
     let row = (0..matrix.row_count())
         .find(|row| matrix.cell(*row, 0) == Some("Norte"))
         .expect("Norte esta en la matriz");
-    let drilled = matrix.drill(&report, row, 0).expect("pinchar una dimension");
-    let filtered = drilled.execute(&engine().expect("motor"), None).expect("corre");
+    let drilled = matrix
+        .drill(&report, row, 0)
+        .expect("pinchar una dimension");
+    let filtered = drilled
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
 
     assert_eq!(filtered.row_count(), 1, "solo la fila filtrada");
     assert_eq!(filtered.cell(0, 0), Some("Norte"));
@@ -214,9 +395,14 @@ fn pinchar_una_celda_de_medida_no_filtra() {
     let report = Report::new(model())
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty")]);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
 
-    assert!(matrix.drill(&report, 0, 1).is_none(), "una medida no es un filtro");
+    assert!(
+        matrix.drill(&report, 0, 1).is_none(),
+        "una medida no es un filtro"
+    );
 }
 
 #[test]
@@ -232,13 +418,18 @@ fn soltar_un_filtro_devuelve_el_informe_completo() {
         1
     );
     let soltado = drilled.unfiltered(ObjectId(21));
-    assert_eq!(soltado.execute(&engine, None).expect("corre").row_count(), 3);
+    assert_eq!(
+        soltado.execute(&engine, None).expect("corre").row_count(),
+        3
+    );
 }
 
 #[test]
 fn un_informe_sin_medidas_falla_con_mensaje() {
     let report = Report::new(model()).with_dimensions(vec![ObjectId(21)]);
-    let error = report.execute(&engine().expect("motor"), None).expect_err("falla");
+    let error = report
+        .execute(&engine().expect("motor"), None)
+        .expect_err("falla");
     assert!(
         error.to_string().contains("medida"),
         "el mensaje tiene que decir que falta una medida: {error}"
@@ -284,12 +475,12 @@ fn un_informe_guardado_vuelve_a_dar_los_mismos_numeros() {
     assert_eq!(reabierto.measures.len(), 2);
 
     let despues = reabierto.execute(&engine, None).expect("corre");
-    assert_eq!(antes.rows, despues.rows, "los numeros no cambian al reabrir");
-
-    let _ = std::fs::remove_file(
-        datan_report::saved::folder()
-            .join("informe de prueba.toml"),
+    assert_eq!(
+        antes.rows, despues.rows,
+        "los numeros no cambian al reabrir"
     );
+
+    let _ = std::fs::remove_file(datan_report::saved::folder().join("informe de prueba.toml"));
 }
 
 #[test]
@@ -310,10 +501,7 @@ fn los_filtros_se_guardan_y_se_vuelven_a_aplicar() {
     assert_eq!(matrix.row_count(), 1, "solo la fila filtrada");
     assert_eq!(matrix.cell(0, 0), Some("Norte"));
 
-    let _ = std::fs::remove_file(
-        datan_report::saved::folder()
-            .join("informe filtrado.toml"),
-    );
+    let _ = std::fs::remove_file(datan_report::saved::folder().join("informe filtrado.toml"));
 }
 
 #[test]
@@ -321,8 +509,7 @@ fn los_nombres_de_medidas_guardadas_resuelven_contra_el_modelo() {
     // Guardar los NOMBRES y no los ids es la razon de que este viaje funcione. Un id
     // interno cambia entre ejecuciones; un nombre no.
     let model = model();
-    let report = datan_report::Report::new(model.clone())
-        .with_measures(vec![measure("Qty")]);
+    let report = datan_report::Report::new(model.clone()).with_measures(vec![measure("Qty")]);
 
     datan_report::saved::save(&report, "informe de nombres").expect("guarda");
     let reabierto = datan_report::saved::open("informe de nombres", &model).expect("abre");
@@ -334,10 +521,7 @@ fn los_nombres_de_medidas_guardadas_resuelven_contra_el_modelo() {
         .collect();
     assert_eq!(nombres, vec!["Qty"]);
 
-    let _ = std::fs::remove_file(
-        datan_report::saved::folder()
-            .join("informe de nombres.toml"),
-    );
+    let _ = std::fs::remove_file(datan_report::saved::folder().join("informe de nombres.toml"));
 }
 
 #[test]
@@ -367,6 +551,41 @@ fn los_totales_de_las_tarjetas_son_los_mismos_que_la_suma_de_la_matriz() {
 }
 
 #[test]
+fn una_medida_sin_dimensiones_produce_una_fila_escalar() {
+    let engine = engine().expect("motor");
+    let report = Report::new(model()).with_measures(vec![measure("Qty"), measure("Amount")]);
+
+    let matrix = report.execute(&engine, None).expect("corre por SQL");
+    let totals = report.totals(&engine, None).expect("totales");
+    assert_eq!(matrix.row_count(), 1);
+    assert_eq!(matrix.cell(0, 0), Some("165"));
+    assert_eq!(matrix.cell(0, 1), Some(totals[1].as_str()));
+    assert_eq!(matrix.row_kind(0), RowKind::Data);
+
+    let report = Report::new(model()).with_measures(vec![measure("QtyDoble")]);
+    let matrix = report
+        .execute(&engine, Some(&memory_source()))
+        .expect("corre por el interprete");
+    assert_eq!(matrix.row_count(), 1);
+    assert_eq!(matrix.cell(0, 0), Some("330"));
+    assert_eq!(matrix.row_kind(0), RowKind::Data);
+}
+
+#[test]
+fn una_medida_escalar_marca_el_total_si_el_informe_lo_pide() {
+    let report = Report::new(model())
+        .with_measures(vec![measure("Qty")])
+        .with_totales(Totales::General);
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
+
+    assert_eq!(matrix.row_count(), 1);
+    assert_eq!(matrix.cell(0, 0), Some("165"));
+    assert_eq!(matrix.row_kind(0), RowKind::GrandTotal);
+}
+
+#[test]
 fn las_tarjetas_no_confunden_dos_medidas_que_comparten_hoja() {
     // `Qty` y `Grande` leen la MISMA hoja `SUM(qty)` y dan numeros distintos: el total de
     // `Qty` en la suite es 165 y el umbral de `Grande` es 1000, asi que su total es cero. Si
@@ -384,7 +603,11 @@ fn las_tarjetas_no_confunden_dos_medidas_que_comparten_hoja() {
         .with_measures(vec![measure("Qty"), ObjectId(901)]);
     let engine = engine().expect("motor");
 
-    assert_eq!(report.query_count().expect("cuenta"), 2, "una consulta por forma");
+    assert_eq!(
+        report.query_count().expect("cuenta"),
+        2,
+        "una consulta por forma"
+    );
 
     let totals = report.totals(&engine, None).expect("totales");
     let qty: f64 = totals[0].parse().unwrap_or(0.0);
@@ -419,7 +642,9 @@ fn dos_medidas_iguales_llenan_las_dos_tarjetas() {
     let report = datan_report::Report::new(model)
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![ObjectId(900), original.id]);
-    let totals = report.totals(&engine().expect("motor"), None).expect("totales");
+    let totals = report
+        .totals(&engine().expect("motor"), None)
+        .expect("totales");
 
     assert_eq!(totals.len(), 2);
     assert_eq!(totals[0], "165");
@@ -432,11 +657,11 @@ fn el_grafico_toma_los_primeros_valores_ordenados_por_la_medida() {
     let top = matrix.top(0, 1, 2);
 
     assert_eq!(top.len(), 2);
+    assert!(top[0].1 >= top[1].1, "ordenado de mayor a menor: {top:?}");
     assert!(
-        top[0].1 >= top[1].1,
-        "ordenado de mayor a menor: {top:?}"
+        top.iter()
+            .all(|(label, _)| ["Norte", "Sur", "Este"].contains(&label.as_str()))
     );
-    assert!(top.iter().all(|(label, _)| ["Norte", "Sur", "Este"].contains(&label.as_str())));
 }
 
 #[test]
@@ -480,7 +705,7 @@ fn la_ventana_anterior_mide_lo_mismo_que_la_actual() {
     // El delta de las tarjetas compara la ventana actual contra la MISMA ventana un ano
     // antes. Si las dos midieran distinto, un 29 de febrero haria que el total anterior
     // cubriera un dia de mas y el porcentaje saldría falseado sin que nada fallara.
-    use datan_dax_eval::{shift, CalendarUnit, DateRange, TimeFunction};
+    use datan_dax_eval::{CalendarUnit, DateRange, TimeFunction, shift};
 
     let today = Y2024 + 365;
     // La ventana de la app: el INICIO sale de `shift` y el FIN es el ancla. Pedirle a
@@ -510,10 +735,20 @@ fn la_ventana_anterior_mide_lo_mismo_que_la_actual() {
     .start;
     let anterior = ventana(un_ano_atras);
 
-    assert_eq!(actual.len(), anterior.len(), "las dos ventanas, igual de largas");
-    assert!(actual.start > anterior.end, "la ventana anterior termina antes de empezar la actual");
+    assert_eq!(
+        actual.len(),
+        anterior.len(),
+        "las dos ventanas, igual de largas"
+    );
+    assert!(
+        actual.start > anterior.end,
+        "la ventana anterior termina antes de empezar la actual"
+    );
     assert!(actual.contains(today), "la ventana actual llega hasta hoy");
-    assert!(!anterior.contains(today), "la ventana anterior no llega hasta hoy");
+    assert!(
+        !anterior.contains(today),
+        "la ventana anterior no llega hasta hoy"
+    );
 }
 
 #[test]
@@ -545,9 +780,8 @@ fn un_filtro_con_varios_valores_da_la_union_y_sobrevive_a_guardar() {
     let otra = reabierto.execute(&engine, None).expect("corre");
     assert_eq!(otra.rows, matrix.rows, "los dos valores vuelven igual");
 
-    let _ = std::fs::remove_file(
-        datan_report::saved::folder().join("informe de dos regiones.toml"),
-    );
+    let _ =
+        std::fs::remove_file(datan_report::saved::folder().join("informe de dos regiones.toml"));
 }
 
 #[test]
@@ -561,10 +795,23 @@ fn quitar_todos_los_valores_deja_el_informe_sin_filtro() {
     let engine = engine().expect("motor");
 
     let sin_filtro = report.filtered_to(ObjectId(21), vec![]);
-    assert_eq!(sin_filtro.execute(&engine, None).expect("corre").row_count(), 3);
+    assert_eq!(
+        sin_filtro
+            .execute(&engine, None)
+            .expect("corre")
+            .row_count(),
+        3
+    );
 
-    let con_filtro = sin_filtro.filtered_to(ObjectId(21), vec![FilterValue::Text("Norte".to_string())]);
-    assert_eq!(con_filtro.execute(&engine, None).expect("corre").row_count(), 1);
+    let con_filtro =
+        sin_filtro.filtered_to(ObjectId(21), vec![FilterValue::Text("Norte".to_string())]);
+    assert_eq!(
+        con_filtro
+            .execute(&engine, None)
+            .expect("corre")
+            .row_count(),
+        1
+    );
     let vuelto = con_filtro.filtered_to(ObjectId(21), vec![]);
     assert_eq!(vuelto.execute(&engine, None).expect("corre").row_count(), 3);
 }
@@ -580,16 +827,14 @@ fn dos_filtros_que_se_contradicen_no_dejan_pasar_ninguna_fila() {
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty")]);
 
-    let norte = datan_dax_eval::FilterContext::default()
-        .with(datan_dax_eval::Filter::in_values(
-            ObjectId(21),
-            vec![FilterValue::Text("Norte".to_string())],
-        ));
-    let este = datan_dax_eval::FilterContext::default()
-        .with(datan_dax_eval::Filter::in_values(
-            ObjectId(21),
-            vec![FilterValue::Text("Este".to_string())],
-        ));
+    let norte = datan_dax_eval::FilterContext::default().with(datan_dax_eval::Filter::in_values(
+        ObjectId(21),
+        vec![FilterValue::Text("Norte".to_string())],
+    ));
+    let este = datan_dax_eval::FilterContext::default().with(datan_dax_eval::Filter::in_values(
+        ObjectId(21),
+        vec![FilterValue::Text("Este".to_string())],
+    ));
     report.filters = norte.intersect(&este);
 
     let engine = engine().expect("motor");
@@ -629,13 +874,21 @@ fn dos_medidas_iguales_dan_el_mismo_numero() {
         "dos medidas iguales, una consulta"
     );
 
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
     assert_eq!(matrix.width(), 3, "una dimension y dos medidas");
     for row in 0..matrix.row_count() {
         let primera = matrix.cell(row, 1).unwrap_or("");
         let segunda = matrix.cell(row, 2).unwrap_or("");
-        assert!(!segunda.is_empty(), "fila {row}: la segunda medida sale en blanco");
-        assert_eq!(primera, segunda, "fila {row}: medidas iguales, numeros distintos");
+        assert!(
+            !segunda.is_empty(),
+            "fila {row}: la segunda medida sale en blanco"
+        );
+        assert_eq!(
+            primera, segunda,
+            "fila {row}: medidas iguales, numeros distintos"
+        );
     }
 }
 
@@ -767,7 +1020,9 @@ fn la_matriz_sale_en_el_orden_de_sort_by() {
         .with_measures(vec![measure("Qty")]);
 
     let esperado = [("Norte", 60.0), ("Sur", 48.0), ("Este", 57.0)];
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
     let regiones: Vec<&str> = (0..matrix.row_count())
         .filter_map(|row| matrix.cell(row, 0))
         .collect();
@@ -814,7 +1069,11 @@ fn los_subtotales_cuelgan_de_su_grupo_y_el_total_va_al_final() {
 
     let engine = engine().expect("motor");
     let matrix = report.execute(&engine, None).expect("corre");
-    assert_eq!(matrix.row_count(), esperado.len(), "nueve renglones y el total");
+    assert_eq!(
+        matrix.row_count(),
+        esperado.len(),
+        "nueve renglones y el total"
+    );
     for (row, (region, categoria, qty, kind)) in esperado.iter().enumerate() {
         assert_eq!(matrix.cell(row, 0), Some(*region), "fila {row}");
         assert_eq!(matrix.cell(row, 1), Some(*categoria), "fila {row}");
@@ -828,7 +1087,11 @@ fn los_subtotales_cuelgan_de_su_grupo_y_el_total_va_al_final() {
     assert_eq!(matrix.row_count(), esperado.len());
     for (row, (region, categoria, qty, kind)) in esperado.iter().enumerate() {
         assert_eq!(matrix.cell(row, 0), Some(*region), "interprete fila {row}");
-        assert_eq!(matrix.cell(row, 1), Some(*categoria), "interprete fila {row}");
+        assert_eq!(
+            matrix.cell(row, 1),
+            Some(*categoria),
+            "interprete fila {row}"
+        );
         assert_eq!(matrix.cell(row, 2), Some(*qty), "interprete fila {row}");
         assert_eq!(&matrix.row_kind(row), kind, "interprete fila {row}");
     }
@@ -843,7 +1106,9 @@ fn con_una_dimension_los_subtotales_son_el_gran_total() {
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty")])
         .with_subtotals(true);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
     assert_eq!(matrix.row_count(), 4, "Este, Norte, Sur y el total");
     for row in 0..3 {
         assert_eq!(matrix.row_kind(row), RowKind::Data);
@@ -853,7 +1118,9 @@ fn con_una_dimension_los_subtotales_son_el_gran_total() {
 
     // El interprete dice lo mismo: mismos renglones, mismo total.
     let source = memory_source();
-    let otra = report.execute(&engine().expect("motor"), Some(&source)).expect("corre");
+    let otra = report
+        .execute(&engine().expect("motor"), Some(&source))
+        .expect("corre");
     assert_eq!(otra.rows, matrix.rows);
     assert_eq!(otra.kinds, matrix.kinds);
 }
@@ -867,7 +1134,9 @@ fn el_gran_total_con_dos_dimensiones_no_trae_los_subtotales() {
         .with_dimensions(vec![ObjectId(21), ObjectId(22)])
         .with_measures(vec![measure("Qty")])
         .with_totales(Totales::General);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
     assert_eq!(matrix.row_count(), 7, "seis detalles y el total");
     for row in 0..6 {
         assert_eq!(matrix.row_kind(row), RowKind::Data, "fila {row}");
@@ -876,7 +1145,9 @@ fn el_gran_total_con_dos_dimensiones_no_trae_los_subtotales() {
     assert_eq!(matrix.cell(6, 2), Some("165"));
 
     let source = memory_source();
-    let otra = report.execute(&engine().expect("motor"), Some(&source)).expect("corre");
+    let otra = report
+        .execute(&engine().expect("motor"), Some(&source))
+        .expect("corre");
     assert_eq!(otra.rows, matrix.rows);
     assert_eq!(otra.kinds, matrix.kinds);
 }
@@ -933,7 +1204,9 @@ fn sin_totales_no_hay_ningun_renglon_de_total() {
     let report = Report::new(model)
         .with_dimensions(vec![ObjectId(21)])
         .with_measures(vec![measure("Qty")]);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
     assert_eq!(matrix.row_count(), 3);
     assert!(matrix.kinds.iter().all(|kind| *kind == RowKind::Data));
 }
@@ -948,7 +1221,9 @@ fn el_subtotal_no_es_un_valor_para_filtrar() {
         .with_dimensions(vec![ObjectId(21), ObjectId(22)])
         .with_measures(vec![measure("Qty")])
         .with_subtotals(true);
-    let matrix = report.execute(&engine().expect("motor"), None).expect("corre");
+    let matrix = report
+        .execute(&engine().expect("motor"), None)
+        .expect("corre");
     let subtotales: Vec<usize> = (0..matrix.row_count())
         .filter(|row| matrix.row_kind(*row) != RowKind::Data)
         .collect();
@@ -1045,8 +1320,14 @@ fn el_top_n_deja_los_n_primeros_y_su_medida() {
         .expect("corre");
     assert_eq!(abajo.row_count(), 2);
     let regiones: Vec<&str> = (0..2).filter_map(|row| abajo.cell(row, 0)).collect();
-    assert!(regiones.contains(&"Sur") && regiones.contains(&"Este"), "{regiones:?}");
-    assert!(!regiones.contains(&"Norte"), "la mayor queda fuera: {regiones:?}");
+    assert!(
+        regiones.contains(&"Sur") && regiones.contains(&"Este"),
+        "{regiones:?}"
+    );
+    assert!(
+        !regiones.contains(&"Norte"),
+        "la mayor queda fuera: {regiones:?}"
+    );
 }
 
 #[test]
@@ -1123,13 +1404,11 @@ fn el_top_n_y_los_subtotales_no_pueden_estar_juntos() {
     assert_eq!(con_subtotales.totales, Totales::Subtotales);
     assert!(con_subtotales.top_n.is_none());
 
-    let con_top = por_region()
-        .with_subtotals(true)
-        .with_top_n(TopN {
-            measure: qty,
-            count: 1,
-            abajo: false,
-        });
+    let con_top = por_region().with_subtotals(true).with_top_n(TopN {
+        measure: qty,
+        count: 1,
+        abajo: false,
+    });
     assert!(con_top.top_n.is_some());
     assert_eq!(con_top.totales, Totales::Ninguno);
 }
@@ -1209,6 +1488,21 @@ fn modelo_con_calculada() -> datan_model::Model {
         "SUM('fact_sales'[importe])",
     ));
     model
+}
+
+#[test]
+fn distinct_values_rechaza_columnas_ausentes_y_calculadas() {
+    let engine = engine().expect("motor");
+    let report = Report::new(modelo_con_calculada());
+
+    assert!(matches!(
+        report.distinct_values(&engine, ObjectId(999), 10),
+        Err(datan_report::ReportError::UnknownColumn(ObjectId(999)))
+    ));
+    assert!(matches!(
+        report.distinct_values(&engine, FACT_BRUTO, 10),
+        Err(datan_report::ReportError::CalculatedColumn(name)) if name == "bruto"
+    ));
 }
 
 #[test]

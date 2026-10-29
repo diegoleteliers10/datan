@@ -65,7 +65,11 @@ mod tests {
 pub fn quote_qualified(name: &str) -> String {
     match name.split_once('.') {
         Some((qualifier, table)) => {
-            format!("{}.{}", quote_identifier(qualifier), quote_identifier(table))
+            format!(
+                "{}.{}",
+                quote_identifier(qualifier),
+                quote_identifier(table)
+            )
         }
         None => quote_identifier(name),
     }

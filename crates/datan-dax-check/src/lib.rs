@@ -163,13 +163,14 @@ impl Checker<'_> {
                 column,
                 span,
             } => {
-                let (owner, model_column) = self.model.column_by_name(table, column).ok_or(
-                    CheckError::UnknownColumn {
-                        table: table.clone(),
-                        column: column.clone(),
-                        span: *span,
-                    },
-                )?;
+                let (owner, model_column) =
+                    self.model
+                        .column_by_name(table, column)
+                        .ok_or(CheckError::UnknownColumn {
+                            table: table.clone(),
+                            column: column.clone(),
+                            span: *span,
+                        })?;
                 CheckedExpr::Column {
                     column: model_column.id,
                     name: model_column.name.clone(),
@@ -180,7 +181,12 @@ impl Checker<'_> {
 
             Expr::Call { name, args, span } => self.check_call(name, args, *span)?,
 
-            Expr::Binary { op, left, right, span } => {
+            Expr::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => {
                 let left = self.check(left)?;
                 let right = self.check(right)?;
                 CheckedExpr::Binary {
@@ -223,8 +229,7 @@ impl Checker<'_> {
 
     fn check_var(&mut self, var: &VarBinding) -> Result<CheckedExpr, CheckError> {
         let value = self.check(&var.value)?;
-        self.variables
-            .insert(var.name.clone(), value.clone());
+        self.variables.insert(var.name.clone(), value.clone());
         Ok(CheckedExpr::Variable {
             name: var.name.clone(),
             value: Box::new(value),
@@ -233,12 +238,7 @@ impl Checker<'_> {
     }
 
     /// Resuelve un nombre sin calificar. Es la regla central del crate.
-    fn resolve(
-        &mut self,
-        name: &str,
-        span: Span,
-        quoted: bool,
-    ) -> Result<CheckedExpr, CheckError> {
+    fn resolve(&mut self, name: &str, span: Span, quoted: bool) -> Result<CheckedExpr, CheckError> {
         // 1. Una variable local gana sobre todo.
         if let Some(value) = self.variables.get(name) {
             return Ok(CheckedExpr::Variable {
@@ -285,7 +285,11 @@ impl Checker<'_> {
             .model
             .tables
             .iter()
-            .filter_map(|table| table.column_by_name(name).map(|c| (table.id, table.name.clone(), c.id, c.name.clone())))
+            .filter_map(|table| {
+                table
+                    .column_by_name(name)
+                    .map(|c| (table.id, table.name.clone(), c.id, c.name.clone()))
+            })
             .collect();
 
         // 5. Un nombre entre comillas que no es tabla, medida ni columna es un literal de
@@ -486,19 +490,21 @@ impl Checker<'_> {
                     span: table_arg.span(),
                 })?,
             // La forma de filtro: `FILTER('Fact Sales', ...)`. Se acepta como source.
-            Expr::Call { name, args, span: inner } if name == "FILTER" && !args.is_empty() => {
-                match &args[0] {
-                    Expr::Reference { name, .. } => self.model.table_by_name(name).map(|t| t.id),
-                    Expr::QualifiedReference { table, .. } => {
-                        self.model.table_by_name(table).map(|t| t.id)
-                    }
-                    _ => None,
+            Expr::Call {
+                name,
+                args,
+                span: inner,
+            } if name == "FILTER" && !args.is_empty() => match &args[0] {
+                Expr::Reference { name, .. } => self.model.table_by_name(name).map(|t| t.id),
+                Expr::QualifiedReference { table, .. } => {
+                    self.model.table_by_name(table).map(|t| t.id)
                 }
-                .ok_or(CheckError::UnknownName {
-                    name: "el primer argumento de FILTER debe ser una tabla".to_string(),
-                    span: *inner,
-                })?
+                _ => None,
             }
+            .ok_or(CheckError::UnknownName {
+                name: "el primer argumento de FILTER debe ser una tabla".to_string(),
+                span: *inner,
+            })?,
             _ => {
                 self.diagnostics.push(Diagnostic::warning(
                     span,
@@ -525,7 +531,11 @@ impl Checker<'_> {
 
     fn check_table(&mut self, table: &TableExpr) -> Result<CheckedExpr, CheckError> {
         Ok(match table {
-            TableExpr::Row { columns, values, span } => {
+            TableExpr::Row {
+                columns,
+                values,
+                span,
+            } => {
                 let mut checked = Vec::with_capacity(values.len());
                 for value in values {
                     checked.push(self.check(value)?);
@@ -578,7 +588,10 @@ pub fn find_measure_cycle(model: &Model) -> Option<String> {
     let mut edges: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
     for measure in &model.measures {
         if let Ok(checked) = check(&measure.expression, model) {
-            edges.insert(measure.id, checked.measure_dependencies.into_iter().collect());
+            edges.insert(
+                measure.id,
+                checked.measure_dependencies.into_iter().collect(),
+            );
         }
     }
 

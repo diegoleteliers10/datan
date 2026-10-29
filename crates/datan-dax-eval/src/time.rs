@@ -22,7 +22,9 @@ use datan_model::{DataType, Model, ObjectId};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum TimeError {
-    #[error("el modelo no tiene una tabla de fechas marcada. DATEADD necesita una columna de fecha contigua")]
+    #[error(
+        "el modelo no tiene una tabla de fechas marcada. DATEADD necesita una columna de fecha contigua"
+    )]
     NoDateTable,
     #[error("la columna {0} no es una columna de fecha del modelo")]
     NotADateColumn(ObjectId),
@@ -223,7 +225,10 @@ fn parallel_period(range: DateRange, amount: i64, unit: CalendarUnit) -> DateRan
         CalendarUnit::Year => {
             let (year, _) = year_month_of(range.start);
             let target = year as i64 + amount;
-            DateRange::new(month_start((target as i32, 1)), month_start((target as i32 + 1, 1)) - 1)
+            DateRange::new(
+                month_start((target as i32, 1)),
+                month_start((target as i32 + 1, 1)) - 1,
+            )
         }
     }
 }
@@ -424,7 +429,10 @@ mod tests {
     #[test]
     fn el_ano_bisiesto_tiene_el_29_de_febrero() {
         assert!(parse_day("2024-02-29").is_some());
-        assert_eq!(parse_day("2024-02-29"), parse_day("2024-03-01").map(|day| day - 1));
+        assert_eq!(
+            parse_day("2024-02-29"),
+            parse_day("2024-03-01").map(|day| day - 1)
+        );
     }
 
     fn at(offset_from_2024: i32) -> i32 {
@@ -469,7 +477,11 @@ mod tests {
         );
 
         assert_eq!(shifted.len(), january.len(), "DATEADD conserva la longitud");
-        assert_eq!(shifted.start, at(-31), "enero menos un mes es diciembre 2023");
+        assert_eq!(
+            shifted.start,
+            at(-31),
+            "enero menos un mes es diciembre 2023"
+        );
     }
 
     #[test]
@@ -566,7 +578,11 @@ mod tests {
         while day < 800_000 {
             let (year, month, d) = civil_from_days(day);
             assert_eq!(year_month_of(day), (year, month), "dia {day}");
-            assert_eq!(month_start((year, month)), day - (d as i32) + 1, "dia {day}");
+            assert_eq!(
+                month_start((year, month)),
+                day - (d as i32) + 1,
+                "dia {day}"
+            );
             day += 37;
         }
     }

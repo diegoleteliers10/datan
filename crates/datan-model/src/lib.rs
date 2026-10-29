@@ -132,12 +132,18 @@ pub enum ColumnOrigin {
 pub struct Column {
     pub id: ObjectId,
     pub name: String,
+    /// Nombres anteriores que siguen siendo válidos para referencias DAX guardadas.
+    pub aliases: Vec<String>,
     pub data_type: DataType,
     /// Columna por la que se ordena, si esta no es la clave natural. Es la `sortByColumn`
     /// de Power BI: rompe la afinidad de tipo.
     pub sort_by: Option<ObjectId>,
     pub is_hidden: bool,
+    pub format_string: Option<String>,
+    pub description: Option<String>,
     pub origin: ColumnOrigin,
+    /// La columna declara una clave foranea en la fuente fisica.
+    pub is_foreign_key: bool,
 }
 
 impl Column {
@@ -145,10 +151,14 @@ impl Column {
         Self {
             id,
             name: name.into(),
+            aliases: Vec::new(),
             data_type,
             sort_by: None,
             is_hidden: false,
+            format_string: None,
+            description: None,
             origin: ColumnOrigin::Physical,
+            is_foreign_key: false,
         }
     }
 
@@ -206,9 +216,12 @@ impl Table {
     }
 
     pub fn column_by_name(&self, name: &str) -> Option<&Column> {
-        self.columns
-            .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(name))
+        self.columns.iter().find(|c| {
+            c.name.eq_ignore_ascii_case(name)
+                || c.aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(name))
+        })
     }
 }
 
@@ -266,9 +279,9 @@ impl Model {
     }
 
     pub fn column(&self, id: ObjectId) -> Option<(&Table, &Column)> {
-        self.tables.iter().find_map(|table| {
-            table.column(id).map(|column| (table, column))
-        })
+        self.tables
+            .iter()
+            .find_map(|table| table.column(id).map(|column| (table, column)))
     }
 
     pub fn column_by_name(&self, table: &str, column: &str) -> Option<(&Table, &Column)> {
@@ -495,7 +508,9 @@ mod tests {
     #[test]
     fn resuelve_una_columna_por_tabla_y_nombre() {
         let model = modelo();
-        let (table, column) = model.column_by_name("Dim Product", "Price").expect("columna");
+        let (table, column) = model
+            .column_by_name("Dim Product", "Price")
+            .expect("columna");
         assert_eq!(table.id, ObjectId(2));
         assert_eq!(column.data_type, DataType::Moneda);
         assert!(column.data_type.is_numeric());
@@ -536,7 +551,12 @@ mod tests {
 
     #[test]
     fn una_columna_calculada_guarda_su_expresion() {
-        let column = Column::calculated(ObjectId(61), "anio", DataType::Integer, "YEAR('ventas'[fecha])");
+        let column = Column::calculated(
+            ObjectId(61),
+            "anio",
+            DataType::Integer,
+            "YEAR('ventas'[fecha])",
+        );
         assert!(column.is_calculated());
         assert_eq!(column.expression(), Some("YEAR('ventas'[fecha])"));
         // Los demas campos quedan en su valor por defecto, como una columna normal.

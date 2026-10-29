@@ -13,9 +13,13 @@ use datan_storage::Engine;
 
 fn main() {
     let home = std::env::var("HOME").expect("HOME");
-    let root = std::path::Path::new(&home).join(".duckdb").join("extensions");
+    let root = std::path::Path::new(&home)
+        .join(".duckdb")
+        .join("extensions");
     let engine = Engine::open_with_bundled_extensions(":memory:", &root).expect("motor");
-    engine.load_bundled_extension("postgres").expect("extension");
+    engine
+        .load_bundled_extension("postgres")
+        .expect("extension");
     engine
         .execute("ATTACH 'host=localhost dbname=datan_bench' AS pg (TYPE POSTGRES, READ_ONLY)")
         .expect("attach");
@@ -112,7 +116,9 @@ fn main() {
 
     println!();
     println!("  Comprobalo en psql:");
-    println!("    psql -d datan_bench -c \"SELECT count(*) FROM information_schema.key_column_usage \\");
+    println!(
+        "    psql -d datan_bench -c \"SELECT count(*) FROM information_schema.key_column_usage \\"
+    );
     println!("      WHERE table_schema = 'public'\"");
     println!();
     println!("  Si psql da 5 y el scanner da 3, la vista `information_schema` no sobrevive");
@@ -120,7 +126,11 @@ fn main() {
     println!("  real y no una vista de UNIONs.");
 }
 
-fn text(batch: &datan_storage::arrow::record_batch::RecordBatch, column: usize, row: usize) -> String {
+fn text(
+    batch: &datan_storage::arrow::record_batch::RecordBatch,
+    column: usize,
+    row: usize,
+) -> String {
     use datan_storage::arrow::array::{Array, Int64Array, StringArray};
     let array = batch.column(column);
     if array.null_count() > 0 && array.is_null(row) {

@@ -12,10 +12,21 @@ use crate::Span;
 /// Expresion DAX.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Number { value: f64, span: Span },
-    Text { value: String, span: Span },
-    Boolean { value: bool, span: Span },
-    Blank { span: Span },
+    Number {
+        value: f64,
+        span: Span,
+    },
+    Text {
+        value: String,
+        span: Span,
+    },
+    Boolean {
+        value: bool,
+        span: Span,
+    },
+    Blank {
+        span: Span,
+    },
 
     /// Referencia sin calificar: `[Qty]` o `Revenue`.
     /// Un nombre sin calificar: `[Qty]`, `Qty` o `'Nombre entre comillas'`.
@@ -48,11 +59,24 @@ pub enum Expr {
         span: Span,
     },
 
-    Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr>, span: Span },
-    Unary { op: UnaryOp, operand: Box<Expr>, span: Span },
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+        span: Span,
+    },
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+        span: Span,
+    },
 
     /// Bloque `VAR a = 1 VAR b = 2 RETURN a + b`.
-    Block { vars: Vec<VarBinding>, body: Box<Expr>, span: Span },
+    Block {
+        vars: Vec<VarBinding>,
+        body: Box<Expr>,
+        span: Span,
+    },
 
     /// Constructor de tabla: `ROW("x", [Qty])` o `{1, 2, 3}`.
     Table(TableExpr),
@@ -70,11 +94,19 @@ pub struct VarBinding {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableExpr {
     /// `ROW("nombre", expr, ...)`.
-    Row { columns: Vec<String>, values: Vec<Expr>, span: Span },
+    Row {
+        columns: Vec<String>,
+        values: Vec<Expr>,
+        span: Span,
+    },
     /// `{1, 2, 3}`.
     Literal { values: Vec<Expr>, span: Span },
     /// `TABLE(...)` o `SELECTCOLUMNS(...)`, guardado como llamada.
-    Call { name: String, args: Vec<Expr>, span: Span },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+        span: Span,
+    },
 }
 
 /// Modificador de `CALCULATE`.
@@ -86,15 +118,27 @@ pub enum Modifier {
     /// `ALL(tabla)` o `ALL()`.
     RemoveAll { table: Option<String>, span: Span },
     /// `ALLEXCEPT(tabla, col, ...)`.
-    AllExcept { table: String, keep: Vec<String>, span: Span },
+    AllExcept {
+        table: String,
+        keep: Vec<String>,
+        span: Span,
+    },
     /// `KEEPFILTERS(expr)`.
     KeepFilters { expr: Expr, span: Span },
     /// `REMOVEFILTERS(tabla)`.
     RemoveFilters { table: Option<String>, span: Span },
     /// `CROSSFILTER(a, b, direccion)`.
-    CrossFilter { from: String, to: String, span: Span },
+    CrossFilter {
+        from: String,
+        to: String,
+        span: Span,
+    },
     /// `USERELATIONSHIP(a, b)`.
-    UseRelationship { from: String, to: String, span: Span },
+    UseRelationship {
+        from: String,
+        to: String,
+        span: Span,
+    },
     /// Expresion booleana como filtro.
     Boolean { expr: Expr, span: Span },
 }
@@ -176,7 +220,9 @@ impl std::fmt::Display for Expr {
                 }
             }
             Expr::Text { value, .. } => write!(f, "\"{value}\""),
-            Expr::Boolean { value, .. } => write!(f, "{}", if *value { "TRUE()" } else { "FALSE()" }),
+            Expr::Boolean { value, .. } => {
+                write!(f, "{}", if *value { "TRUE()" } else { "FALSE()" })
+            }
             Expr::Blank { .. } => write!(f, "BLANK()"),
             Expr::Reference { name, .. } => write!(f, "[{name}]"),
             Expr::QualifiedReference { table, column, .. } => write!(f, "'{table}'[{column}]"),
@@ -190,7 +236,9 @@ impl std::fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
-            Expr::Binary { op, left, right, .. } => {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
                 // Sin parentesis. El parser reconstruye la precedencia por la precedencia
                 // de operadores, y meter parentesis rompe el round-trip porque el parser
                 // tiene que aceptar un `(` como inicio de expresion primaria.
@@ -207,7 +255,9 @@ impl std::fmt::Display for Expr {
                 write!(f, "RETURN {body}")
             }
             Expr::Table(table) => match table {
-                TableExpr::Row { columns, values, .. } => {
+                TableExpr::Row {
+                    columns, values, ..
+                } => {
                     write!(f, "ROW(")?;
                     for (index, column) in columns.iter().enumerate() {
                         if index > 0 {

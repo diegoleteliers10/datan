@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Datan concept F: lectura</title>
+  <g fill="#111111">
+    <circle cx="38" cy="70" r="8"/><circle cx="66" cy="54" r="5"/><circle cx="49" cy="108" r="6"/>
+    <circle cx="36" cy="151" r="5"/><circle cx="67" cy="179" r="8"/><circle cx="43" cy="205" r="6"/>
+    <path d="M111 79h93v17h-93zM111 120h72v17h-72zM111 161h84v17h-84z"/>
+  </g>
+</svg>

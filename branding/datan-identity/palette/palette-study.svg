@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1760 1240" role="img" aria-labelledby="title">
+  <title id="title">Datan color study</title>
+  <defs>
+    <g id="symbol">
+      <path d="M15 105C15 80 27 61 49 47L84 24C108 10 136 10 160 23L214 54C237 67 246 87 246 107C246 128 234 144 214 153C194 162 173 156 151 142L92 102C70 87 52 79 37 82C25 84 18 93 15 105Z"/>
+      <path d="M15 168C18 147 33 133 52 132C73 130 91 143 111 158L165 195C184 208 204 214 221 205C235 198 243 186 246 171C247 194 235 213 214 229L177 254C155 268 129 271 104 260L54 231C31 220 16 199 15 177C15 174 15 171 15 168Z"/>
+    </g>
+    <style>
+      .title { font: 650 32px 'Avenir Next', 'Helvetica Neue', sans-serif; fill: #171717; }
+      .sub { font: 17px 'Avenir Next', 'Helvetica Neue', sans-serif; fill: #777; }
+      .name { font: 650 23px 'Avenir Next', 'Helvetica Neue', sans-serif; fill: #171717; }
+      .hex { font: 15px 'SFMono-Regular', Menlo, monospace; fill: #777; }
+      .note { font: 16px 'Avenir Next', 'Helvetica Neue', sans-serif; fill: #777; }
+      .word { font: 650 34px 'Avenir Next', 'Helvetica Neue', sans-serif; fill: #171717; }
+    </style>
+  </defs>
+  <rect width="1760" height="1240" fill="#F7F7F5"/>
+  <text class="title" x="56" y="62">Datan · estudio de color</text>
+  <text class="sub" x="56" y="96">Cobalto queda seleccionado. Las otras cinco opciones quedan como referencia.</text>
+
+  <g transform="translate(56 132)">
+    <rect width="520" height="500" rx="24" fill="#FFF" stroke="#E2E2DF"/>
+    <text class="name" x="28" y="44">Ultravioleta</text><text class="hex" x="492" y="43" text-anchor="end">#7257E8</text>
+    <rect x="28" y="72" width="176" height="176" rx="30" fill="#7257E8"/><use href="#symbol" fill="#FFF" transform="translate(52.7 91.9) scale(.485)"/>
+    <use href="#symbol" fill="#7257E8" transform="translate(239 91) scale(.17)"/><text class="word" x="296" y="145">Datan</text>
+    <text class="note" x="28" y="286">Preciso · distintivo · digital</text>
+    <rect x="28" y="320" width="464" height="1" fill="#E8E8E6"/>
+    <rect x="28" y="346" width="72" height="48" rx="12" fill="#7257E8"/><rect x="112" y="346" width="72" height="48" rx="12" fill="#211A38"/><rect x="196" y="346" width="72" height="48" rx="12" fill="#F0EDFC"/>
+    <text class="hex" x="28" y="426">7257E8</text><text class="hex" x="112" y="426">211A38</text><text class="hex" x="196" y="426">F0EDFC</text>
+  </g>
+  <g transform="translate(620 132)">
+    <rect width="520" height="500" rx="24" fill="#FFF" stroke="#3267E8" stroke-width="3"/>
+    <text class="name" x="28" y="44">Cobalto · elegido</text><text class="hex" x="492" y="43" text-anchor="end">#3267E8</text>
+    <rect x="28" y="72" width="176" height="176" rx="30" fill="#3267E8"/><use href="#symbol" fill="#FFF" transform="translate(52.7 91.9) scale(.485)"/>
+    <use href="#symbol" fill="#3267E8" transform="translate(239 91) scale(.17)"/><text class="word" x="296" y="145">Datan</text>
+    <text class="note" x="28" y="286">Claro · confiable · enfocado</text>
+    <rect x="28" y="320" width="464" height="1" fill="#E8E8E6"/>
+    <rect x="28" y="346" width="72" height="48" rx="12" fill="#3267E8"/><rect x="112" y="346" width="72" height="48" rx="12" fill="#14274A"/><rect x="196" y="346" width="72" height="48" rx="12" fill="#EAF0FD"/>
+    <text class="hex" x="28" y="426">3267E8</text><text class="hex" x="112" y="426">14274A</text><text class="hex" x="196" y="426">EAF0FD</text>
+  </g>
+  <g transform="translate(1184 132)">
+    <rect width="520" height="500" rx="24" fill="#FFF" stroke="#E2E2DF"/>
+    <text class="name" x="28" y="44">Turquesa</text><text class="hex" x="492" y="43" text-anchor="end">#00A991</text>
+    <rect x="28" y="72" width="176" height="176" rx="30" fill="#00A991"/><use href="#symbol" fill="#FFF" transform="translate(52.7 91.9) scale(.485)"/>
+    <use href="#symbol" fill="#00A991" transform="translate(239 91) scale(.17)"/><text class="word" x="296" y="145">Datan</text>
+    <text class="note" x="28" y="286">Vivo · equilibrado · conectado</text>
+    <rect x="28" y="320" width="464" height="1" fill="#E8E8E6"/>
+    <rect x="28" y="346" width="72" height="48" rx="12" fill="#00A991"/><rect x="112" y="346" width="72" height="48" rx="12" fill="#073A35"/><rect x="196" y="346" width="72" height="48" rx="12" fill="#E4F6F3"/>
+    <text class="hex" x="28" y="426">00A991</text><text class="hex" x="112" y="426">073A35</text><text class="hex" x="196" y="426">E4F6F3</text>
+  </g>
+
+  <g transform="translate(56 672)">
+    <rect width="520" height="500" rx="24" fill="#FFF" stroke="#E2E2DF"/>
+    <text class="name" x="28" y="44">Jade</text><text class="hex" x="492" y="43" text-anchor="end">#32A879</text>
+    <rect x="28" y="72" width="176" height="176" rx="30" fill="#32A879"/><use href="#symbol" fill="#FFF" transform="translate(52.7 91.9) scale(.485)"/>
+    <use href="#symbol" fill="#32A879" transform="translate(239 91) scale(.17)"/><text class="word" x="296" y="145">Datan</text>
+    <text class="note" x="28" y="286">Natural · sereno · legible</text>
+    <rect x="28" y="320" width="464" height="1" fill="#E8E8E6"/>
+    <rect x="28" y="346" width="72" height="48" rx="12" fill="#32A879"/><rect x="112" y="346" width="72" height="48" rx="12" fill="#17392B"/><rect x="196" y="346" width="72" height="48" rx="12" fill="#EAF6F0"/>
+    <text class="hex" x="28" y="426">32A879</text><text class="hex" x="112" y="426">17392B</text><text class="hex" x="196" y="426">EAF6F0</text>
+  </g>
+  <g transform="translate(620 672)">
+    <rect width="520" height="500" rx="24" fill="#FFF" stroke="#E2E2DF"/>
+    <text class="name" x="28" y="44">Mandarina</text><text class="hex" x="492" y="43" text-anchor="end">#E9893A</text>
+    <rect x="28" y="72" width="176" height="176" rx="30" fill="#E9893A"/><use href="#symbol" fill="#FFF" transform="translate(52.7 91.9) scale(.485)"/>
+    <use href="#symbol" fill="#E9893A" transform="translate(239 91) scale(.17)"/><text class="word" x="296" y="145">Datan</text>
+    <text class="note" x="28" y="286">Cálido · activo · accesible</text>
+    <rect x="28" y="320" width="464" height="1" fill="#E8E8E6"/>
+    <rect x="28" y="346" width="72" height="48" rx="12" fill="#E9893A"/><rect x="112" y="346" width="72" height="48" rx="12" fill="#482812"/><rect x="196" y="346" width="72" height="48" rx="12" fill="#FCF0E5"/>
+    <text class="hex" x="28" y="426">E9893A</text><text class="hex" x="112" y="426">482812</text><text class="hex" x="196" y="426">FCF0E5</text>
+  </g>
+  <g transform="translate(1184 672)">
+    <rect width="520" height="500" rx="24" fill="#FFF" stroke="#E2E2DF"/>
+    <text class="name" x="28" y="44">Rojo mineral</text><text class="hex" x="492" y="43" text-anchor="end">#D95F50</text>
+    <rect x="28" y="72" width="176" height="176" rx="30" fill="#D95F50"/><use href="#symbol" fill="#FFF" transform="translate(52.7 91.9) scale(.485)"/>
+    <use href="#symbol" fill="#D95F50" transform="translate(239 91) scale(.17)"/><text class="word" x="296" y="145">Datan</text>
+    <text class="note" x="28" y="286">Firme · cálido · memorable</text>
+    <rect x="28" y="320" width="464" height="1" fill="#E8E8E6"/>
+    <rect x="28" y="346" width="72" height="48" rx="12" fill="#D95F50"/><rect x="112" y="346" width="72" height="48" rx="12" fill="#451F1C"/><rect x="196" y="346" width="72" height="48" rx="12" fill="#FBEDEA"/>
+    <text class="hex" x="28" y="426">D95F50</text><text class="hex" x="112" y="426">451F1C</text><text class="hex" x="196" y="426">FBEDEA</text>
+  </g>
+</svg>

@@ -75,9 +75,7 @@ fn source() -> MemorySource {
         .with_column(
             FACT_QTY,
             IntColumn {
-                values: vec![
-                    Some(10), Some(20), Some(30), Some(40), Some(50), Some(60),
-                ],
+                values: vec![Some(10), Some(20), Some(30), Some(40), Some(50), Some(60)],
             },
         )
         .with_column(
@@ -144,8 +142,8 @@ fn run(expression: &str, filters: &FilterContext) -> (Vec<(String, Scalar)>, boo
 
 #[test]
 fn sin_modificadores_el_filtro_sigue_aplicando() {
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, needs_interpreter) = run("[Qty]", &filters);
     // Productos 1 y 3: 10 + 30 = 40.
     assert_eq!(values[0].1, Scalar::Integer(40));
@@ -154,11 +152,14 @@ fn sin_modificadores_el_filtro_sigue_aplicando() {
 
 #[test]
 fn all_de_la_dimension_quita_el_filtro() {
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, needs_interpreter) = run("CALCULATE([Qty], ALL('dim_product'))", &filters);
 
-    assert!(needs_interpreter, "un CALCULATE con modificadores cae al interprete");
+    assert!(
+        needs_interpreter,
+        "un CALCULATE con modificadores cae al interprete"
+    );
     // El filtro de la dimension desaparece: 210 es el total.
     assert_eq!(
         values[0].1,
@@ -169,8 +170,8 @@ fn all_de_la_dimension_quita_el_filtro() {
 
 #[test]
 fn all_sin_argumento_quita_todos_los_filtros() {
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, _) = run("CALCULATE([Qty], ALL())", &filters);
     assert_eq!(values[0].1, Scalar::Integer(210));
 }
@@ -226,11 +227,15 @@ fn removefilters_quita_la_tabla_pero_no_lo_que_ya_llego_a_los_hechos() {
     // Con un filtro puesto en la dimension, `REMOVEFILTERS` no lo quita: el semijoin ya
     // esta escrito sobre `fact_sales`. Este test fija esa diferencia para que nadie la
     // "arregle" al revés.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
 
     let (all, _) = run("CALCULATE([Qty], ALL('dim_product'))", &filters);
-    assert_eq!(all[0].1, Scalar::Integer(210), "ALL quita tambien lo propagado");
+    assert_eq!(
+        all[0].1,
+        Scalar::Integer(210),
+        "ALL quita tambien lo propagado"
+    );
 
     let (remove, _) = run("CALCULATE([Qty], REMOVEFILTERS('dim_product'))", &filters);
     assert_eq!(
@@ -243,8 +248,8 @@ fn removefilters_quita_la_tabla_pero_no_lo_que_ya_llego_a_los_hechos() {
 #[test]
 fn un_filtro_directo_dentro_de_calculate_aprieta() {
     // Un booleano como modificador anade un filtro. `Norte` Y `Norte` es lo mismo.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, _) = run(
         "CALCULATE([Qty], 'dim_product'[region] = \"Norte\")",
         &filters,
@@ -255,8 +260,8 @@ fn un_filtro_directo_dentro_de_calculate_aprieta() {
 #[test]
 fn un_filtro_contradictorio_da_blank() {
     // `Norte` en el contexto y `Sur` como modificador. Contradiccion: BLANK.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, _) = run(
         "CALCULATE([Qty], 'dim_product'[region] = \"Sur\")",
         &filters,
@@ -293,8 +298,8 @@ fn allexcept_conserva_las_columnas_marcadas() {
 fn dos_modificadores_se_aplican_en_orden() {
     // `ALL(Dim Product)` quita el filtro de region, y luego el booleano pone `Sur`. El
     // orden importa: al reves, el `ALL` se llevaria por delante el filtro nuevo.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, _) = run(
         "CALCULATE([Qty], ALL('dim_product'), 'dim_product'[region] = \"Sur\")",
         &filters,
@@ -306,8 +311,8 @@ fn dos_modificadores_se_aplican_en_orden() {
 fn calculate_atravesa_una_referencia_a_otra_medida() {
     // `Revenue` es `[Qty]`. `CALCULATE([Revenue], ALL(...))` tiene que llegar a la suma
     // que hay dentro de `Qty`, no quedarse en la referencia.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let (values, _) = run("CALCULATE([Revenue], ALL('dim_product'))", &filters);
     assert_eq!(values[0].1, Scalar::Integer(210));
 }
@@ -317,8 +322,8 @@ fn un_modificador_desconocido_no_se_pierde_en_silencio() {
     // Si un modificador no se sabe interpretar, el atomo cae al interprete y el error se
     // reporta. Perder el filtro en silencio daria numeros incorrectos sin avisar.
     let model = model();
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
     let result = extract_atoms(
         "CALCULATE([Qty], UNA_FUNCION_QUE_NO_EXISTE('dim_product'))",
         &model,

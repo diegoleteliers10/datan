@@ -84,10 +84,7 @@ fn probe_pushdown_directo(url: &str) {
     let started = Instant::now();
     match engine.query_arrow(grande) {
         Ok(batches) => {
-            println!(
-                "\n   10M de filas agregadas: {:?}",
-                started.elapsed()
-            );
+            println!("\n   10M de filas agregadas: {:?}", started.elapsed());
             let n: usize = batches.iter().map(|b| b.num_rows()).sum();
             println!("   {n} fila de resultado");
         }
@@ -97,7 +94,6 @@ fn probe_pushdown_directo(url: &str) {
     println!("\n   Si la agregacion de 10M tarda lo mismo que COUNT(*) sobre la tabla,");
     println!("   las filas viajan todas y no hay pushdown de agregacion.");
 }
-
 
 /// La forma real de BI: un GROUP BY con join a una dimension.
 ///
@@ -181,7 +177,11 @@ fn scan_node(plan: &str) -> String {
     for line in plan.lines() {
         let upper = line.to_uppercase();
         if upper.contains("_SCAN") {
-            return line.trim().trim_matches(|c: char| c == '│' || c == '┌' || c == '┐' || c == '└' || c == '┘').trim().to_string();
+            return line
+                .trim()
+                .trim_matches(|c: char| c == '│' || c == '┌' || c == '┐' || c == '└' || c == '┘')
+                .trim()
+                .to_string();
         }
     }
     "ninguno".to_string()
@@ -227,7 +227,10 @@ fn list_tables(url: &str) {
          ORDER BY 1 LIMIT 40",
     ) {
         Ok(batches) => {
-            println!("   {} tablas", batches.iter().map(|b| b.num_rows()).sum::<usize>());
+            println!(
+                "   {} tablas",
+                batches.iter().map(|b| b.num_rows()).sum::<usize>()
+            );
             println!("   {}", datan_storage::text_of_first_column(&batches));
         }
         Err(error) => {
@@ -274,7 +277,10 @@ fn probe_real_postgres(url: &str, qualified_table: &str) {
 
     // En DuckDB las tablas de un attach se califican con el alias: `src.sales.dim_product`.
     let qualified = format!("src.{qualified_table}");
-    let table = qualified_table.rsplit('.').next().unwrap_or(qualified_table);
+    let table = qualified_table
+        .rsplit('.')
+        .next()
+        .unwrap_or(qualified_table);
 
     // La columna de la agregacion se descubre, no se adivina. Una base real no tiene por
     // que llamarse `a`.
@@ -316,7 +322,8 @@ fn probe_real_postgres(url: &str, qualified_table: &str) {
             println!("\n   PLAN:");
             for line in plan.lines() {
                 let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('│') || trimmed.contains(|c: char| c.is_ascii_alphabetic() && c.is_uppercase())
+                if !trimmed.is_empty() && !trimmed.starts_with('│')
+                    || trimmed.contains(|c: char| c.is_ascii_alphabetic() && c.is_uppercase())
                 {
                     println!("   {trimmed}");
                 }
@@ -331,7 +338,8 @@ fn probe_real_postgres(url: &str, qualified_table: &str) {
     }
 
     println!("\n3. Cache local: lo mismo, pero sobre datos ya copiados");
-    if let Err(error) = engine.execute(&format!("CREATE TABLE cached AS SELECT * FROM {qualified}")) {
+    if let Err(error) = engine.execute(&format!("CREATE TABLE cached AS SELECT * FROM {qualified}"))
+    {
         println!("   FALLA al copiar: {error}");
         return;
     }

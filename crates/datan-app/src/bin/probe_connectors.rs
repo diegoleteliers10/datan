@@ -50,5 +50,7 @@ fn main() {
     println!("\nConclusiones sobre la lectura de datos:");
     println!("  - DuckDB lee Parquet y CSV con las features bundled, sin descarga.");
     println!("  - Postgres pasa por un cliente Rust aparte y COPY a DuckDB.");
-    println!("  - El pushdown de Postgres no es posible con crates.io. Ver seccion 2.1 de PLAN.md.");
+    println!(
+        "  - El pushdown de Postgres no es posible con crates.io. Ver seccion 2.1 de PLAN.md."
+    );
 }

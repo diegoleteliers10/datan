@@ -24,14 +24,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::atom::{Atom, AtomKind, MeasureOutput, Shape};
-use crate::{BinaryOp, CheckedExpr, UnaryOp};
 use crate::filter::{FilterContext, FilterSource};
+use crate::{BinaryOp, CheckedExpr, UnaryOp};
 
 /// Un valor escalar de DAX.
 ///
 /// `Blank` NO es `null`. En DAX, `BLANK()` es igual a `0`, es igual a la cadena vacia, y
-/// `DISTINCTCOUNT` lo ignora mientras que `COUNTBLANK` lo cuenta. Confundirlo con `null`
-/// cambia numeros.
+/// `DISTINCTCOUNT` cuenta `BLANK` una vez. Confundirlo con `null` cambia numeros.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scalar {
     Blank,
@@ -87,7 +86,7 @@ pub trait ColumnView: Send + Sync {
     fn value_at(&self, row: usize) -> Scalar;
     /// Cuantas filas NO son blank.
     fn non_blank_count(&self) -> usize;
-    /// Cuantos valores distintos, ignorando los blank. Es lo que necesita `DISTINCTCOUNT`.
+    /// Cuantos valores distintos, incluido un unico blank cuando existe.
     fn distinct_count(&self) -> usize;
 }
 
@@ -208,12 +207,7 @@ impl ColumnView for CalculatedColumn {
     }
 
     fn distinct_count(&self) -> usize {
-        let distinct: BTreeSet<String> = self
-            .values
-            .iter()
-            .filter(|value| !value.is_blank())
-            .map(scalar_key)
-            .collect();
+        let distinct: BTreeSet<String> = self.values.iter().map(scalar_key).collect();
         distinct.len()
     }
 }
@@ -362,9 +356,7 @@ fn call_scalar(name: &str, args: &[Scalar]) -> Scalar {
         ("YEAR", [Scalar::Date(day)]) => Scalar::Integer(crate::time::year_of(*day) as i64),
         ("MONTH", [Scalar::Date(day)]) => Scalar::Integer(crate::time::month_of(*day) as i64),
         ("DAY", [Scalar::Date(day)]) => Scalar::Integer(crate::time::day_of(*day) as i64),
-        ("QUARTER", [Scalar::Date(day)]) => {
-            Scalar::Integer(crate::time::quarter_of(*day) as i64)
-        }
+        ("QUARTER", [Scalar::Date(day)]) => Scalar::Integer(crate::time::quarter_of(*day) as i64),
         ("IF", [condition, yes, no]) => {
             if truthy(condition) {
                 yes.clone()
@@ -508,6 +500,8 @@ pub enum InterpError {
     MissingColumn(ObjectId),
     #[error("un atomo de este tipo no se puede interpretar")]
     Unsupported(String),
+    #[error("{function} necesita al menos dos valores no vacíos")]
+    InsufficientValues { function: &'static str },
     #[error("el origen no tiene la tabla {0}")]
     MissingTable(ObjectId),
     #[error("la tabla {0} no tiene camino de join desde la tabla del hecho")]
@@ -655,7 +649,9 @@ impl<'a> Interpreter<'a> {
                         continue;
                     }
                     best = Some(match best {
-                        Some(current) if current.compare(&value) != std::cmp::Ordering::Greater => current,
+                        Some(current) if current.compare(&value) != std::cmp::Ordering::Greater => {
+                            current
+                        }
                         _ => value,
                     });
                 }
@@ -669,7 +665,9 @@ impl<'a> Interpreter<'a> {
                         continue;
                     }
                     best = Some(match best {
-                        Some(current) if current.compare(&value) != std::cmp::Ordering::Less => current,
+                        Some(current) if current.compare(&value) != std::cmp::Ordering::Less => {
+                            current
+                        }
                         _ => value,
                     });
                 }
@@ -693,17 +691,25 @@ impl<'a> Interpreter<'a> {
                 }
             }
             AtomKind::DistinctCount => {
+                if rows.is_empty() {
+                    return Ok(Scalar::Blank);
+                }
                 let mut distinct: BTreeSet<String> = BTreeSet::new();
                 for row in &rows {
                     let value = column.value_at(*row);
-                    if value.is_blank() {
-                        // `DISTINCTCOUNT` ignora los BLANK. Es la diferencia entre esto y
-                        // un COUNT(DISTINCT) de SQL.
-                        continue;
-                    }
                     distinct.insert(scalar_key(&value));
                 }
                 Scalar::Integer(distinct.len() as i64)
+            }
+            AtomKind::Median | AtomKind::Variance | AtomKind::StandardDeviation => {
+                let values = rows
+                    .iter()
+                    .filter_map(|row| {
+                        let value = column.value_at(*row);
+                        (!value.is_blank()).then(|| value.as_number())
+                    })
+                    .collect();
+                statistical_aggregate(atom.kind, values)?
             }
             AtomKind::Expression => {
                 return Err(InterpError::Unsupported(atom.label.clone()));
@@ -726,9 +732,10 @@ impl<'a> Interpreter<'a> {
             .iter()
             .filter_map(|column| self.model.column(*column).map(|(table, _)| table.id))
             .find(|table| {
-                self.model.tables.iter().any(|t| {
-                    matches!(t.kind, datan_model::TableKind::Facts) && t.id == *table
-                })
+                self.model
+                    .tables
+                    .iter()
+                    .any(|t| matches!(t.kind, datan_model::TableKind::Facts) && t.id == *table)
             })
             .or_else(|| self.model.column(columns[0]).map(|(t, _)| t.id))
     }
@@ -750,6 +757,7 @@ impl<'a> Interpreter<'a> {
 
         let mut total = 0.0;
         let mut non_blank = 0usize;
+        let mut numbers = Vec::new();
         // `MIN` y `MAX` comparan el valor, no su numero: sobre texto el orden de `Scalar` no
         // es el de la cadena y sobre booleanos no hay orden numerico.
         let mut best: Option<Scalar> = None;
@@ -761,6 +769,7 @@ impl<'a> Interpreter<'a> {
             }
             total += value.as_number();
             non_blank += 1;
+            numbers.push(value.as_number());
             match kind {
                 AtomKind::Min => {
                     best = Some(match best {
@@ -801,9 +810,14 @@ impl<'a> Interpreter<'a> {
                 }
             }
             AtomKind::Min | AtomKind::Max => best.unwrap_or(Scalar::Blank),
+            AtomKind::Median | AtomKind::Variance | AtomKind::StandardDeviation => {
+                return statistical_aggregate(kind, numbers);
+            }
             // `COUNTROWS` se resuelve antes de llegar aqui: no tiene expresion.
             AtomKind::CountRows | AtomKind::DistinctCount => {
-                return Err(InterpError::Unsupported("agregacion sobre expresion".to_string()));
+                return Err(InterpError::Unsupported(
+                    "agregacion sobre expresion".to_string(),
+                ));
             }
         })
     }
@@ -871,17 +885,13 @@ impl<'a> Interpreter<'a> {
                 current_rows = next;
             }
 
-            resolved.extend(
-                current_rows
-                    .iter()
-                    .map(|row| {
-                        if *row == usize::MAX {
-                            Scalar::Blank
-                        } else {
-                            source_view.value_at(*row)
-                        }
-                    }),
-            );
+            resolved.extend(current_rows.iter().map(|row| {
+                if *row == usize::MAX {
+                    Scalar::Blank
+                } else {
+                    source_view.value_at(*row)
+                }
+            }));
             out.insert(column, resolved);
         }
 
@@ -928,10 +938,9 @@ impl<'a> Interpreter<'a> {
         row: usize,
     ) -> Result<Scalar, InterpError> {
         Ok(match expression {
-            CheckedExpr::Column { column, .. } => values
-                .get(*column, row)
-                .cloned()
-                .unwrap_or(Scalar::Blank),
+            CheckedExpr::Column { column, .. } => {
+                values.get(*column, row).cloned().unwrap_or(Scalar::Blank)
+            }
             CheckedExpr::Number { value, .. } => Scalar::Decimal(*value),
             CheckedExpr::Text { value, .. } => Scalar::Text(value.clone()),
             CheckedExpr::Boolean { value, .. } => Scalar::Boolean(*value),
@@ -947,7 +956,9 @@ impl<'a> Interpreter<'a> {
                     UnaryOp::Not => Scalar::Boolean(inner.as_number() == 0.0),
                 }
             }
-            CheckedExpr::Binary { op, left, right, .. } => {
+            CheckedExpr::Binary {
+                op, left, right, ..
+            } => {
                 let left = self.eval_with(left, values, row)?;
                 let right = self.eval_with(right, values, row)?;
                 if is_boolean_op(*op) {
@@ -1019,7 +1030,10 @@ impl<'a> Interpreter<'a> {
 
         let combinations = values_per_column.iter().map(|v| v.len()).product::<usize>();
         if combinations > max_cells {
-            return Err(InterpError::TooManyCells { cells: combinations, max: max_cells });
+            return Err(InterpError::TooManyCells {
+                cells: combinations,
+                max: max_cells,
+            });
         }
 
         let mut rows = Vec::new();
@@ -1038,10 +1052,8 @@ impl<'a> Interpreter<'a> {
             let mut cell_context = context.clone();
             for (column, key) in grouping.iter().zip(&keys) {
                 if let Some(key) = key {
-                    cell_context = cell_context.with_equal(
-                        *column,
-                        crate::filter::FilterValue::from_scalar(key),
-                    );
+                    cell_context = cell_context
+                        .with_equal(*column, crate::filter::FilterValue::from_scalar(key));
                 }
             }
 
@@ -1086,7 +1098,10 @@ impl<'a> Interpreter<'a> {
         }
 
         rows.sort_by(|left, right| compare_rows(left, right, grouping.len()));
-        Ok(GroupedResult { rows, width: grouping.len() })
+        Ok(GroupedResult {
+            rows,
+            width: grouping.len(),
+        })
     }
 
     /// Calcula el valor de una forma a partir de los valores de sus hojas.
@@ -1116,7 +1131,10 @@ impl<'a> Interpreter<'a> {
             // toma la rama falsa, y `DIVIDE` con denominador cero da BLANK, igual que la
             // division binaria: los dos caminos tienen que decir lo mismo.
             Shape::Call { name, args } => {
-                let args: Vec<Scalar> = args.iter().map(|arg| self.eval_shape(arg, values)).collect();
+                let args: Vec<Scalar> = args
+                    .iter()
+                    .map(|arg| self.eval_shape(arg, values))
+                    .collect();
                 call_scalar(name, &args)
             }
         }
@@ -1199,7 +1217,7 @@ impl<'a> Interpreter<'a> {
     /// El orden es por representacion textual, no por hash: el fast path devuelve las filas
     /// ordenadas por el `GROUP BY` de SQL y las dos listas tienen que poder compararse. Un
     /// orden distinto aqui haria divergir el arnes sin que el motor este mal.
-    fn distinct_values(&self, column: ObjectId) -> Result<Vec<Option<Scalar>>, InterpError> {
+    pub fn distinct_values(&self, column: ObjectId) -> Result<Vec<Option<Scalar>>, InterpError> {
         let view = self
             .source
             .column(column)
@@ -1244,8 +1262,10 @@ impl<'a> Interpreter<'a> {
                 keys.insert(key, order_key(&sort_value));
             }
         }
-        let mut out: Vec<Option<Scalar>> =
-            distinct.iter().filter_map(|k| order.get(k).cloned()).collect();
+        let mut out: Vec<Option<Scalar>> = distinct
+            .iter()
+            .filter_map(|k| order.get(k).cloned())
+            .collect();
         out.sort_by(|a, b| {
             let ka = keys.get(&scalar_key(a.as_ref().unwrap()));
             let kb = keys.get(&scalar_key(b.as_ref().unwrap()));
@@ -1331,7 +1351,11 @@ impl<'a> Interpreter<'a> {
             let Some(view) = self.source.column(column.id) else {
                 continue;
             };
-            rows.retain(|row| filters.iter().all(|filter| self.matches(view.as_ref(), *row, filter)));
+            rows.retain(|row| {
+                filters
+                    .iter()
+                    .all(|filter| self.matches(view.as_ref(), *row, filter))
+            });
         }
         rows
     }
@@ -1342,27 +1366,25 @@ impl<'a> Interpreter<'a> {
 
         match &filter.source {
             FilterSource::Concrete(values) => match filter.operator {
-                FilterOperator::In => {
-                    values.iter().any(|value| values_match(&actual, value))
-                }
-                FilterOperator::Equal => {
-                    values.first().is_some_and(|value| values_match(&actual, value))
-                }
-                FilterOperator::NotEqual => {
-                    values.first().is_none_or(|value| !values_match(&actual, value))
-                }
-                FilterOperator::Less => {
-                    values.first().is_some_and(|value| actual.compare(&to_scalar(value)) == std::cmp::Ordering::Less)
-                }
-                FilterOperator::LessOrEqual => {
-                    values.first().is_some_and(|value| actual.compare(&to_scalar(value)) != std::cmp::Ordering::Greater)
-                }
-                FilterOperator::Greater => {
-                    values.first().is_some_and(|value| actual.compare(&to_scalar(value)) == std::cmp::Ordering::Greater)
-                }
-                FilterOperator::GreaterOrEqual => {
-                    values.first().is_some_and(|value| actual.compare(&to_scalar(value)) != std::cmp::Ordering::Less)
-                }
+                FilterOperator::In => values.iter().any(|value| values_match(&actual, value)),
+                FilterOperator::Equal => values
+                    .first()
+                    .is_some_and(|value| values_match(&actual, value)),
+                FilterOperator::NotEqual => values
+                    .first()
+                    .is_none_or(|value| !values_match(&actual, value)),
+                FilterOperator::Less => values.first().is_some_and(|value| {
+                    actual.compare(&to_scalar(value)) == std::cmp::Ordering::Less
+                }),
+                FilterOperator::LessOrEqual => values.first().is_some_and(|value| {
+                    actual.compare(&to_scalar(value)) != std::cmp::Ordering::Greater
+                }),
+                FilterOperator::Greater => values.first().is_some_and(|value| {
+                    actual.compare(&to_scalar(value)) == std::cmp::Ordering::Greater
+                }),
+                FilterOperator::GreaterOrEqual => values.first().is_some_and(|value| {
+                    actual.compare(&to_scalar(value)) != std::cmp::Ordering::Less
+                }),
             },
 
             // Una semijoin: la fila entra si su clave esta en el conjunto que sale de
@@ -1392,6 +1414,48 @@ fn number_to_scalar(value: f64) -> Scalar {
     } else {
         Scalar::Decimal(value)
     }
+}
+
+fn statistical_aggregate(
+    kind: crate::atom::AtomKind,
+    mut values: Vec<f64>,
+) -> Result<Scalar, InterpError> {
+    use crate::atom::AtomKind;
+
+    if kind == AtomKind::Median {
+        if values.is_empty() {
+            return Ok(Scalar::Blank);
+        }
+        values.sort_by(f64::total_cmp);
+        let middle = values.len() / 2;
+        let median = if values.len().is_multiple_of(2) {
+            (values[middle - 1] + values[middle]) / 2.0
+        } else {
+            values[middle]
+        };
+        return Ok(number_to_scalar(median));
+    }
+
+    if values.len() < 2 {
+        let function = match kind {
+            AtomKind::Variance => "VAR.S",
+            AtomKind::StandardDeviation => "STDEV.S",
+            _ => return Err(InterpError::Unsupported(format!("{kind:?}"))),
+        };
+        return Err(InterpError::InsufficientValues { function });
+    }
+
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let sum_squares = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>();
+    let variance = sum_squares / (values.len() - 1) as f64;
+    Ok(number_to_scalar(match kind {
+        AtomKind::Variance => variance,
+        AtomKind::StandardDeviation => variance.sqrt(),
+        _ => return Err(InterpError::Unsupported(format!("{kind:?}"))),
+    }))
 }
 
 fn to_scalar(value: &crate::filter::FilterValue) -> Scalar {
@@ -1428,7 +1492,7 @@ fn values_match(actual: &Scalar, expected: &crate::filter::FilterValue) -> bool 
     }
 }
 
-/// Una clave estable para deduplicar. Los blank no llegan aqui: `DISTINCTCOUNT` los ignora.
+/// Una clave estable para deduplicar valores, incluido `BLANK`.
 fn scalar_key(value: &Scalar) -> String {
     match value {
         Scalar::Blank => "blank".to_string(),
@@ -1479,7 +1543,7 @@ impl ColumnView for IntColumn {
 
     fn distinct_count(&self) -> usize {
         let distinct: BTreeSet<i64> = self.values.iter().flatten().copied().collect();
-        distinct.len()
+        distinct.len() + usize::from(self.values.iter().any(Option::is_none))
     }
 }
 
@@ -1510,7 +1574,7 @@ impl ColumnView for DateColumn {
 
     fn distinct_count(&self) -> usize {
         let distinct: BTreeSet<i32> = self.values.iter().flatten().copied().collect();
-        distinct.len()
+        distinct.len() + usize::from(self.values.iter().any(Option::is_none))
     }
 }
 
@@ -1537,7 +1601,7 @@ impl ColumnView for TextColumn {
 
     fn distinct_count(&self) -> usize {
         let distinct: BTreeSet<&String> = self.values.iter().flatten().collect();
-        distinct.len()
+        distinct.len() + usize::from(self.values.iter().any(Option::is_none))
     }
 }
 

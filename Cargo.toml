@@ -12,6 +12,10 @@ members = [
     "crates/datan-connect",
     "crates/datan-report",
 ]
+exclude = ["vendor/gpui-component"]
+
+[patch.crates-io]
+gpui-component = { path = "vendor/gpui-component" }
 
 [workspace.package]
 version = "0.1.0"

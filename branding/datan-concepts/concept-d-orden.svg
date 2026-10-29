@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Datan concept D: orden</title>
+  <g fill="#111111">
+    <circle cx="38" cy="70" r="10"/><circle cx="70" cy="52" r="7"/><circle cx="45" cy="112" r="7"/>
+    <circle cx="72" cy="139" r="10"/><circle cx="37" cy="177" r="7"/><circle cx="68" cy="204" r="8"/>
+    <path d="M116 88h24v24h-24zM148 88h24v24h-24zM180 88h24v24h-24z"/>
+    <path d="M116 120h24v24h-24zM148 120h24v24h-24zM180 120h24v24h-24z"/>
+    <path d="M116 152h24v24h-24zM148 152h24v24h-24zM180 152h24v24h-24z"/>
+  </g>
+</svg>

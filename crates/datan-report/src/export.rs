@@ -14,7 +14,11 @@
 //! PDF entero es dependencia que no hace falta. Horizontal cuando la tabla no cabe vertical.
 
 use crate::Matrix;
-use std::path::Path;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 /// Un error de exportacion.
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +66,47 @@ pub fn ruta_de_export(base: &Path, nombre: &str, dia: &str, extension: &str) -> 
     base.join(format!("{}-{}.{}", slug(nombre), slug(dia), extension))
 }
 
+/// Escribe el archivo en la primera ruta libre y conserva cualquier exportacion anterior.
+pub fn write_unique(path: &Path, bytes: &[u8]) -> Result<PathBuf, ExportError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().unwrap_or_default();
+    let stem = path.file_stem().unwrap_or(file_name).to_string_lossy();
+    let extension = path
+        .extension()
+        .map(|value| format!(".{}", value.to_string_lossy()))
+        .unwrap_or_default();
+    let mut suffix = 1_u64;
+
+    loop {
+        let candidate = if suffix == 1 {
+            path.to_path_buf()
+        } else {
+            parent.join(format!("{stem} ({suffix}){extension}"))
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(error.into());
+                }
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let Some(next_suffix) = suffix.checked_add(1) else {
+                    return Err(std::io::Error::other("no quedan nombres de exportacion").into());
+                };
+                suffix = next_suffix;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 /// El informe en CSV, con las cabeceras en la primera linea.
 pub fn csv(matrix: &Matrix) -> String {
     let mut out = String::new();
@@ -79,7 +124,9 @@ pub fn csv(matrix: &Matrix) -> String {
             if column > 0 {
                 out.push(',');
             }
-            out.push_str(&campo_csv(matrix.cell(row, column).unwrap_or("").to_string()));
+            out.push_str(&campo_csv(
+                matrix.cell(row, column).unwrap_or("").to_string(),
+            ));
         }
         out.push('\n');
     }
@@ -111,7 +158,10 @@ pub fn xlsx(matrix: &Matrix, nombre: &str) -> Result<Vec<u8>, ExportError> {
     let hoja = if hoja.is_empty() { "informe" } else { &hoja };
 
     let mut book = rust_xlsxwriter::Workbook::new();
-    let sheet = book.add_worksheet().set_name(hoja).map_err(|e| ExportError::Xlsx(e.to_string()))?;
+    let sheet = book
+        .add_worksheet()
+        .set_name(hoja)
+        .map_err(|e| ExportError::Xlsx(e.to_string()))?;
 
     let negrita = rust_xlsxwriter::Format::new().set_bold();
     for column in 0..matrix.width() {
@@ -159,7 +209,8 @@ pub fn xlsx(matrix: &Matrix, nombre: &str) -> Result<Vec<u8>, ExportError> {
         if ancho < 8 {
             ancho = 8;
         }
-        sheet.set_column_width(column as u16, ancho as f64 + 2.0)
+        sheet
+            .set_column_width(column as u16, ancho as f64 + 2.0)
             .map_err(|e| ExportError::Xlsx(e.to_string()))?;
     }
 
@@ -174,7 +225,11 @@ pub fn xlsx(matrix: &Matrix, nombre: &str) -> Result<Vec<u8>, ExportError> {
 /// tabla no cabe vertical.
 pub fn pdf(matrix: &Matrix, titulo: &str) -> Vec<u8> {
     let horizontal = matrix.width() > 6;
-    let (page_w, page_h): (f64, f64) = if horizontal { (842.0, 595.0) } else { (595.0, 842.0) };
+    let (page_w, page_h): (f64, f64) = if horizontal {
+        (842.0, 595.0)
+    } else {
+        (595.0, 842.0)
+    };
     let margen = 36.0;
     let ancho_util = page_w - 2.0 * margen;
     let columnas = matrix.width().max(1) as f64;
@@ -182,7 +237,9 @@ pub fn pdf(matrix: &Matrix, titulo: &str) -> Vec<u8> {
     // Courier: 0.6 de la altura de la fuente por caracter.
     let fuente = 7.5;
     let por_caracter = fuente * 0.6;
-    let caracteres = ((ancho_columna / por_caracter) as usize).saturating_sub(2).max(3);
+    let caracteres = ((ancho_columna / por_caracter) as usize)
+        .saturating_sub(2)
+        .max(3);
     let renglon = 11.0;
     let alto_tabla = page_h - 2.0 * margen - 46.0;
     let filas_por_pagina = ((alto_tabla / renglon) as usize).max(1);
@@ -209,13 +266,7 @@ pub fn pdf(matrix: &Matrix, titulo: &str) -> Vec<u8> {
         let mut page = String::new();
         let mut y = page_h - margen - 16.0;
         if first {
-            page.push_str(&texto(
-                "Helvetica-Bold",
-                13.0,
-                margen,
-                y,
-                &latin1(titulo),
-            ));
+            page.push_str(&texto("Helvetica-Bold", 13.0, margen, y, &latin1(titulo)));
             page.push_str(&texto(
                 "Helvetica",
                 8.0,
@@ -255,7 +306,11 @@ pub fn pdf(matrix: &Matrix, titulo: &str) -> Vec<u8> {
             for (column, _) in fila.iter().enumerate().skip(1) {
                 let x = margen + ancho_columna * column as f64;
                 page.push_str(&texto(
-                    if es_cabecera { "Courier-Bold" } else { "Courier" },
+                    if es_cabecera {
+                        "Courier-Bold"
+                    } else {
+                        "Courier"
+                    },
                     fuente,
                     x,
                     y,
@@ -283,7 +338,9 @@ fn celda(fila: &[String], column: usize, caracteres: usize) -> String {
     fila.get(column)
         .map(|c| {
             if c.chars().count() > caracteres {
-                c.chars().take(caracteres.saturating_sub(1)).collect::<String>()
+                c.chars()
+                    .take(caracteres.saturating_sub(1))
+                    .collect::<String>()
                     + "\u{2026}"
             } else {
                 c.clone()
@@ -332,9 +389,7 @@ fn ensamblar_pdf(paginas: &[String], page_w: f64, page_h: f64) -> Vec<u8> {
     let mut objetos: Vec<String> = Vec::with_capacity(5 + count * 2);
 
     objetos.push("<< /Type /Catalog /Pages 2 0 R >>".to_string());
-    let hijos: Vec<String> = (0..count)
-        .map(|p| format!("{} 0 R", 5 + p * 2))
-        .collect();
+    let hijos: Vec<String> = (0..count).map(|p| format!("{} 0 R", 5 + p * 2)).collect();
     objetos.push(format!(
         "<< /Type /Pages /Count {count} /Kids [{}] >>",
         hijos.join(" ")
@@ -347,9 +402,7 @@ fn ensamblar_pdf(paginas: &[String], page_w: f64, page_h: f64) -> Vec<u8> {
         "<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>"
             .to_string(),
     );
-    objetos.push(
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>".to_string(),
-    );
+    objetos.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>".to_string());
     // Helvetica regular, para la linea de contexto.
     objetos.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string());
     for pagina in paginas {
@@ -357,7 +410,11 @@ fn ensamblar_pdf(paginas: &[String], page_w: f64, page_h: f64) -> Vec<u8> {
         objetos.push(format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w} {page_h}] /Resources << /Font << /Courier 3 0 R /Courier-Bold 4 0 R /Helvetica-Bold 5 0 R /Helvetica 6 0 R >> >> /Contents {indice} 0 R >>"
         ));
-        objetos.push(format!("<< /Length {} >>\nstream\n{}\nendstream", pagina.len(), pagina));
+        objetos.push(format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            pagina.len(),
+            pagina
+        ));
     }
 
     let mut out = Vec::new();
@@ -419,8 +476,40 @@ mod tests {
     fn el_csv_lleva_coma_y_comillas_cuando_toca() {
         let texto = csv(&matriz());
         assert!(texto.starts_with("dim_product[region],Qty\n"));
-        assert!(texto.contains("\"Sur,Este\",\n"), "un campo con coma va entre comillas");
+        assert!(
+            texto.contains("\"Sur,Este\",\n"),
+            "un campo con coma va entre comillas"
+        );
         assert!(texto.contains("\"cantidad \"\"rara\"\"\",-1.5\n"));
+    }
+
+    #[test]
+    fn exportar_otro_archivo_conserva_el_anterior() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("reloj posterior a epoch")
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("datan-export-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("carpeta temporal");
+        let path = ruta_de_export(&base, "Ventas", "2026-10-24", "csv");
+        std::fs::write(&path, b"exportacion anterior").expect("archivo anterior");
+
+        let saved = write_unique(&path, b"exportacion nueva").expect("exportacion nueva");
+
+        assert_eq!(
+            saved.file_name().unwrap().to_string_lossy(),
+            "ventas-2026-10-24 (2).csv"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("leer anterior"),
+            b"exportacion anterior"
+        );
+        assert_eq!(
+            std::fs::read(&saved).expect("leer nueva"),
+            b"exportacion nueva"
+        );
+        std::fs::remove_dir_all(base).expect("limpiar carpeta temporal");
     }
 
     #[test]
@@ -488,7 +577,10 @@ mod tests {
 
     #[test]
     fn el_slug_no_deja_nada_que_un_disco_rechace() {
-        assert_eq!(slug("Informe de Regi\u{F3}n Norte"), "informe-de-region-norte");
+        assert_eq!(
+            slug("Informe de Regi\u{F3}n Norte"),
+            "informe-de-region-norte"
+        );
         assert_eq!(slug("a/b\\c:d*e?f\"g[h]"), "a-b-c-d-e-f-g-h");
         assert_eq!(slug("  --x  "), "x");
     }

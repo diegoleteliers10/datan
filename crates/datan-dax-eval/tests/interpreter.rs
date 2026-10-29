@@ -4,8 +4,8 @@
 //! fuente de discrepancias mas comun entre el fast path y el fallback.
 
 use datan_dax_eval::{
-    ColumnView, FilterContext, FilterValue, IntColumn, Interpreter, MemorySource, Scalar,
-    TextColumn, extract_atoms,
+    ColumnView, DateColumn, FilterContext, FilterValue, IntColumn, Interpreter, MemorySource,
+    Scalar, TextColumn, extract_atoms,
 };
 use datan_model::{
     Cardinality, Column, DataType, FilterDirection, Model, ObjectId, Relationship,
@@ -18,6 +18,7 @@ const PRODUCT: ObjectId = ObjectId(2);
 const FACT_QTY: ObjectId = ObjectId(11);
 const FACT_PRODUCT_ID: ObjectId = ObjectId(12);
 const FACT_AMOUNT: ObjectId = ObjectId(13);
+const FACT_DATE: ObjectId = ObjectId(14);
 const PRODUCT_ID: ObjectId = ObjectId(20);
 const PRODUCT_REGION: ObjectId = ObjectId(21);
 
@@ -32,6 +33,7 @@ fn model() -> Model {
                     Column::new(FACT_QTY, "Qty", DataType::Integer),
                     Column::new(FACT_PRODUCT_ID, "ProductId", DataType::Integer),
                     Column::new(FACT_AMOUNT, "Amount", DataType::Moneda),
+                    Column::new(FACT_DATE, "SaleDate", DataType::Date),
                 ],
                 key_columns: vec![],
                 is_date_table: false,
@@ -79,6 +81,12 @@ fn source() -> MemorySource {
             },
         )
         .with_column(
+            FACT_DATE,
+            DateColumn {
+                values: vec![Some(18_000), Some(17_000), None, Some(19_000)],
+            },
+        )
+        .with_column(
             FACT_PRODUCT_ID,
             IntColumn {
                 values: vec![Some(1), Some(2), Some(1), Some(3)],
@@ -104,7 +112,11 @@ fn source() -> MemorySource {
         .with_table_length(PRODUCT, 3)
 }
 
-fn evaluate(expression: &str, filters: &FilterContext, grouping: &[ObjectId]) -> Vec<(String, Scalar)> {
+fn evaluate(
+    expression: &str,
+    filters: &FilterContext,
+    grouping: &[ObjectId],
+) -> Vec<(String, Scalar)> {
     let model = model();
     let atoms = extract_atoms(expression, &model, filters, grouping).expect("extrae");
     let source = source();
@@ -151,20 +163,18 @@ fn count_no_cuenta_blanks_pero_countrows_si() {
 }
 
 #[test]
-fn distinctcount_ignora_los_blanks() {
-    // `DISTINCTCOUNT` sobre una columna con blanks. En SQL, `COUNT(DISTINCT)` tambien los
-    // ignora, asi que este test fija que los dos caminos coinciden.
+fn distinctcount_cuenta_blanks_una_vez() {
     let values = evaluate(
         "DISTINCTCOUNT('Fact Sales'[Qty])",
         &FilterContext::empty(),
         &[PRODUCT_REGION],
     );
-    assert_eq!(values[0].1, Scalar::Integer(3));
+    assert_eq!(values[0].1, Scalar::Integer(4));
 }
 
 #[test]
-fn un_solo_blank_no_cuenta_como_valor_distinto() {
-    // El caso limite: una columna con un unico valor mas un blank. El blank NO suma.
+fn distinctcount_cuenta_un_solo_blank_una_vez() {
+    // El blank cuenta como un valor distinto y los blanks repetidos cuentan una vez.
     let model = model();
     let source = MemorySource::new()
         .with_column(
@@ -186,7 +196,28 @@ fn un_solo_blank_no_cuenta_como_valor_distinto() {
     let result = interpreter
         .evaluate_cell(&atoms.atoms, &FilterContext::empty())
         .expect("interpreta");
-    assert_eq!(result.get(0), Some(&Scalar::Integer(1)));
+    assert_eq!(result.get(0), Some(&Scalar::Integer(2)));
+}
+
+#[test]
+fn distinctcount_sin_filas_devuelve_blank() {
+    let model = model();
+    let source = MemorySource::new()
+        .with_column(FACT_QTY, IntColumn { values: vec![] })
+        .with_table_length(FACT, 0)
+        .with_table_length(PRODUCT, 0);
+    let atoms = extract_atoms(
+        "DISTINCTCOUNT('Fact Sales'[Qty])",
+        &model,
+        &FilterContext::empty(),
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+    let interpreter = Interpreter::new(&model, &source);
+    let result = interpreter
+        .evaluate_cell(&atoms.atoms, &FilterContext::empty())
+        .expect("interpreta");
+    assert_eq!(result.get(0), Some(&Scalar::Blank));
 }
 
 #[test]
@@ -206,6 +237,40 @@ fn min_y_max_ignoran_blanks() {
         &[PRODUCT_REGION],
     );
     assert_eq!(max[0].1, Scalar::Integer(40));
+}
+
+#[test]
+fn first_and_last_text_use_alphabetical_order() {
+    let first = evaluate(
+        "MIN('Dim Product'[Region])",
+        &FilterContext::empty(),
+        &[],
+    );
+    let last = evaluate(
+        "MAX('Dim Product'[Region])",
+        &FilterContext::empty(),
+        &[],
+    );
+
+    assert_eq!(first[0].1, Scalar::Text("Norte".to_string()));
+    assert_eq!(last[0].1, Scalar::Text("Sur".to_string()));
+}
+
+#[test]
+fn earliest_and_latest_date_ignore_blanks_and_use_calendar_order() {
+    let earliest = evaluate(
+        "MIN('Fact Sales'[SaleDate])",
+        &FilterContext::empty(),
+        &[],
+    );
+    let latest = evaluate(
+        "MAX('Fact Sales'[SaleDate])",
+        &FilterContext::empty(),
+        &[],
+    );
+
+    assert_eq!(earliest[0].1, Scalar::Date(17_000));
+    assert_eq!(latest[0].1, Scalar::Date(19_000));
 }
 
 #[test]
@@ -237,11 +302,57 @@ fn average_sin_valores_es_blank_no_cero() {
 }
 
 #[test]
+fn calcula_mediana_varianza_y_desviacion_sobre_valores_no_vacios() {
+    let context = FilterContext::empty();
+    let grouping = [PRODUCT_REGION];
+
+    assert_eq!(
+        evaluate("MEDIAN('Fact Sales'[Qty])", &context, &grouping)[0].1,
+        Scalar::Integer(20)
+    );
+    assert_eq!(
+        evaluate("VAR.S('Fact Sales'[Qty])", &context, &grouping)[0].1,
+        Scalar::Decimal(233.33333333333334)
+    );
+    assert_eq!(
+        evaluate("STDEV.S('Fact Sales'[Qty])", &context, &grouping)[0].1,
+        Scalar::Decimal(233.33333333333334_f64.sqrt())
+    );
+}
+
+#[test]
+fn varianza_de_muestra_requiere_dos_valores_no_vacios() {
+    let model = model();
+    let source = MemorySource::new()
+        .with_column(
+            FACT_QTY,
+            IntColumn {
+                values: vec![Some(10), None],
+            },
+        )
+        .with_table_length(FACT, 2)
+        .with_table_length(PRODUCT, 0);
+    let atoms = extract_atoms(
+        "VAR.S('Fact Sales'[Qty])",
+        &model,
+        &FilterContext::empty(),
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
+    let interpreter = Interpreter::new(&model, &source);
+
+    assert!(matches!(
+        interpreter.evaluate_cell(&atoms.atoms, &FilterContext::empty()),
+        Err(datan_dax_eval::InterpError::InsufficientValues { function: "VAR.S" })
+    ));
+}
+
+#[test]
 fn el_filtro_de_la_dimension_llega_a_los_hechos_por_lineage() {
     // El filtro pone `Region = 'Norte'` en Dim Product. Solo los productos 1 y 3 son Norte,
     // asi que las filas 0 y 2 de los hechos entran.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
 
     let values = evaluate("SUM('Fact Sales'[Qty])", &filters, &[PRODUCT_REGION]);
     // Productos Norte: 1 y 3. El producto 1 aparece en las filas 0 (Qty 10) y 2 (blank).
@@ -251,8 +362,8 @@ fn el_filtro_de_la_dimension_llega_a_los_hechos_por_lineage() {
 
 #[test]
 fn la_semijoin_solo_deja_pasar_las_claves_del_origen() {
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Sur".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Sur".to_string()));
 
     let values = evaluate("SUM('Fact Sales'[Qty])", &filters, &[PRODUCT_REGION]);
     // Solo el producto 2 es Sur, y aparece en la fila 1 con Qty 20.
@@ -272,8 +383,8 @@ fn dos_filtros_sobre_distintas_columnas_se_intersectan() {
 #[test]
 fn un_filtro_que_no_coincide_da_blank_no_cero() {
     // Una region que no existe. `SUM` sobre cero filas es BLANK, no 0.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Oeste".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Oeste".to_string()));
 
     let values = evaluate("SUM('Fact Sales'[Qty])", &filters, &[PRODUCT_REGION]);
     assert_eq!(values[0].1, Scalar::Blank);
@@ -283,10 +394,14 @@ fn un_filtro_que_no_coincide_da_blank_no_cero() {
 fn los_dos_caminos_coinciden_en_la_misma_consulta() {
     // El caso que importa: el mismo filtro,Interpreter y la semantica de BLANK, evaluados
     // sobre las mismas filas. Si estos dos dan numeros distintos, el fallback no sirve.
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
 
-    let all = evaluate("SUM('Fact Sales'[Qty])", &FilterContext::empty(), &[PRODUCT_REGION]);
+    let all = evaluate(
+        "SUM('Fact Sales'[Qty])",
+        &FilterContext::empty(),
+        &[PRODUCT_REGION],
+    );
     let norte = evaluate("SUM('Fact Sales'[Qty])", &filters, &[PRODUCT_REGION]);
 
     // La suma de la celda filtrada tiene que ser una parte de la suma total, nunca mayor.
@@ -374,7 +489,12 @@ impl ColumnView for CountedColumn {
     }
 
     fn value_at(&self, row: usize) -> Scalar {
-        *self.reads.lock().expect("candado").entry(self.id).or_insert(0) += 1;
+        *self
+            .reads
+            .lock()
+            .expect("candado")
+            .entry(self.id)
+            .or_insert(0) += 1;
         self.inner.value_at(row)
     }
 
@@ -411,7 +531,8 @@ fn el_semijoin_resuelve_su_origen_una_vez_y_no_una_por_fila() {
     // las dos tablas.
     let model = model();
     let source = CountingSource::new(source());
-    let intercepted = FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".into()));
+    let intercepted =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".into()));
     let propagated = intercepted.propagate(&model);
 
     let interpreter = Interpreter::new(&model, &source);

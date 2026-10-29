@@ -30,10 +30,11 @@ use datan_dax_syntax::parse;
 mod catalog;
 
 pub use catalog::{ForeignKey, PostgresCatalog};
+use catalog::relationships_from_catalog;
 
 use datan_model::{Column, DataType, Measure, Model, ObjectId, Table, TableKind};
-use std::collections::BTreeMap;
 use datan_storage::{Engine, StorageError};
+use std::collections::BTreeMap;
 
 /// Un error de introspeccion, con la sentencia que lo produjo.
 ///
@@ -44,11 +45,8 @@ pub enum ConnectError {
     #[error("no se pudo leer el catalogo de Postgres: {0}")]
     Catalog(String),
     #[error(
-        "se leyeron {tables} tablas pero ninguna relationship. El scanner de Postgres de \
-         DuckDB no entrega claves foraneas: `information_schema` las pierde y \
-         `pg_constraint` no se puede unir. Un modelo sin relaciones cruza dimensiones y no \
-         cruza nada, asi que Datan se niega a construirlo en vez de dar numeros que no \
-         tienen sentido"
+        "se leyeron {tables} tablas pero no se encontraron relaciones. Datan necesita \
+         relaciones entre tablas para calcular cruces correctos"
     )]
     NoRelationships { tables: usize },
     #[error("fallo la consulta de introspeccion:\n{sql}\n{error}")]
@@ -59,8 +57,10 @@ pub enum ConnectError {
     UnresolvedMeasure { name: String, detail: String },
     #[error("deduplicacion fallida de la expresion: {0}")]
     Dedupe(String),
-    #[error("la tabla `{name}` no existe en la base. Las candidatas a hechos son las que \
-             declaran claves foraneas")]
+    #[error(
+        "la tabla `{name}` no existe en la base. Las candidatas a hechos son las que \
+             declaran claves foraneas"
+    )]
     FactNotFound { name: String },
 }
 
@@ -157,23 +157,9 @@ pub fn introspect(
         ));
     }
 
-    // 2. Las claves primarias y foraneas.
-    //
-    //    Aqui esta el bloqueo de la version. Medido con `probe_scanner`:
-    //
-    //      - `SELECT conname FROM pg_constraint WHERE contype='f'`   -> 2 filas  FUNCIONA
-    //      - lo mismo unido a `pg_class` por oid                      -> 0 filas  FALLA
-    //      - `information_schema.key_column_usage`                    -> 3 filas, faltan 2
-    //      - `duckdb_constraints()`                                   -> solo NOT NULL
-    //
-    //    El scanner de Postgres entrega los nombres de las constraints pero no las columnas
-    //    que unen, y las vistas de `information_schema` que si las traen pierden las filas
-    //    de clave foranea en silencio. No hay consulta que devuelva el par de columnas.
-    //
-    //    Por eso `introspect` NO puede construir relaciones todavia, y por eso devuelve
-    //    `NoRelationships` en vez de un modelo con cero relaciones. Un modelo sin
-    //    relaciones parece funcionar y da numeros sin sentido: un informe que cruza
-    //    productos por categoria devuelve el total del informe, no el total de la categoria.
+    // 2. Lee las claves primarias y foraneas desde la conexion directa a Postgres.
+    // DuckDB no expone todas las columnas de estas claves en su catalogo del scanner.
+    // PostgresCatalog lee esos pares para construir las claves y relaciones del modelo.
     // 3. Las filas de cada tabla, para decidir cual es el hecho.
     // El catalogo se lee ANTES de decidir que es el hecho: la decision depende de cuantas
     // claves foraneas apuntan a cada tabla.
@@ -226,13 +212,14 @@ pub fn introspect(
                 })?;
             found
         }
-        None => choose_fact_table(&tables, foreign_keys.as_deref().unwrap_or(&[]), &counts).ok_or_else(|| {
-        ConnectError::Catalog(
-            "no se pudo decidir cual es la tabla de hechos. Datan elige la que tiene la \\
+        None => choose_fact_table(&tables, foreign_keys.as_deref().unwrap_or(&[]), &counts)
+            .ok_or_else(|| {
+                ConnectError::Catalog(
+                    "no se pudo decidir cual es la tabla de hechos. Datan elige la que tiene la \\
              clave foranea mas referenciada; con menos de dos tablas no hay forma de saberlo"
-                .to_string(),
-        )
-        })?
+                        .to_string(),
+                )
+            })?,
     };
 
     // 6. Las tablas.
@@ -257,6 +244,17 @@ pub fn introspect(
                 column.name.clone(),
                 data_type,
             ));
+            if let Some(model_column) = model_columns.last_mut() {
+                model_column.is_foreign_key = foreign_keys
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|key| {
+                        key.schema == *schema
+                            && key.table == *table
+                            && key.column == column.name
+                    });
+            }
         }
         // La clave primaria viene del catalogo. Sin ella se cae a la convencion de nombre
         // (`id`, o el nombre de la tabla con sufijo `_id`), que acierta casi siempre y no
@@ -287,8 +285,16 @@ pub fn introspect(
                 .unwrap_or(0),
             format!(
                 "{}{}",
-                if matches!(kind, TableKind::Facts) { "HECHOS" } else { "dimension" },
-                if key_by_convention { "  (clave por convencion)" } else { "" }
+                if matches!(kind, TableKind::Facts) {
+                    "HECHOS"
+                } else {
+                    "dimension"
+                },
+                if key_by_convention {
+                    "  (clave por convencion)"
+                } else {
+                    ""
+                }
             )
         ));
 
@@ -311,7 +317,10 @@ pub fn introspect(
         relationships: Vec::new(),
     };
     model.relationships = match catalog {
-        Some(catalog) => catalog.relationships(&model, &column_ids, foreign_keys.as_deref().unwrap_or(&[]))?,
+        Some(_) => relationships_from_catalog(
+            &column_ids,
+            foreign_keys.as_deref().unwrap_or(&[]),
+        ),
         None => {
             if model.tables.len() > 1 {
                 return Err(ConnectError::NoRelationships {
@@ -321,6 +330,20 @@ pub fn introspect(
             Vec::new()
         }
     };
+
+    let composite_constraints = foreign_keys
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|key| key.column_count > 1)
+        .map(|key| (key.schema.as_str(), key.table.as_str(), key.constraint.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    if !composite_constraints.is_empty() {
+        report.push(format!(
+            "  {} relaciones de varias columnas omitidas. Datan aun no puede modelarlas.",
+            composite_constraints.len()
+        ));
+    }
 
     let generated = generate_measures(&mut model)?;
     model.measures = generated;
@@ -376,9 +399,15 @@ fn choose_fact_table(
     // `boleta` recibe una y gana por tener mas filas, y el modelo trata la cabecera de las
     // ventas como si fuera el detalle. Las medidas se generan sobre la tabla equivocada y
     // todos los numeros estan mal en la misma direccion, lo que los hace parecer coherentes.
+    let declared_constraints: std::collections::BTreeSet<_> = foreign_keys
+        .iter()
+        .map(|key| (key.schema.as_str(), key.table.as_str(), key.constraint.as_str()))
+        .collect();
     let mut declared: BTreeMap<(String, String), usize> = BTreeMap::new();
-    for key in foreign_keys {
-        *declared.entry((key.schema.clone(), key.table.clone())).or_default() += 1;
+    for (schema, table, _) in declared_constraints {
+        *declared
+            .entry((schema.to_string(), table.to_string()))
+            .or_default() += 1;
     }
     tables
         .keys()
@@ -438,14 +467,19 @@ fn map_type(sql_type: &str) -> Option<DataType> {
         .trim()
         .to_lowercase();
     Some(match base.as_str() {
-        "integer" | "int4" | "int" | "smallint" | "int2" | "bigint" | "int8" => {
-            DataType::Moneda
-        }
+        "integer" | "int4" | "int" | "smallint" | "int2" | "bigint" | "int8" => DataType::Moneda,
         "double precision" | "float8" | "real" | "float4" | "numeric" | "decimal" => {
             DataType::Decimal
         }
-        "text" | "character varying" | "varchar" | "character varying[]" | "varchar[]"
-        | "char" | "character" | "name" | "uuid" => DataType::Text,
+        "text"
+        | "character varying"
+        | "varchar"
+        | "character varying[]"
+        | "varchar[]"
+        | "char"
+        | "character"
+        | "name"
+        | "uuid" => DataType::Text,
         "boolean" | "bool" => DataType::Boolean,
         "date" => DataType::Date,
         "timestamp with time zone" | "timestamp without time zone" | "timestamptz" => {
@@ -482,9 +516,7 @@ fn generate_measures(model: &mut Model) -> Result<Vec<Measure>, ConnectError> {
     let fact_id = fact.as_ref().map(|f| f.id);
     let connected_to_fact = |table_id: ObjectId| -> bool {
         match fact_id {
-            Some(fact_id) => {
-                fact_id == table_id || model.join_path(fact_id, table_id).is_some()
-            }
+            Some(fact_id) => fact_id == table_id || model.join_path(fact_id, table_id).is_some(),
             // Sin tabla de hechos no hay informe: `Report::execute` lo dice. Generar
             // medidas aqui seria llenar la barra lateral de cosas que no corren.
             None => false,
@@ -501,7 +533,8 @@ fn generate_measures(model: &mut Model) -> Result<Vec<Measure>, ConnectError> {
                 column.data_type,
                 DataType::Integer | DataType::Moneda | DataType::Decimal
             );
-            let meaningful = !table.key_columns.contains(&column.id) && !is_identifier(&column.name);
+            let meaningful =
+                !table.key_columns.contains(&column.id) && !is_identifier(&column.name);
 
             if is_fact
                 && sumable
@@ -517,10 +550,7 @@ fn generate_measures(model: &mut Model) -> Result<Vec<Measure>, ConnectError> {
                 next_id += 1;
             }
 
-            if !is_fact
-                && matches!(column.data_type, DataType::Text)
-                && meaningful
-            {
+            if !is_fact && matches!(column.data_type, DataType::Text) && meaningful {
                 // El prefijo `#` marca la medida como CONTEO. Sin el, `nombre` la dimension
                 // y `tabla nombre` la medida de conteo se ven como la misma cosa dos veces,
                 // y en la barra lateral parecen un duplicado.
@@ -708,11 +738,9 @@ fn build_measure(
         name: name.clone(),
         detail: format!("{error} en `{expression}`"),
     })?;
-    check_expr(&parsed, model).map_err(|error: CheckError| {
-        ConnectError::UnresolvedMeasure {
-            name: name.clone(),
-            detail: format!("{error} en `{expression}`"),
-        }
+    check_expr(&parsed, model).map_err(|error: CheckError| ConnectError::UnresolvedMeasure {
+        name: name.clone(),
+        detail: format!("{error} en `{expression}`"),
     })?;
     Ok(Measure::new(id, name, expression))
 }
@@ -773,11 +801,7 @@ fn text(row: &[String], index: usize) -> String {
 /// Un nombre de Postgres puede contener un punto o un espacio. Sin comillas, `mi.tabla` se
 /// lee como el esquema `mi` y la tabla `tabla`.
 fn quote_qualified(schema: &str, table: &str) -> String {
-    format!(
-        "{}.{}",
-        quote_identifier(schema),
-        quote_identifier(table)
-    )
+    format!("{}.{}", quote_identifier(schema), quote_identifier(table))
 }
 
 fn quote_identifier(name: &str) -> String {

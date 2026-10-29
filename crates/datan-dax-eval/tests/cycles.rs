@@ -12,9 +12,7 @@
 //! filtros, esta en la SECUENCIA de medidas. El algebra es conmutativa; la semantica de
 //! medidas encadenadas no lo es.
 
-use datan_dax_eval::{
-    FilterContext, FilterValue, distinct_propagation_results, propagate_ordered,
-};
+use datan_dax_eval::{FilterContext, FilterValue, distinct_propagation_results, propagate_ordered};
 use datan_model::{
     Cardinality, Column, DataType, FilterDirection, Model, ObjectId, Relationship,
     RelationshipRole, Table, TableKind,
@@ -174,7 +172,10 @@ fn la_consecuencia_de_calcular_no_implica_poder_escribirlo_en_sql() {
     // Por eso la deteccion de ciclos tiene que existir igual: para RECHAZAR el fast path con
     // un mensaje, no para evitar el calculo. El calculo lo hace el interprete.
     let model = cyclic_model();
-    assert!(datan_dax_eval::has_bidirectional_cycle(&model), "el modelo de prueba deberia tener un ciclo");
+    assert!(
+        datan_dax_eval::has_bidirectional_cycle(&model),
+        "el modelo de prueba deberia tener un ciclo"
+    );
 }
 
 #[test]

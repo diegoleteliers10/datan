@@ -108,19 +108,30 @@ fn main() {
     println!("Grafo:");
     println!("  DimProduct[ProductKey] <-Both- Bridge[ProductKey]");
     println!("  DimCustomer[CustomerKey] <-Both- Bridge[CustomerKey]");
-    println!("  El filtro puede dar la vuelta completa: Product -> Bridge -> Customer -> Bridge -> Product");
-    println!("  {} relationships, filtro bidireccional en las dos", model.relationships.len());
+    println!(
+        "  El filtro puede dar la vuelta completa: Product -> Bridge -> Customer -> Bridge -> Product"
+    );
+    println!(
+        "  {} relationships, filtro bidireccional en las dos",
+        model.relationships.len()
+    );
 
-    let start = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let start =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
 
     println!("\nFiltro inicial: DimProduct[Region] = 'Norte'");
-    println!("  columnas con filtro: {:?}", start.filtered_columns().collect::<Vec<_>>());
+    println!(
+        "  columnas con filtro: {:?}",
+        start.filtered_columns().collect::<Vec<_>>()
+    );
 
     // 1. Enumeracion exhaustiva de ordenes.
     let results = distinct_propagation_results(&model, &start);
     println!("\n--- Enumeracion exhaustiva de ordenes ---");
-    println!("  {} resultados distintos entre todas las permutaciones", results.len());
+    println!(
+        "  {} resultados distintos entre todas las permutaciones",
+        results.len()
+    );
 
     for (order, context) in &results {
         println!(
@@ -132,8 +143,11 @@ fn main() {
     if let Some((_, context)) = results.first() {
         println!("\n  detalle de filtros por columna:");
         for (col, fs) in context.entries() {
-            println!("    {col:?}: {} filtro(s), propagated={}", fs.len(),
-                fs.iter().filter(|f| f.is_propagated()).count());
+            println!(
+                "    {col:?}: {} filtro(s), propagated={}",
+                fs.len(),
+                fs.iter().filter(|f| f.is_propagated()).count()
+            );
         }
     }
 
@@ -156,8 +170,8 @@ fn main() {
     // Se invierte el grafo: el filtro entra por DimCustomer.
     model2.relationships.swap(0, 1);
 
-    let from_customer = FilterContext::empty()
-        .with_equal(CUSTOMER_TIER, FilterValue::Text("Oro".to_string()));
+    let from_customer =
+        FilterContext::empty().with_equal(CUSTOMER_TIER, FilterValue::Text("Oro".to_string()));
     let results2 = distinct_propagation_results(&model2, &from_customer);
     println!("  filtro inicial: DimCustomer[Tier] = 'Oro'");
     println!(

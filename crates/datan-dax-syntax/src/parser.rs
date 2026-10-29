@@ -4,9 +4,9 @@
 //! especificacion de dax.guide: `^` es el mas fuerte, luego `* /`, luego `+ - &`, luego las
 //! comparaciones, luego `&&`, luego `||`.
 
+use crate::Span;
 use crate::ast::{BinaryOp, Expr, TableExpr, UnaryOp, VarBinding};
 use crate::lexer::{Token, TokenKind};
-use crate::Span;
 
 /// Error de sintaxis, con la posicion donde fallo.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +33,10 @@ pub fn parse_expression(tokens: &[Token]) -> Result<Expr> {
             span: Span { start: 0, end: 0 },
         });
     }
-    let mut parser = Parser { tokens, position: 0 };
+    let mut parser = Parser {
+        tokens,
+        position: 0,
+    };
     let expr = parser.parse_or()?;
     parser.expect_eof()?;
     Ok(expr)
@@ -433,7 +436,7 @@ impl Parser<'_> {
                     return Err(ParseError {
                         message: "se esperaba un nombre de variable".to_string(),
                         span: self.peek().span,
-                    })
+                    });
                 }
             };
             if !self.eat_operator("=") {
@@ -516,7 +519,13 @@ mod tests {
             panic!("se esperaba un binario")
         };
         assert_eq!(op, BinaryOp::Add);
-        assert!(matches!(*right, Expr::Binary { op: BinaryOp::Multiply, .. }));
+        assert!(matches!(
+            *right,
+            Expr::Binary {
+                op: BinaryOp::Multiply,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -526,7 +535,13 @@ mod tests {
         let Expr::Binary { right, .. } = expr else {
             panic!("se esperaba un binario")
         };
-        assert!(matches!(*right, Expr::Binary { op: BinaryOp::Power, .. }));
+        assert!(matches!(
+            *right,
+            Expr::Binary {
+                op: BinaryOp::Power,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -537,7 +552,13 @@ mod tests {
         };
         assert_eq!(vars.len(), 1);
         assert_eq!(vars[0].name, "x");
-        assert!(matches!(*body, Expr::Binary { op: BinaryOp::Multiply, .. }));
+        assert!(matches!(
+            *body,
+            Expr::Binary {
+                op: BinaryOp::Multiply,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -558,9 +579,18 @@ mod tests {
     fn strip_spans(expr: &Expr) -> Expr {
         let zero = Span { start: 0, end: 0 };
         match expr {
-            Expr::Number { value, .. } => Expr::Number { value: *value, span: zero },
-            Expr::Text { value, .. } => Expr::Text { value: value.clone(), span: zero },
-            Expr::Boolean { value, .. } => Expr::Boolean { value: *value, span: zero },
+            Expr::Number { value, .. } => Expr::Number {
+                value: *value,
+                span: zero,
+            },
+            Expr::Text { value, .. } => Expr::Text {
+                value: value.clone(),
+                span: zero,
+            },
+            Expr::Boolean { value, .. } => Expr::Boolean {
+                value: *value,
+                span: zero,
+            },
             Expr::Blank { .. } => Expr::Blank { span: zero },
             Expr::Reference { name, quoted, .. } => Expr::Reference {
                 name: name.clone(),
@@ -577,7 +607,9 @@ mod tests {
                 args: args.iter().map(strip_spans).collect(),
                 span: zero,
             },
-            Expr::Binary { op, left, right, .. } => Expr::Binary {
+            Expr::Binary {
+                op, left, right, ..
+            } => Expr::Binary {
                 op: *op,
                 left: Box::new(strip_spans(left)),
                 right: Box::new(strip_spans(right)),
@@ -601,7 +633,9 @@ mod tests {
                 span: zero,
             },
             Expr::Table(table) => Expr::Table(match table {
-                TableExpr::Row { columns, values, .. } => TableExpr::Row {
+                TableExpr::Row {
+                    columns, values, ..
+                } => TableExpr::Row {
                     columns: columns.clone(),
                     values: values.iter().map(strip_spans).collect(),
                     span: zero,

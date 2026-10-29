@@ -75,7 +75,13 @@ fn source() -> MemorySource {
         .with_column(
             DAY,
             DateColumn {
-                values: vec![Some(D2023), Some(19358), Some(19723), Some(D2024), Some(19722)],
+                values: vec![
+                    Some(D2023),
+                    Some(19358),
+                    Some(19723),
+                    Some(D2024),
+                    Some(19722),
+                ],
             },
         )
         .with_table_length(FACT, 5)
@@ -98,7 +104,9 @@ fn columna(model: &Model, source: &MemorySource, column: ObjectId) -> Vec<String
     let calculated = CalculatedSource::new(model, source);
     let view = calculated.column(column).expect("la columna calculada");
     let _ = calculated;
-    (0..view.len()).map(|row| text(&view.value_at(row))).collect()
+    (0..view.len())
+        .map(|row| text(&view.value_at(row)))
+        .collect()
 }
 
 #[test]
@@ -151,7 +159,10 @@ fn el_interprete_agrega_sobre_una_columna_calculada() {
     let calculated = CalculatedSource::new(&model, &source);
     let interpreter = Interpreter::new(&model, &calculated);
 
-    assert_eq!(columna_por_medida(&interpreter, &model, TOTAL_MEASURE), "150");
+    assert_eq!(
+        columna_por_medida(&interpreter, &model, TOTAL_MEASURE),
+        "150"
+    );
     assert_eq!(columna_por_medida(&interpreter, &model, QTY_MEASURE), "15");
 }
 
@@ -162,7 +173,8 @@ fn la_matriz_agrupa_por_una_columna_calculada() {
     let calculated = CalculatedSource::new(&model, &source);
     let interpreter = Interpreter::new(&model, &calculated);
 
-    let atoms = extract_atoms("[Ventas]", &model, &FilterContext::empty(), &[ANIO]).expect("extrae");
+    let atoms =
+        extract_atoms("[Ventas]", &model, &FilterContext::empty(), &[ANIO]).expect("extrae");
     let grouped = interpreter
         .evaluate_grouped(
             &atoms.atoms,

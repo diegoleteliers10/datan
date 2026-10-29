@@ -20,7 +20,9 @@ use datan_report::Report;
 use datan_storage::Engine;
 
 fn main() {
-    let database = std::env::args().nth(1).unwrap_or_else(|| "datan_bench".into());
+    let database = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "datan_bench".into());
     let home = std::env::var("HOME").expect("HOME");
     let root = Path::new(&home).join(".duckdb").join("extensions");
 
@@ -35,11 +37,15 @@ fn main() {
         .expect("conecta");
     println!("Datan: informe contra `{database}`\n");
 
-    let mut catalog = PostgresCatalog::connect(&format!("host=localhost dbname={database}"))
-        .expect("catalogo");
-    let introspection =
-        introspect(&engine, &Source::new("pg"), Some(&mut catalog), Some("product_boleta"))
-            .expect("modelo");
+    let mut catalog =
+        PostgresCatalog::connect(&format!("host=localhost dbname={database}")).expect("catalogo");
+    let introspection = introspect(
+        &engine,
+        &Source::new("pg"),
+        Some(&mut catalog),
+        Some("product_boleta"),
+    )
+    .expect("modelo");
     let mut model = introspection.model;
 
     // El documento del usuario se aplica ENCIMA, igual que en la app. Sin esto, una jerarquia
@@ -119,7 +125,10 @@ fn main() {
         .with_dimensions(dimensions.clone())
         .with_measures(measures.clone());
 
-    println!("\nConsultas necesarias: {}", report.query_count().unwrap_or(0));
+    println!(
+        "\nConsultas necesarias: {}",
+        report.query_count().unwrap_or(0)
+    );
 
     // 1. El informe entero.
     match report.execute(&engine, Some(&source)) {
@@ -227,6 +236,7 @@ fn main() {
     // una verificacion, y el archivo es del usuario.
     let mut con_calculadas = model.clone();
     let demo = model_doc::ModelDoc {
+        fact_table: None,
         measures: vec![
             model_doc::MeasureDoc::new("Cantidad", "SUM('product_boleta'[quantity])"),
             model_doc::MeasureDoc::new("Importe", "SUM('product_boleta'[importe])"),

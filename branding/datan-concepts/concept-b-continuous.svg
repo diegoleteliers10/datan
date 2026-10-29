@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">Datan concept B: continuous link</title>
+  <path fill="none" stroke="#111111" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" d="M68 210V46H128A82 82 0 0 1 128 210H68Z"/>
+  <path fill="none" stroke="#111111" stroke-width="28" stroke-linecap="round" d="M96 128H211"/>
+  <circle cx="216" cy="128" r="14" fill="#111111"/>
+</svg>

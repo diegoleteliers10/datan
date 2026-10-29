@@ -103,3 +103,24 @@ fn un_filtro_sin_resultados_da_blank_en_los_dos_caminos() {
     let result = run_case(&engine, &case).expect("corre el caso");
     assert!(result.agrees, "un filtro sin resultados debe coincidir");
 }
+
+#[test]
+fn distinctcount_cuenta_blanks_en_sql_y_en_el_interprete() {
+    let engine = engine().expect("carga fixtures");
+    let case = datan_testkit::Case::new(
+        "distinctcount con blanks",
+        "DISTINCTCOUNT('fact_sales'[qty])",
+    );
+    let result = run_case(&engine, &case).expect("corre el caso");
+
+    assert!(!result.interpreter_only, "el caso debe usar SQL");
+    assert!(
+        result.agrees,
+        "SQL={:?} interprete={:?}",
+        result.sql_rows, result.interp_rows
+    );
+    assert_eq!(
+        result.interp_value,
+        Some(datan_dax_eval::Scalar::Integer(10))
+    );
+}

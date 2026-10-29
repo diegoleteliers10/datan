@@ -115,14 +115,18 @@ impl<'a> Lexer<'a> {
         let Some(byte) = self.peek() else {
             return Some(Token {
                 kind: TokenKind::Eof,
-                span: Span { start: start as u32, end: start as u32 },
+                span: Span {
+                    start: start as u32,
+                    end: start as u32,
+                },
                 text: String::new(),
                 number: None,
             });
         };
 
         // Numero. El lexer de DAX acepta `1`, `1.5`, `.5` y notacion exponencial.
-        if byte.is_ascii_digit() || (byte == b'.' && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()))
+        if byte.is_ascii_digit()
+            || (byte == b'.' && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()))
         {
             while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 self.position += 1;
@@ -151,7 +155,10 @@ impl<'a> Lexer<'a> {
             let text = self.slice(start, self.position);
             return Some(Token {
                 kind: TokenKind::Number,
-                span: Span { start: start as u32, end: self.position as u32 },
+                span: Span {
+                    start: start as u32,
+                    end: self.position as u32,
+                },
                 number: text.parse::<f64>().ok(),
                 text,
             });
@@ -181,7 +188,10 @@ impl<'a> Lexer<'a> {
             }
             return Some(Token {
                 kind: TokenKind::QuotedName,
-                span: Span { start: start as u32, end: self.position as u32 },
+                span: Span {
+                    start: start as u32,
+                    end: self.position as u32,
+                },
                 text,
                 number: None,
             });
@@ -198,7 +208,10 @@ impl<'a> Lexer<'a> {
             self.position += 1;
             return Some(Token {
                 kind: TokenKind::Text,
-                span: Span { start: start as u32, end: self.position as u32 },
+                span: Span {
+                    start: start as u32,
+                    end: self.position as u32,
+                },
                 text,
                 number: None,
             });
@@ -206,12 +219,31 @@ impl<'a> Lexer<'a> {
 
         // Identificador.
         if byte.is_ascii_alphabetic() || byte == b'_' {
-            while self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            while self
+                .peek()
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
                 self.position += 1;
+            }
+            if self.peek() == Some(b'.')
+                && self
+                    .peek_at(1)
+                    .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            {
+                self.position += 1;
+                while self
+                    .peek()
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    self.position += 1;
+                }
             }
             return Some(Token {
                 kind: TokenKind::Identifier,
-                span: Span { start: start as u32, end: self.position as u32 },
+                span: Span {
+                    start: start as u32,
+                    end: self.position as u32,
+                },
                 text: self.slice(start, self.position),
                 number: None,
             });
@@ -233,7 +265,10 @@ impl<'a> Lexer<'a> {
             self.position += 1;
             return Some(Token {
                 kind,
-                span: Span { start: start as u32, end: self.position as u32 },
+                span: Span {
+                    start: start as u32,
+                    end: self.position as u32,
+                },
                 text: self.slice(start, self.position),
                 number: None,
             });
@@ -263,7 +298,10 @@ impl<'a> Lexer<'a> {
     fn operator(&self, start: usize, text: &str) -> Token {
         Token {
             kind: TokenKind::Operator,
-            span: Span { start: start as u32, end: (start + text.len()) as u32 },
+            span: Span {
+                start: start as u32,
+                end: (start + text.len()) as u32,
+            },
             text: text.to_string(),
             number: None,
         }
@@ -324,14 +362,17 @@ mod tests {
 
     #[test]
     fn tokeniza_numeros() {
-        assert_eq!(kinds("1 1.5 .5 1e3 2.5E-2"), vec![
-            TokenKind::Number,
-            TokenKind::Number,
-            TokenKind::Number,
-            TokenKind::Number,
-            TokenKind::Number,
-            TokenKind::Eof,
-        ]);
+        assert_eq!(
+            kinds("1 1.5 .5 1e3 2.5E-2"),
+            vec![
+                TokenKind::Number,
+                TokenKind::Number,
+                TokenKind::Number,
+                TokenKind::Number,
+                TokenKind::Number,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

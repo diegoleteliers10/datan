@@ -130,7 +130,10 @@ fn el_rango_de_previousyear_cubre_el_ano_entero_anterior() {
     // ano bisiesto. Confundir los dos desplaza todo el rango un dia.
     assert_eq!(at(-365), 19358, "2023-01-01");
     assert!(rendered.contains(&at(-365)), "falta el 1 de enero de 2023");
-    assert!(rendered.contains(&at(-1)), "falta el 31 de diciembre de 2023");
+    assert!(
+        rendered.contains(&at(-1)),
+        "falta el 31 de diciembre de 2023"
+    );
 }
 
 #[test]
@@ -146,7 +149,10 @@ fn el_rango_de_fechas_viaja_a_los_hechos_por_la_relationship() {
         "el rango de fechas tiene que llegar a los hechos; si no, PREVIOUSYEAR"
     );
     assert!(
-        propagated.filters_on(FACT_DATE).iter().all(|f| f.is_propagated()),
+        propagated
+            .filters_on(FACT_DATE)
+            .iter()
+            .all(|f| f.is_propagated()),
         "los filtros de los hechos deben venir de la propagacion, no del rango directo"
     );
 }
@@ -239,7 +245,10 @@ fn la_columna_de_fechas_es_la_clave_no_cualquier_columna_de_fecha() {
     // Si se eligiera `Year` o `Month` como columna del rango, dos dias del mismo mes
     // quedarian indistinguibles y el filtro devolveria filas que el rango dice excluir.
     let model = model_with_date_table();
-    assert_eq!(date_column(&model).expect("el modelo tiene tabla de fechas"), DATE);
+    assert_eq!(
+        date_column(&model).expect("el modelo tiene tabla de fechas"),
+        DATE
+    );
 }
 
 #[test]

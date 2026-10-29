@@ -17,9 +17,9 @@
 //! construye el dia 1, la divergencia aparece el dia 2.
 
 use datan_dax_eval::{
-    AtomKind, AtomSet, CalendarUnit, DateColumn, DateRange, FilterContext,
-    FilterValue, IntColumn, Interpreter, MemorySource, Scalar, TextColumn, TimeFunction,
-    extract_atoms, filters as time_filters,
+    AtomKind, AtomSet, CalendarUnit, DateColumn, DateRange, FilterContext, FilterValue, IntColumn,
+    Interpreter, MemorySource, Scalar, TextColumn, TimeFunction, extract_atoms,
+    filters as time_filters,
 };
 use datan_dax_sql::{SourceMap, lower};
 use datan_model::{
@@ -164,11 +164,7 @@ pub fn model() -> Model {
             // Arimetrica ENTRE medidas. Referencia `[Qty]` dos veces a proposito: una hoja
             // repetida tiene que ser un solo atomo, y la division tiene que salir en el
             // mismo SELECT.
-            Measure::new(
-                ObjectId(103),
-                "Margin",
-                "([Qty] - [Amount]) / [Qty]",
-            ),
+            Measure::new(ObjectId(103), "Margin", "([Qty] - [Amount]) / [Qty]"),
             // Una funcion escalar en el nivel SUPERIOR de la medida. `DIVIDE` es la forma en
             // que se escriben las medidas de negocio, y es la que decide si una fila sin
             // datos da BLANK o una division por cero. Sin forma propia, el conjunto quedaba
@@ -273,11 +269,7 @@ fn armar_memoria(region_nula: bool) -> MemorySource {
         // El MISMO reparto que el SQL: `(i * 37) % 730` dias desde 2023-01-01. Si los dos
         // caminos leen distinto, la divergencia no dice nada.
         day.push(Some(Y2023 + (((i * 37) % 730) as i32)));
-        qty.push(if i % 7 == 0 {
-            None
-        } else {
-            Some((i % 9) + 1)
-        });
+        qty.push(if i % 7 == 0 { None } else { Some((i % 9) + 1) });
         amount.push(if i % 11 == 0 {
             None
         } else {
@@ -334,7 +326,9 @@ fn armar_memoria(region_nula: bool) -> MemorySource {
         .with_column(FACT_AMOUNT, IntColumn { values: amount })
         .with_column(
             FACT_PRODUCT_ID,
-            IntColumn { values: product_ids },
+            IntColumn {
+                values: product_ids,
+            },
         )
         .with_column(PRODUCT_ID, IntColumn { values: product_id })
         .with_column(PRODUCT_REGION, TextColumn { values: region })
@@ -404,8 +398,8 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
     let context = context_for(&model, case);
     let grouping = [PRODUCT_REGION];
 
-    let atoms = extract_atoms(case.measure, &model, &context, &grouping)
-        .map_err(|e| e.to_string())?;
+    let atoms =
+        extract_atoms(case.measure, &model, &context, &grouping).map_err(|e| e.to_string())?;
     let sources = SourceMap::from_model(&model);
 
     // Camino 1: SQL. El atomo tiene que ser bajable; si no, este caso no prueba nada.
@@ -430,7 +424,9 @@ pub fn run_case(engine: &Engine, case: &Case) -> Result<PathResult, String> {
             // Se castea a VARCHAR porque `SUM` de enteros devuelve `HUGEINT`, que Arrow
             // representa como `Decimal128`, y la lectura de celdas no lo mira.
             let rendered = engine.render_rows(sql).map_err(|e| e.to_string())?;
-            let value = rendered.first().map(|row| row.first().cloned().unwrap_or_default());
+            let value = rendered
+                .first()
+                .map(|row| row.first().cloned().unwrap_or_default());
             (Some(rendered), value)
         }
         None => (None, None),
@@ -576,61 +572,75 @@ pub fn run_suite(engine: &Engine, cases: &[Case]) -> Vec<PathResult> {
 pub fn suite() -> Vec<Case> {
     vec![
         Case::new("sum sin filtro", "SUM('fact_sales'[qty])").expecting(Scalar::Integer(0)),
-        Case::new("sum por region Norte", "SUM('fact_sales'[qty])")
-            .filter("region", "Norte"),
-        Case::new("sum por region Sur", "SUM('fact_sales'[qty])")
-            .filter("region", "Sur"),
-        Case::new("sum por region Este", "SUM('fact_sales'[qty])")
-            .filter("region", "Este"),
+        Case::new("sum por region Norte", "SUM('fact_sales'[qty])").filter("region", "Norte"),
+        Case::new("sum por region Sur", "SUM('fact_sales'[qty])").filter("region", "Sur"),
+        Case::new("sum por region Este", "SUM('fact_sales'[qty])").filter("region", "Este"),
         Case::new("sum por region que no existe", "SUM('fact_sales'[qty])")
             .filter("region", "Oeste"),
         Case::new("amount sin filtro", "SUM('fact_sales'[amount])"),
-        Case::new("amount por Norte", "SUM('fact_sales'[amount])")
-            .filter("region", "Norte"),
-        Case::new("count por Norte", "COUNT('fact_sales'[qty])")
-            .filter("region", "Norte"),
-        Case::new("min por Norte", "MIN('fact_sales'[qty])")
-            .filter("region", "Norte"),
-        Case::new("max por Sur", "MAX('fact_sales'[qty])")
-            .filter("region", "Sur"),
-        Case::new("average por Este", "AVERAGE('fact_sales'[qty])")
-            .filter("region", "Este"),
-        Case::new("distinctcount por Norte", "DISTINCTCOUNT('fact_sales'[qty])")
-            .filter("region", "Norte"),
-        Case::new("countrows por Norte", "COUNTROWS('fact_sales')")
-            .filter("region", "Norte"),
+        Case::new("amount por Norte", "SUM('fact_sales'[amount])").filter("region", "Norte"),
+        Case::new("count por Norte", "COUNT('fact_sales'[qty])").filter("region", "Norte"),
+        Case::new("min por Norte", "MIN('fact_sales'[qty])").filter("region", "Norte"),
+        Case::new("max por Sur", "MAX('fact_sales'[qty])").filter("region", "Sur"),
+        Case::new("average por Este", "AVERAGE('fact_sales'[qty])").filter("region", "Este"),
+        Case::new(
+            "distinctcount por Norte",
+            "DISTINCTCOUNT('fact_sales'[qty])",
+        )
+        .filter("region", "Norte"),
+        Case::new("countrows por Norte", "COUNTROWS('fact_sales')").filter("region", "Norte"),
         Case::new("dos filtros", "SUM('fact_sales'[qty])")
             .filter("region", "Norte")
             .filter("category", "A"),
-        Case::new("filtro por clave", "SUM('fact_sales'[qty])")
-            .filter("product_id", "3"),
-
+        Case::new("filtro por clave", "SUM('fact_sales'[qty])").filter("product_id", "3"),
         // Agregaciones sobre EXPRESION. Son las medidas de negocio mas comunes y el
         // fixture no tenia ninguna: los 27 casos anteriores usaban todas una sola columna, y
         // el interprete devolvia "no se puede interpretar" sin que el arnés lo notara,
         // porque el fast path si bajaba y la comparacion solo miraba SQL.
-        Case::new("suma de un producto de columnas", "SUM('fact_sales'[qty] * 'fact_sales'[amount])"),
-        Case::new("suma de una expresion que cruza tablas", "SUM('fact_sales'[qty] * 'dim_product'[product_id])"),
-        Case::new("suma de una expresion por region", "SUM('fact_sales'[qty] * 'fact_sales'[amount])")
-            .filter("region", "Norte"),
-        Case::new("min de una expresion", "MIN('fact_sales'[qty] * 'dim_product'[product_id])"),
-        Case::new("max de una expresion", "MAX('fact_sales'[qty] * 'dim_product'[product_id])"),
-        Case::new("average de una expresion", "AVERAGE('fact_sales'[qty] * 'fact_sales'[amount])"),
+        Case::new(
+            "suma de un producto de columnas",
+            "SUM('fact_sales'[qty] * 'fact_sales'[amount])",
+        ),
+        Case::new(
+            "suma de una expresion que cruza tablas",
+            "SUM('fact_sales'[qty] * 'dim_product'[product_id])",
+        ),
+        Case::new(
+            "suma de una expresion por region",
+            "SUM('fact_sales'[qty] * 'fact_sales'[amount])",
+        )
+        .filter("region", "Norte"),
+        Case::new(
+            "min de una expresion",
+            "MIN('fact_sales'[qty] * 'dim_product'[product_id])",
+        ),
+        Case::new(
+            "max de una expresion",
+            "MAX('fact_sales'[qty] * 'dim_product'[product_id])",
+        ),
+        Case::new(
+            "average de una expresion",
+            "AVERAGE('fact_sales'[qty] * 'fact_sales'[amount])",
+        ),
         // Una suma de ceros da 0, y un BLANK solo cuando no hay filas o todas son blank. La
         // distincion importa: `0` es un dato y BLANK es "no hay".
-        Case::new("suma de una expresion que vale cero", "SUM('fact_sales'[qty] * 0)")
-            .expecting(Scalar::Integer(0)),
-        Case::new("suma de una expresion sobre filtro vacio", "SUM('fact_sales'[qty] * 'fact_sales'[amount])")
-            .filter("region", "Oeste")
-            .expecting(Scalar::Blank),
-
+        Case::new(
+            "suma de una expresion que vale cero",
+            "SUM('fact_sales'[qty] * 0)",
+        )
+        .expecting(Scalar::Integer(0)),
+        Case::new(
+            "suma de una expresion sobre filtro vacio",
+            "SUM('fact_sales'[qty] * 'fact_sales'[amount])",
+        )
+        .filter("region", "Oeste")
+        .expecting(Scalar::Blank),
         // Una medida que es ARITMETICA ENTRE medidas. Referencia `[Qty]` dos veces, asi que
         // una hoja repetida tiene que ser un solo atomo y la division tiene que salir en el
         // mismo SELECT, sin subconsulta por celda.
         Case::new("margin: division entre medidas", "[Margin]"),
         Case::new("margin con filtro de region", "[Margin]").filter("region", "Norte"),
         Case::new("margin de una hoja repetida", "([Qty] - [Qty]) / [Qty]"),
-
         // Funciones escalares en el nivel superior. Los dos caminos tienen que decir lo
         // mismo: el `NULLIF` del SQL y el BLANK del interprete son la misma regla escrita dos
         // veces, y una medida de negocio se escribe con `DIVIDE`, no con una barra.
@@ -638,8 +648,11 @@ pub fn suite() -> Vec<Case> {
         Case::new("divide con filtro de region", "[Ratio]").filter("region", "Norte"),
         // Denominador cero. DuckDB devuelve `inf` sin el `NULLIF` y DAX devuelve BLANK, asi
         // que este caso es el que distingue una regla de una casualidad.
-        Case::new("divide con denominador cero", "DIVIDE([Qty], [Qty] - [Qty])")
-            .expecting(Scalar::Blank),
+        Case::new(
+            "divide con denominador cero",
+            "DIVIDE([Qty], [Qty] - [Qty])",
+        )
+        .expecting(Scalar::Blank),
         Case::new(
             "divide con denominador cero y valor alterno",
             "DIVIDE([Qty], [Qty] - [Qty], -1)",
@@ -648,20 +661,24 @@ pub fn suite() -> Vec<Case> {
         Case::new("if con una comparacion", "[Condicional]"),
         Case::new("if con una comparacion por region", "[Condicional]").filter("region", "Sur"),
         Case::new("coalesce de una medida", "COALESCE([Qty], 0)"),
-        Case::new("switch por el valor de la medida", "SWITCH([Qty], 57, [Amount], 0)"),
+        Case::new(
+            "switch por el valor de la medida",
+            "SWITCH([Qty], 57, [Amount], 0)",
+        ),
         Case::new("menos unario", "-[Qty]").expecting(Scalar::Integer(0)),
         Case::new(
             "variable de una medida",
             "VAR total = [Qty] RETURN total * 2",
         ),
-
         // Casos de `CALCULATE`. No tienen fast path: el atomo se marca para el interprete
         // porque el conjunto de filtros cambia de forma no uniforme. El harness tiene que
         // aceptar eso, no fallar por no tener las dos columnas.
-        Case::new("calculate con ALL de la dimension", "CALCULATE([Qty], ALL('dim_product'))")
-            .filter("region", "Norte"),
-        Case::new("calculate con ALL global", "CALCULATE([Qty], ALL())")
-            .filter("region", "Norte"),
+        Case::new(
+            "calculate con ALL de la dimension",
+            "CALCULATE([Qty], ALL('dim_product'))",
+        )
+        .filter("region", "Norte"),
+        Case::new("calculate con ALL global", "CALCULATE([Qty], ALL())").filter("region", "Norte"),
         Case::new(
             "calculate con allexcept",
             "CALCULATE([Qty], ALLEXCEPT('dim_product', 'dim_product'[region]))",
@@ -673,7 +690,6 @@ pub fn suite() -> Vec<Case> {
             "CALCULATE([Qty], 'dim_product'[region] = 'Oeste')",
         )
         .filter("region", "Norte"),
-
         // Casos de time intelligence. Estos SI tienen fast path: el rango de fechas son dos
         // filtros `>=` y `<=` sobre la columna de fecha, y los dos operadores ya bajan a SQL.
         // Por eso son los que atrapan el fallo de los literales de fecha, que no se ve al
@@ -681,63 +697,68 @@ pub fn suite() -> Vec<Case> {
         //
         // "Hoy" es 15 de marzo de 2024 en todos ellos, asi que `PREVIOUSYEAR` es 2023 y
         // `DATESYTD` es desde el 1 de enero de 2024.
-        Case::new("previousyear sobre la ventana actual", "SUM('fact_sales'[amount])")
-            .time(
-                TimeFunction::PreviousYear,
-                DateRange::new(Y2024 + 74, Y2024 + 74),
-                Y2024 + 74,
-            ),
-        Case::new("dateadd de un ano hacia atras", "SUM('fact_sales'[amount])")
-            .time(
-                TimeFunction::DateAdd {
-                    units: -1,
-                    unit: CalendarUnit::Year,
-                },
-                DateRange::new(Y2024 + 74, Y2024 + 74),
-                Y2024 + 74,
-            ),
-        Case::new("dateadd de un mes hacia atras", "SUM('fact_sales'[amount])")
-            .time(
-                TimeFunction::DateAdd {
-                    units: -1,
-                    unit: CalendarUnit::Month,
-                },
-                DateRange::new(Y2024 + 74, Y2024 + 74),
-                Y2024 + 74,
-            ),
-        Case::new("datesytd sobre un rango ancho", "SUM('fact_sales'[amount])")
-            .time(
-                TimeFunction::YearToDate,
-                DateRange::new(Y2023, Y2024 + 74),
-                Y2024 + 74,
-            ),
-        Case::new("parallelperiod de un ano", "SUM('fact_sales'[amount])")
-            .time(
-                TimeFunction::ParallelPeriod {
-                    amount: -1,
-                    unit: CalendarUnit::Year,
-                },
-                DateRange::new(Y2024 + 74, Y2024 + 74),
-                Y2024 + 74,
-            ),
+        Case::new(
+            "previousyear sobre la ventana actual",
+            "SUM('fact_sales'[amount])",
+        )
+        .time(
+            TimeFunction::PreviousYear,
+            DateRange::new(Y2024 + 74, Y2024 + 74),
+            Y2024 + 74,
+        ),
+        Case::new("dateadd de un ano hacia atras", "SUM('fact_sales'[amount])").time(
+            TimeFunction::DateAdd {
+                units: -1,
+                unit: CalendarUnit::Year,
+            },
+            DateRange::new(Y2024 + 74, Y2024 + 74),
+            Y2024 + 74,
+        ),
+        Case::new("dateadd de un mes hacia atras", "SUM('fact_sales'[amount])").time(
+            TimeFunction::DateAdd {
+                units: -1,
+                unit: CalendarUnit::Month,
+            },
+            DateRange::new(Y2024 + 74, Y2024 + 74),
+            Y2024 + 74,
+        ),
+        Case::new("datesytd sobre un rango ancho", "SUM('fact_sales'[amount])").time(
+            TimeFunction::YearToDate,
+            DateRange::new(Y2023, Y2024 + 74),
+            Y2024 + 74,
+        ),
+        Case::new("parallelperiod de un ano", "SUM('fact_sales'[amount])").time(
+            TimeFunction::ParallelPeriod {
+                amount: -1,
+                unit: CalendarUnit::Year,
+            },
+            DateRange::new(Y2024 + 74, Y2024 + 74),
+            Y2024 + 74,
+        ),
         // Un rango que cae antes de las ventas: tiene que dar BLANK, no el total. Un filtro
         // de fecha que no filtra devuelve el total en silencio, y ese es el fallo que mas
         // caro sale en un informe.
-        Case::new("previousyear anterior al modelo", "SUM('fact_sales'[amount])")
-            .time(
-                TimeFunction::PreviousYear,
-                DateRange::new(Y2023 - 365, Y2023 - 365),
-                Y2023 - 365,
-            )
-            .expecting(Scalar::Blank),
+        Case::new(
+            "previousyear anterior al modelo",
+            "SUM('fact_sales'[amount])",
+        )
+        .time(
+            TimeFunction::PreviousYear,
+            DateRange::new(Y2023 - 365, Y2023 - 365),
+            Y2023 - 365,
+        )
+        .expecting(Scalar::Blank),
         // Time intelligence combinado con un filtro de columna: los dos filtros travelan.
-        Case::new("previousyear con filtro de region", "SUM('fact_sales'[amount])")
-            .filter("region", "Norte")
-            .time(
-                TimeFunction::PreviousYear,
-                DateRange::new(Y2024 + 74, Y2024 + 74),
-                Y2024 + 74,
-            ),
+        Case::new(
+            "previousyear con filtro de region",
+            "SUM('fact_sales'[amount])",
+        )
+        .filter("region", "Norte")
+        .time(
+            TimeFunction::PreviousYear,
+            DateRange::new(Y2024 + 74, Y2024 + 74),
+            Y2024 + 74,
+        ),
         Case::new("datesytd con filtro de region", "SUM('fact_sales'[amount])")
             .filter("region", "Sur")
             .time(
@@ -764,7 +785,9 @@ mod fixtures {
     #[test]
     fn los_fixtures_cargan() {
         let engine = engine().expect("carga fixtures");
-        let batches = engine.query_arrow("SELECT COUNT(*) FROM fact_sales").expect("cuenta");
+        let batches = engine
+            .query_arrow("SELECT COUNT(*) FROM fact_sales")
+            .expect("cuenta");
         assert_eq!(batches[0].num_rows(), 1);
     }
 }

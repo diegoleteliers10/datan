@@ -24,6 +24,8 @@ pub const BARRA_SUPERIOR: f32 = 48.0;
 pub const PANEL_DATOS: f32 = 264.0;
 /// El ancho del panel de Visualizaciones.
 pub const PANEL_VISUALES: f32 = 264.0;
+pub const PANEL_FILTROS: f32 = 248.0;
+pub const PANEL_PLEGADO: f32 = 36.0;
 /// El alto de la barra de pestanas.
 pub const ALTO_PESTANAS: f32 = 40.0;
 /// El alto de la tarjeta del grafico cuando comparte el lienzo con la tabla.
@@ -52,9 +54,7 @@ pub const ALTO_CABECERA: f32 = 40.0;
 pub const ALTO_FILA: f32 = 26.0;
 /// El ancho de un mosaico del selector de visuales.
 ///
-/// Cuatro por fila en el panel, con la etiqueta mas larga adentro ("Dispersion") sin
-/// recortar: un nombre cortado por el borde se lee como un defecto.
-pub const ANCHO_MOSAICO: f32 = 58.0;
+/// Tres por fila en el panel, con espacio para etiquetas como "Candlestick" y "Segmentador".
 /// El alto del area de dibujo de una dispersion.
 ///
 /// Un canvas se mide por lo que le pide el estilo: sin alto propio hereda cero y los puntos
@@ -132,7 +132,11 @@ mod tests {
     #[test]
     fn la_paleta_cicla_y_no_se_sale() {
         assert_eq!(serie(0, false), Hsla::from(rgb(SERIES_CLARO[0])));
-        assert_eq!(serie(5, false), serie(0, false), "el sexto color repite el primero");
+        assert_eq!(
+            serie(5, false),
+            serie(0, false),
+            "el sexto color repite el primero"
+        );
         assert_eq!(serie(7, false), serie(2, false));
     }
 

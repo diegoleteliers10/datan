@@ -21,8 +21,7 @@ use std::time::Instant;
 fn main() {
     println!("Datan spike, dia 2: una query o N subconsultas?\n");
 
-    let engine = datan_storage::Engine::open(":memory:")
-        .expect("abre motor");
+    let engine = datan_storage::Engine::open(":memory:").expect("abre motor");
 
     setup_fixtures(&engine);
     report(engine);
@@ -124,7 +123,10 @@ fn report(engine: datan_storage::Engine) {
     let elapsed = started.elapsed();
 
     let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
-    println!("GRUPOS: {row_count} celdas en {:.0} ms", elapsed.as_millis());
+    println!(
+        "GRUPOS: {row_count} celdas en {:.0} ms",
+        elapsed.as_millis()
+    );
 
     // `EXPLAIN ANALYZE` devuelve el plan como texto en una columna. La lectura pasa por
     // `datan-storage` para que este binario no importe tipos de duckdb ni de arrow, igual
@@ -162,7 +164,10 @@ fn report(engine: datan_storage::Engine) {
         println!("\nVEREDICTO:");
         println!("  hash aggregate presente:  {has_aggregate}");
         println!("  DELIM_JOIN (subconsulta por celda): {delim}");
-        println!("  tiempo: {:.0} ms (criterio: < 500 ms)", elapsed.as_millis());
+        println!(
+            "  tiempo: {:.0} ms (criterio: < 500 ms)",
+            elapsed.as_millis()
+        );
 
         let pass = has_aggregate && !delim && elapsed.as_millis() < 500;
         println!(

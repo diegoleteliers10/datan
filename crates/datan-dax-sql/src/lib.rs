@@ -172,9 +172,8 @@ fn bajar(
 
     // La tabla principal es la que contiene la columna agregada de los atomos. Si los
     // atomos viven en tablas distintas, es un modelo mal formado.
-    let fact_table = first_fact_table(model, atoms).ok_or_else(|| {
-        LowerError::Unsupported("no se encontro la tabla de hechos".to_string())
-    })?;
+    let fact_table = first_fact_table(model, atoms)
+        .ok_or_else(|| LowerError::Unsupported("no se encontro la tabla de hechos".to_string()))?;
 
     // Las columnas de agrupamiento pueden vivir en tablas que no son la de hechos. Por eso
     // hay que traerlas con un JOIN por la clave de la relacion.
@@ -237,12 +236,11 @@ fn bajar(
 
     // Un JOIN por cada tabla extra, por el camino mas corto desde la tabla de hechos.
     for table in needed.iter().skip(1) {
-        let path = shortest_join_path(model, fact_table, *table)
-            .ok_or_else(|| {
-                LowerError::Unsupported(format!(
-                    "no hay relationship entre la tabla de hechos y la tabla {table} que agrupa"
-                ))
-            })?;
+        let path = shortest_join_path(model, fact_table, *table).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "no hay relationship entre la tabla de hechos y la tabla {table} que agrupa"
+            ))
+        })?;
         for edge in &path {
             let from_table = owner_of(model, edge.from_column);
             let to_table = owner_of(model, edge.to_column);
@@ -313,15 +311,13 @@ fn bajar(
     let expresiones: Vec<String> = grouping
         .iter()
         .map(|column| {
-            sources
-                .column(*column)
-                .map(|(physical, _)| {
-                    format!(
-                        "{}.{}",
-                        aliases.of(owner_of(model, *column)),
-                        quote_identifier(physical)
-                    )
-                })
+            sources.column(*column).map(|(physical, _)| {
+                format!(
+                    "{}.{}",
+                    aliases.of(owner_of(model, *column)),
+                    quote_identifier(physical)
+                )
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     // Con una sola dimension no hay niveles intermedios: los subtotales SON el gran total.
@@ -335,10 +331,7 @@ fn bajar(
         let conjuntos: Vec<String> = match renglones {
             // El agrupamiento entero y el conjunto vacio. Cortar en `grouping.len()` daria
             // el subtotal de la primera dimension, que es otro renglon.
-            Renglones::Total => vec![
-                format!("({})", expresiones.join(", ")),
-                "()".to_string(),
-            ],
+            Renglones::Total => vec![format!("({})", expresiones.join(", ")), "()".to_string()],
             _ => (0..=grouping.len())
                 .rev()
                 .map(|k| {
@@ -460,9 +453,8 @@ pub fn lower_scalar(
         )));
     }
 
-    let fact_table = first_fact_table(model, atoms).ok_or_else(|| {
-        LowerError::Unsupported("no se encontro la tabla de hechos".to_string())
-    })?;
+    let fact_table = first_fact_table(model, atoms)
+        .ok_or_else(|| LowerError::Unsupported("no se encontro la tabla de hechos".to_string()))?;
 
     let mut needed: Vec<ObjectId> = vec![fact_table];
     for table in required_tables(model, atoms) {
@@ -590,10 +582,7 @@ fn owner_of(model: &Model, column: ObjectId) -> ObjectId {
 /// `COUNTROWS` y las agregaciones sobre tabla no tienen columna: su tabla viene en el atomo.
 /// Sin esta rama, `COUNTROWS('Fact Sales')` no baja a SQL y el caso queda sin fast path.
 fn first_fact_table(model: &Model, atoms: &AtomSet) -> Option<ObjectId> {
-    atoms
-        .atoms
-        .iter()
-        .find_map(|atom| atom.anchor_table(model))
+    atoms.atoms.iter().find_map(|atom| atom.anchor_table(model))
 }
 
 /// Todas las tablas que el conjunto de atomos necesita en el FROM.
@@ -641,7 +630,9 @@ fn render_expression(
         }
         E::Number { value, .. } => value.to_string(),
         E::Text { value, .. } => escape_string(value),
-        E::Binary { left, right, op, .. } => {
+        E::Binary {
+            left, right, op, ..
+        } => {
             let left = render_expression(left, sources, aliases)?;
             let right = render_expression(right, sources, aliases)?;
             let operator = match op {
@@ -825,7 +816,22 @@ fn lower_atom(
         AtomKind::Min => "MIN",
         AtomKind::Max => "MAX",
         AtomKind::Average => "AVG",
-        AtomKind::DistinctCount => return Ok(format!("COUNT(DISTINCT {column_name})")),
+        AtomKind::Median => "MEDIAN",
+        AtomKind::Variance => {
+            return Ok(format!(
+                "CASE WHEN COUNT({column_name}) < 2 THEN error('VAR.S needs at least two non-blank values') ELSE VAR_SAMP({column_name}) END"
+            ));
+        }
+        AtomKind::StandardDeviation => {
+            return Ok(format!(
+                "CASE WHEN COUNT({column_name}) < 2 THEN error('STDEV.S needs at least two non-blank values') ELSE STDDEV_SAMP({column_name}) END"
+            ));
+        }
+        AtomKind::DistinctCount => {
+            return Ok(format!(
+                "CASE WHEN COUNT(*) = 0 THEN NULL ELSE COUNT(DISTINCT {column_name}) + CASE WHEN COUNT(*) > COUNT({column_name}) THEN 1 ELSE 0 END END"
+            ));
+        }
         AtomKind::Expression => {
             return Err(LowerError::Unsupported(format!(
                 "el atomo `{}` es una agregacion sobre expresion",
@@ -885,7 +891,7 @@ fn lower_filters(
                 wrote_propagated = true;
                 seen_propagated.push(target_table);
             }
-            predicates.push(lower_filter(sources, &qualified, filter)?);
+            predicates.push(lower_filter(model, sources, *column, &qualified, filter)?);
         }
     }
 
@@ -896,11 +902,20 @@ fn lower_filters(
 }
 
 fn lower_filter(
+    model: &Model,
     sources: &SourceMap,
+    column: ObjectId,
     target: &str,
     filter: &datan_dax_eval::Filter,
 ) -> Result<String, LowerError> {
-    let target = target.to_string();
+    let target = if model
+        .column(column)
+        .is_some_and(|(_, column)| column.data_type == datan_model::DataType::DateTime)
+    {
+        format!("CAST({target} AS DATE)")
+    } else {
+        target.to_string()
+    };
     match &filter.source {
         FilterSource::Concrete(values) => {
             let operator = match filter.operator {
@@ -927,13 +942,11 @@ fn lower_filter(
                 // negar nada. Es la regla que aplica el interprete en `matches`, y un filtro
                 // que da todas las filas por SQL y ninguna por el interprete es la peor
                 // clase de divergencia. `1 = 0` se pliega sin mirar la tabla.
-                return Ok(
-                    match filter.operator {
-                        datan_dax_eval::FilterOperator::NotEqual => "1 = 1",
-                        _ => "1 = 0",
-                    }
-                    .to_string(),
-                );
+                return Ok(match filter.operator {
+                    datan_dax_eval::FilterOperator::NotEqual => "1 = 1",
+                    _ => "1 = 0",
+                }
+                .to_string());
             }
             if matches!(filter.operator, datan_dax_eval::FilterOperator::In) {
                 // `IN` con uno o varios valores, siempre entre parentesis. Con UN valor
@@ -973,6 +986,14 @@ fn lower_filter(
         } => {
             let (origin_physical, origin_table) = sources.column(*origin_column)?;
             let (table_physical, _) = sources.qualified(origin_table)?;
+            let origin_projection = if model
+                .column(*origin_column)
+                .is_some_and(|(_, column)| column.data_type == datan_model::DataType::DateTime)
+            {
+                format!("CAST({} AS DATE)", quote_identifier(origin_physical))
+            } else {
+                quote_identifier(origin_physical)
+            };
 
             // Los filtros del origen se aniden un nivel. Es un semijoin, no un join: no
             // duplica filas de la tabla de hechos.
@@ -981,7 +1002,13 @@ fn lower_filter(
                 .map(|inner_filter| {
                     let (inner_column, _) = sources.column(inner_filter.column)?;
                     // Dentro del subselect no hay alias: la columna es de una sola tabla.
-                    lower_filter(sources, &quote_identifier(inner_column), inner_filter)
+                    lower_filter(
+                        model,
+                        sources,
+                        inner_filter.column,
+                        &quote_identifier(inner_column),
+                        inner_filter,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -992,8 +1019,7 @@ fn lower_filter(
             };
 
             Ok(format!(
-                "{target} IN (SELECT {} FROM {}{})",
-                quote_identifier(&origin_physical),
+                "{target} IN (SELECT {origin_projection} FROM {}{})",
                 quote_qualified(&table_physical),
                 inner_where
             ))

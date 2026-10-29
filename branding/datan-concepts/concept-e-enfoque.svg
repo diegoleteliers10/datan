@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Datan concept E: enfoque</title>
+  <g fill="#111111">
+    <circle cx="35" cy="72" r="8"/><circle cx="62" cy="54" r="5"/><circle cx="48" cy="104" r="6"/>
+    <circle cx="32" cy="144" r="5"/><circle cx="63" cy="169" r="8"/><circle cx="39" cy="203" r="6"/>
+  </g>
+  <path d="M78 128C109 76 165 76 198 128C165 180 109 180 78 128ZM103 128C126 101 151 101 173 128C151 155 126 155 103 128Z" fill="#111111" fill-rule="evenodd"/>
+  <path d="M127 115h14v14h-14zM145 115h14v14h-14zM127 133h14v14h-14zM145 133h14v14h-14z" fill="#111111"/>
+</svg>

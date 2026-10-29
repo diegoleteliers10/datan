@@ -17,10 +17,7 @@ fn main() {
     let mut fallidos = 0usize;
     let mut nulls = 0usize;
 
-    println!(
-        "{:<32} {:>14} {:>14}  {}",
-        "caso", "SQL", "interprete", ""
-    );
+    println!("{:<32} {:>14} {:>14}  {}", "caso", "SQL", "interprete", "");
     println!("{}", "-".repeat(76));
 
     for result in &results {
@@ -52,7 +49,10 @@ fn main() {
             // La diferencia se imprime. Un "DIFIERE" sin el detalle obliga a reproducir el
             // caso a mano, y reproducir a mano es como se pierden horas.
             println!();
-            println!("        SQL        : {:?}", result.sql_rows.as_deref().unwrap_or(&[]));
+            println!(
+                "        SQL        : {:?}",
+                result.sql_rows.as_deref().unwrap_or(&[])
+            );
             println!("        interprete : {:?}", result.interp_rows);
         }
 

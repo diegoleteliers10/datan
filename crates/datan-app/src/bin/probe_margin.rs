@@ -170,7 +170,12 @@ fn main() {
 
         println!("  {} atomo(s)", atoms.atoms.len());
         for atom in &atoms.atoms {
-            println!("    {} {:?} columnas={:?}", atom.label, atom.kind, atom.referenced_columns());
+            println!(
+                "    {} {:?} columnas={:?}",
+                atom.label,
+                atom.kind,
+                atom.referenced_columns()
+            );
         }
 
         let generated = match lower(&model, &sources, &atoms, &context) {
@@ -279,11 +284,17 @@ fn main() {
                     for (label, sql) in [
                         (
                             "solo en la generada",
-                            format!("SELECT * FROM ({}) EXCEPT SELECT * FROM ({manual})", plan.sql),
+                            format!(
+                                "SELECT * FROM ({}) EXCEPT SELECT * FROM ({manual})",
+                                plan.sql
+                            ),
                         ),
                         (
                             "solo en la linea base",
-                            format!("SELECT * FROM ({manual}) EXCEPT SELECT * FROM ({})", plan.sql),
+                            format!(
+                                "SELECT * FROM ({manual}) EXCEPT SELECT * FROM ({})",
+                                plan.sql
+                            ),
                         ),
                     ] {
                         match engine.query_arrow(&sql) {

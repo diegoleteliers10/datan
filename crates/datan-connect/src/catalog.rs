@@ -32,7 +32,7 @@
 use std::collections::BTreeMap;
 
 use datan_model::{
-    Cardinality, FilterDirection, Model, ObjectId, Relationship, RelationshipRole, TableKind,
+    Cardinality, FilterDirection, ObjectId, Relationship, RelationshipRole,
 };
 
 use crate::ConnectError;
@@ -40,6 +40,9 @@ use crate::ConnectError;
 /// Una clave foranea, tal y como la cuenta Postgres.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ForeignKey {
+    pub constraint: String,
+    pub column_count: i32,
+    pub source_is_unique: bool,
     pub schema: String,
     pub table: String,
     pub column: String,
@@ -59,7 +62,42 @@ impl PostgresCatalog {
     /// `config` es un DSN de libpq: `host=localhost dbname=datan_bench`. El mismo formato
     /// que acepta el `ATTACH` de DuckDB, para que el usuario escriba la conexion una vez.
     pub fn connect(config: &str) -> Result<Self, ConnectError> {
-        let mut client = postgres::Client::connect(config, postgres::NoTls).map_err(|error| {
+        let tls = native_tls::TlsConnector::new().map_err(|error| {
+            ConnectError::Catalog(format!("no se pudo preparar TLS para Postgres: {error}"))
+        })?;
+        let connector = postgres_native_tls::MakeTlsConnector::new(tls);
+        let mut client = postgres::Client::connect(config, connector).map_err(|error| {
+            ConnectError::Catalog(format!("no se pudo conectar a Postgres: {error}"))
+        })?;
+        client
+            .simple_query("SELECT 1")
+            .map_err(|error| ConnectError::Catalog(format!("la conexion no responde: {error}")))?;
+        Ok(Self { client })
+    }
+
+    /// Abre el catálogo con el modo SSL/TLS elegido para la conexión de datos.
+    pub fn connect_with_sslmode(config: &str, sslmode: &str) -> Result<Self, ConnectError> {
+        let mut client = match sslmode.to_ascii_lowercase().as_str() {
+            "disable" => postgres::Client::connect(config, postgres::NoTls),
+            "prefer" | "require" => {
+                let mut builder = native_tls::TlsConnector::builder();
+                // `prefer` intenta cifrar y puede volver a texto plano. `require` exige TLS.
+                // Ninguno valida el certificado ni el nombre del servidor.
+                builder
+                    .danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_hostnames(true);
+                let tls = builder.build().map_err(|error| {
+                    ConnectError::Catalog(format!("no se pudo preparar TLS para Postgres: {error}"))
+                })?;
+                postgres::Client::connect(config, postgres_native_tls::MakeTlsConnector::new(tls))
+            }
+            _ => {
+                return Err(ConnectError::Catalog(format!(
+                    "modo SSL/TLS no válido: {sslmode}"
+                )));
+            }
+        }
+        .map_err(|error| {
             ConnectError::Catalog(format!("no se pudo conectar a Postgres: {error}"))
         })?;
         client
@@ -76,12 +114,24 @@ impl PostgresCatalog {
     /// y por la conexion directa no hay scanner en medio.
     pub fn foreign_keys(&mut self) -> Result<Vec<ForeignKey>, ConnectError> {
         const SQL: &str = "SELECT
+                con.conname,
+                cardinality(con.conkey),
                 src_ns.nspname,
                 src.relname,
                 src_attr.attname,
                 dst_ns.nspname,
                 dst.relname,
-                dst_attr.attname
+                dst_attr.attname,
+                CASE WHEN cardinality(con.conkey) = 1 THEN EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_index unique_idx
+                    WHERE unique_idx.indrelid = src.oid
+                      AND unique_idx.indisunique
+                      AND unique_idx.indisvalid
+                      AND unique_idx.indpred IS NULL
+                      AND unique_idx.indnkeyatts = 1
+                      AND unique_idx.indkey[0] = key.attnum
+                ) ELSE false END
             FROM pg_catalog.pg_constraint con
             JOIN pg_catalog.pg_class src ON src.oid = con.conrelid
             JOIN pg_catalog.pg_namespace src_ns ON src_ns.oid = src.relnamespace
@@ -99,22 +149,23 @@ impl PostgresCatalog {
         let rows = self
             .client
             .query(SQL, &[])
-            .map_err(|error| {
-                ConnectError::Query {
-                    sql: SQL.to_string(),
-                    error: error.to_string(),
-                }
+            .map_err(|error| ConnectError::Query {
+                sql: SQL.to_string(),
+                error: error.to_string(),
             })?;
 
         Ok(rows
             .iter()
             .map(|row| ForeignKey {
-                schema: row.get(0),
-                table: row.get(1),
-                column: row.get(2),
-                foreign_schema: row.get(3),
-                foreign_table: row.get(4),
-                foreign_column: row.get(5),
+                constraint: row.get(0),
+                column_count: row.get(1),
+                schema: row.get(2),
+                table: row.get(3),
+                column: row.get(4),
+                foreign_schema: row.get(5),
+                foreign_table: row.get(6),
+                foreign_column: row.get(7),
+                source_is_unique: row.get(8),
             })
             .collect())
     }
@@ -124,7 +175,9 @@ impl PostgresCatalog {
     /// Sin clave primaria declarada no se puede afirmar que una dimension tenga una clave, y
     /// un `DISTINCTCOUNT` sobre una columna cualquiera no es lo mismo que contar filas de una
     /// dimension. Sin esta informacion, el modelo no dice nada falso: no dice nada.
-    pub fn primary_keys(&mut self) -> Result<BTreeMap<(String, String), Vec<String>>, ConnectError> {
+    pub fn primary_keys(
+        &mut self,
+    ) -> Result<BTreeMap<(String, String), Vec<String>>, ConnectError> {
         const SQL: &str = "SELECT
                 ns.nspname,
                 tbl.relname,
@@ -139,79 +192,118 @@ impl PostgresCatalog {
               AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
             ORDER BY ns.nspname, tbl.relname, key.position";
 
-        let rows = self.client.query(SQL, &[]).map_err(|error| ConnectError::Query {
-            sql: SQL.to_string(),
-            error: error.to_string(),
-        })?;
+        let rows = self
+            .client
+            .query(SQL, &[])
+            .map_err(|error| ConnectError::Query {
+                sql: SQL.to_string(),
+                error: error.to_string(),
+            })?;
 
         let mut out: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
         for row in &rows {
-            out.entry((row.get(0), row.get(1))).or_default().push(row.get(2));
+            out.entry((row.get(0), row.get(1)))
+                .or_default()
+                .push(row.get(2));
         }
         Ok(out)
     }
 
-    /// Convierte el catalogo en relaciones del modelo.
-    ///
-    /// `from_column` es SIEMPRE la clave de la tabla referenciada (la dimension) y
-    /// `to_column` la clave foranea de la tabla que referencia. Una relationship al reves
-    /// filtra los hechos por la dimension, que es lo que hace el `GROUP BY` y lo que espera
-    /// el fast path.
-    pub fn relationships(
-        &mut self,
-        model: &Model,
-        column_ids: &BTreeMap<(String, String, String), ObjectId>,
-        foreign_keys: &[ForeignKey],
-    ) -> Result<Vec<Relationship>, ConnectError> {
-        let mut out = Vec::new();
-        for key in foreign_keys {
+}
+
+/// Convierte relaciones de una sola columna del catalogo al modelo.
+///
+/// La columna referenciada queda en `from` y la FK en `to`. Las FKs compuestas se
+/// omiten porque el modelo actual no puede guardar pares de columnas como una relacion.
+pub fn relationships_from_catalog(
+    column_ids: &BTreeMap<(String, String, String), ObjectId>,
+    foreign_keys: &[ForeignKey],
+) -> Vec<Relationship> {
+    foreign_keys
+        .iter()
+        .filter(|key| key.column_count == 1)
+        .filter_map(|key| {
             let from = column_ids.get(&(
                 key.foreign_schema.clone(),
                 key.foreign_table.clone(),
                 key.foreign_column.clone(),
             ));
-            let to = column_ids.get(&(
-                key.schema.clone(),
-                key.table.clone(),
-                key.column.clone(),
-            ));
+            let to = column_ids.get(&(key.schema.clone(), key.table.clone(), key.column.clone()));
             let (Some(from), Some(to)) = (from, to) else {
-                // La columna referenciada no esta en el modelo. Pasa cuando la constraint
-                // cruza un esquema que el filtro de `duckdb_columns` dejo fuera.
-                continue;
+                return None;
             };
-
-            // La direccion la decide el CATALOGO, no una heuristica de nombres: la tabla
-            // referenciada es la dimension. Una tabla que referencia a otra puede ser hechos
-            // (`product_boleta` -> `catalogo_productos`) o una tabla puente, y las dos
-            // relaciones son unidireccionales desde la referenciada.
-            let referrer_is_fact = model
-                .tables
-                .iter()
-                .find(|table| {
-                    table.name == key.table && matches!(table.kind, TableKind::Facts)
-                })
-                .is_some();
-
-            out.push(Relationship {
+            Some(Relationship {
                 from_column: *from,
                 to_column: *to,
-                cardinality: if referrer_is_fact {
-                    Cardinality::OneToMany
+                cardinality: if key.source_is_unique {
+                    Cardinality::OneToOne
                 } else {
-                    Cardinality::ManyToOne
+                    Cardinality::OneToMany
                 },
-                // Unidireccional. Una relationship bidireccional que nadie pidio es como
-                // aparecen los ciclos, y un ciclo no se puede bajar a SQL.
                 direction: FilterDirection::Single,
                 role: RelationshipRole::Active,
-                // `false` a proposito. Con `true` el motor podria asumir que no hay
-                // huerfanos y unifying joins, que es mas rapido y silenciosamente mas
-                // erroneo si los hay. Un numero que falta se nota; uno que se infiere no.
                 assume_referential_integrity: false,
-            });
-        }
+            })
+        })
+        .collect()
+}
 
-        Ok(out)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn foreign_key(column_count: i32, source_is_unique: bool) -> ForeignKey {
+        ForeignKey {
+            constraint: "fk_orders_customer".to_string(),
+            column_count,
+            source_is_unique,
+            schema: "public".to_string(),
+            table: "orders".to_string(),
+            column: "customer_id".to_string(),
+            foreign_schema: "public".to_string(),
+            foreign_table: "customers".to_string(),
+            foreign_column: "id".to_string(),
+        }
+    }
+
+    fn column_ids() -> BTreeMap<(String, String, String), ObjectId> {
+        BTreeMap::from([
+            (
+                ("public".to_string(), "customers".to_string(), "id".to_string()),
+                ObjectId(10),
+            ),
+            (
+                (
+                    "public".to_string(),
+                    "orders".to_string(),
+                    "customer_id".to_string(),
+                ),
+                ObjectId(20),
+            ),
+        ])
+    }
+
+    #[test]
+    fn foreign_key_uses_referenced_to_foreign_orientation_and_cardinality() {
+        let relationships = relationships_from_catalog(&column_ids(), &[foreign_key(1, false)]);
+
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships[0].from_column, ObjectId(10));
+        assert_eq!(relationships[0].to_column, ObjectId(20));
+        assert_eq!(relationships[0].cardinality, Cardinality::OneToMany);
+    }
+
+    #[test]
+    fn unique_foreign_key_is_one_to_one() {
+        let relationships = relationships_from_catalog(&column_ids(), &[foreign_key(1, true)]);
+
+        assert_eq!(relationships[0].cardinality, Cardinality::OneToOne);
+    }
+
+    #[test]
+    fn composite_foreign_key_does_not_create_false_single_column_joins() {
+        let relationships = relationships_from_catalog(&column_ids(), &[foreign_key(2, false)]);
+
+        assert!(relationships.is_empty());
     }
 }

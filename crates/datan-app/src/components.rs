@@ -8,7 +8,9 @@
 //! lista se construye con el tema del render que lo pide, y asi el dia que el tema cambie no
 //! hay una copia del color viejo guardada en una constante.
 
+use datan_model::ObjectId;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 // `Div::on_click` y `Div::hover` viven en este trait. `gpui-kit` reexporta los tipos de gpui
@@ -94,6 +96,55 @@ where
     pintado.on_click(on_click).into_any_element()
 }
 
+/// Un boton de barra que muestra si una zona esta abierta.
+pub fn boton_barra_estado<F>(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    nombre: IconName,
+    etiqueta: impl Into<SharedString>,
+    activo: bool,
+    compacto: bool,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let etiqueta = etiqueta.into();
+    let ayuda = etiqueta.clone();
+    let mut base = div()
+        .id(ElementId::Name(id.into()))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(ayuda.clone()).build(window, cx)
+        })
+        .h(px(tokens::ALTO_CONTROL))
+        .px(px(if compacto { 1.0 } else { 8.0 }))
+        .rounded_lg()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(tokens::LETRA_TITULO))
+        .cursor_pointer()
+        .child(icono(
+            nombre,
+            tokens::LETRA_ICONO,
+            if activo {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            },
+        ));
+    if !compacto {
+        base = base.child(etiqueta);
+    }
+    base = if activo {
+        base.bg(theme.muted).text_color(theme.foreground)
+    } else {
+        base.text_color(theme.muted_foreground)
+            .hover(|style| style.bg(theme.list_hover))
+    };
+    base.on_click(on_click).into_any_element()
+}
+
 /// Un boton que existe pero no hace nada, porque el flujo que lo respalda no existe.
 ///
 /// Se dibuja apagado y no recibe clic. Un boton que se ve activo y no responde es peor que
@@ -124,6 +175,23 @@ pub fn boton_apagado_con_icono(
         base = base.child(icono(nombre, tokens::LETRA_ICONO, theme.muted_foreground));
     }
     base.child(etiqueta.into()).into_any_element()
+}
+
+pub fn boton_apagado_con_ayuda(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    nombre: Option<IconName>,
+    etiqueta: impl Into<SharedString>,
+    ayuda: impl Into<SharedString>,
+) -> AnyElement {
+    let ayuda = ayuda.into();
+    div()
+        .id(ElementId::Name(id.into()))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(ayuda.clone()).build(window, cx)
+        })
+        .child(boton_apagado_con_icono(theme, nombre, etiqueta))
+        .into_any_element()
 }
 
 /// Un boton secundario que ocupa el ancho que le den.
@@ -159,7 +227,9 @@ where
     if let Some(nombre) = nombre {
         base = base.child(icono(nombre, tokens::LETRA_ICONO, theme.foreground));
     }
-    base.child(etiqueta.into()).on_click(on_click).into_any_element()
+    base.child(etiqueta.into())
+        .on_click(on_click)
+        .into_any_element()
 }
 
 /// Un boton de solo icono.
@@ -230,7 +300,7 @@ pub fn caja_segmentada(theme: &Theme) -> Div {
 
 /// Una opcion de un control segmentado.
 pub fn segmento<F>(
-    theme: &Theme,
+    _theme: &Theme,
     id: impl Into<SharedString>,
     etiqueta: impl Into<SharedString>,
     activo: bool,
@@ -239,29 +309,61 @@ pub fn segmento<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
+    let button = Button::new(ElementId::Name(id.into()))
+        .label(etiqueta)
+        .compact()
+        .toggled(activo)
+        .on_click(on_click);
+    if activo {
+        button.primary().into_any_element()
+    } else {
+        button.ghost().into_any_element()
+    }
+}
+
+/// Una pestaña de navegación superior.
+///
+/// La selección usa el fondo tenue del sistema. Las vistas inactivas conservan el texto y el
+/// icono del tema, con el mismo estado hover que el resto de controles.
+pub fn tab_navegacion<F>(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    nombre: IconName,
+    etiqueta: impl Into<SharedString>,
+    activa: bool,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
     let base = div()
         .id(ElementId::Name(id.into()))
-        .h(px(tokens::ALTO_SEGMENTO))
-        .px_2()
+        .h(px(tokens::ALTO_CONTROL))
+        .px_3()
         .rounded_xl()
         .flex()
         .items_center()
-        .text_size(px(tokens::LETRA_NOTA))
-        .cursor_pointer()
+        .gap_2()
+        .text_size(px(tokens::LETRA_TITULO))
+        .child(icono(nombre, tokens::LETRA_ICONO, theme.foreground))
         .child(etiqueta.into());
-    let pintado = if activo {
-        base.bg(theme.primary).text_color(theme.primary_foreground)
+    if activa {
+        base.bg(theme.muted)
+            .text_color(theme.foreground)
+            .font_semibold()
+            .into_any_element()
     } else {
-        base.text_color(theme.muted_foreground)
+        base.cursor_pointer()
+            .text_color(theme.muted_foreground)
             .hover(|style| style.bg(theme.list_hover))
-    };
-    pintado.on_click(on_click).into_any_element()
+            .on_click(on_click)
+            .into_any_element()
+    }
 }
 
 /// Un mosaico del selector de visuales: un icono y su etiqueta.
 ///
-/// La etiqueta va sin relleno lateral a proposito: el mosaico mide 58 px y "Dispersion" no
-/// entra con margen. Un nombre cortado por el borde es peor que un nombre sin aire.
+/// La etiqueta va sin relleno lateral para dejar espacio al texto de cada visual.
 pub fn mosaico<F>(
     theme: &Theme,
     id: impl Into<SharedString>,
@@ -276,11 +378,17 @@ where
 {
     let base = div()
         .id(ElementId::Name(id.into()))
-        .w(px(tokens::ANCHO_MOSAICO))
-        .h(px(52.0))
+        // Cuatro tarjetas tienen que caber en el panel de 264 px. El borde del panel
+        // reduce el ancho útil en un pixel.
+        .w(px(58.0))
+        .h(px(64.0))
         .rounded_xl()
         .border_1()
-        .border_color(theme.border)
+        .border_color(if activo {
+            theme.foreground
+        } else {
+            theme.border
+        })
         .flex()
         .flex_col()
         .items_center()
@@ -299,9 +407,10 @@ where
     }
 
     let pintado = if activo {
-        base.bg(theme.foreground)
-            .text_color(theme.background)
-            .child(icono(glifo, tokens::LETRA_ICONO, theme.background))
+        base.bg(theme.primary)
+            .border_color(theme.primary)
+            .text_color(theme.primary_foreground)
+            .child(icono(glifo, tokens::LETRA_ICONO, theme.primary_foreground))
     } else {
         base.text_color(theme.foreground)
             .cursor_pointer()
@@ -339,40 +448,6 @@ pub fn fila_propiedad(
         .into_any_element()
 }
 
-/// Una pastilla con una `x`: un filtro activo. Pincharla quita el filtro.
-pub fn pastilla<F>(
-    theme: &Theme,
-    id: impl Into<SharedString>,
-    etiqueta: impl Into<SharedString>,
-    on_click: F,
-) -> AnyElement
-where
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
-    div()
-        .id(ElementId::Name(id.into()))
-        .h(px(tokens::ALTO_PASTILLA))
-        .px_2()
-        .rounded_xl()
-        .border_1()
-        .border_color(theme.border)
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_size(px(tokens::LETRA_NOTA))
-        .cursor_pointer()
-        .hover(|style| style.bg(theme.list_hover))
-        .child(etiqueta.into())
-        .child(
-            div()
-                .text_size(px(tokens::LETRA_NOTA))
-                .text_color(theme.muted_foreground)
-                .child("\u{00d7}"),
-        )
-        .on_click(on_click)
-        .into_any_element()
-}
-
 /// Una fila de la lista de campos o de medidas.
 ///
 /// El estado de seleccion se ve en el relleno y en el peso de la letra, no en un punto al
@@ -380,8 +455,10 @@ where
 pub fn fila_dato<F>(
     theme: &Theme,
     id: impl Into<SharedString>,
+    icon: IconName,
     etiqueta: impl Into<SharedString>,
     activa: bool,
+    campo: CampoArrastrado,
     on_click: F,
 ) -> AnyElement
 where
@@ -398,6 +475,15 @@ where
         .text_size(px(tokens::LETRA_TITULO))
         .overflow_hidden()
         .cursor_pointer()
+        .child(icono(
+            icon,
+            tokens::LETRA_ICONO,
+            if activa {
+                theme.primary_foreground
+            } else {
+                theme.muted_foreground
+            },
+        ))
         .child(etiqueta.into());
     let pintado = if activa {
         base.bg(theme.primary)
@@ -407,7 +493,32 @@ where
         base.text_color(theme.foreground)
             .hover(|style| style.bg(theme.list_hover))
     };
-    pintado.on_click(on_click).into_any_element()
+    pintado
+        .on_drag(campo, |_, _, _, cx| cx.new(|_| ::gpui::Empty))
+        .on_click(on_click)
+        .into_any_element()
+}
+
+#[derive(Clone, Copy)]
+pub struct CampoArrastrado {
+    pub id: ObjectId,
+    pub es_medida: bool,
+}
+
+pub fn campo_arrastrable(
+    theme: &Theme,
+    etiqueta: impl Into<SharedString>,
+    campo: CampoArrastrado,
+) -> AnyElement {
+    fila_dato(
+        theme,
+        SharedString::from(format!("visual-role-field-{}", campo.id.0)),
+        IconName::Table,
+        etiqueta,
+        false,
+        campo,
+        |_, _, _| {},
+    )
 }
 
 /// La superficie de una tarjeta: el fondo de la app, con borde suave y sin sombra.
@@ -425,8 +536,12 @@ pub fn tarjeta(theme: &Theme) -> Div {
 
 /// El titulo de una tarjeta.
 pub fn titulo_tarjeta(theme: &Theme, texto: impl Into<SharedString>) -> Div {
+    titulo_tarjeta_zoom(theme, texto, 1.0)
+}
+
+pub fn titulo_tarjeta_zoom(theme: &Theme, texto: impl Into<SharedString>, zoom: f32) -> Div {
     div()
-        .text_size(px(tokens::LETRA_TITULO))
+        .text_size(px(tokens::LETRA_TITULO * zoom))
         .font_semibold()
         .text_color(theme.foreground)
         .child(texto.into())
@@ -434,8 +549,12 @@ pub fn titulo_tarjeta(theme: &Theme, texto: impl Into<SharedString>) -> Div {
 
 /// Una linea de texto secundario: un conteo, una nota, la leyenda.
 pub fn nota(theme: &Theme, texto: impl Into<SharedString>) -> Div {
+    nota_zoom(theme, texto, 1.0)
+}
+
+pub fn nota_zoom(theme: &Theme, texto: impl Into<SharedString>, zoom: f32) -> Div {
     div()
-        .text_size(px(tokens::LETRA_NOTA))
+        .text_size(px(tokens::LETRA_NOTA * zoom))
         .text_color(theme.muted_foreground)
         .child(texto.into())
 }
@@ -457,21 +576,11 @@ pub fn superficie(theme: &Theme, con_fondo: bool) -> Div {
 ///
 /// `editable` en `false` lo dibuja con el valor que tiene y sin clic. En modo Lectura el
 /// informe se mira: un interruptor que parece que se puede tocar y no hace nada miente.
-pub fn interruptor<F>(
-    theme: &Theme,
-    id: impl Into<SharedString>,
-    etiqueta: impl Into<SharedString>,
-    encendido: bool,
-    editable: bool,
-    on_click: F,
-) -> AnyElement
-where
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
+/// La pista del interruptor, sin etiqueta ni fila: para armar filas propias del panel.
+pub fn pista_interruptor(theme: &Theme, encendido: bool, editable: bool) -> Div {
     let pista = div()
         .w(px(tokens::ANCHO_INTERRUPTOR))
         .h(px(16.0))
-        .flex_shrink_0()
         .rounded_full()
         .flex()
         .items_center()
@@ -494,19 +603,37 @@ where
                     theme.muted_foreground
                 }),
         );
-    let pista = if encendido {
+    if encendido {
         pista.justify_end()
     } else {
         pista.justify_start()
-    };
+    }
+}
 
+pub fn interruptor<F>(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    etiqueta: impl Into<SharedString>,
+    encendido: bool,
+    editable: bool,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let pista = pista_interruptor(theme, encendido, editable).flex_shrink_0();
+
+    // Fila del panel de propiedades: etiqueta en negrita a la izquierda, control a la
+    // derecha, y una linea fina abajo que separa una opcion de la siguiente.
     let fila = div()
         .flex()
         .items_center()
         .justify_between()
-        .gap_2()
-        .py_1()
-        .text_size(px(tokens::LETRA_ETIQUETA))
+        .gap_3()
+        .py_2()
+        .border_b_1()
+        .border_color(theme.border)
+        .text_size(px(tokens::LETRA_CUERPO))
         .text_color(if editable {
             theme.foreground
         } else {

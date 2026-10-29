@@ -134,13 +134,7 @@ fn main() {
     .expect("extrae atomos");
 
     let sources = SourceMap::from_model(&model());
-    let plan = lower(
-        &model(),
-        &sources,
-        &atoms,
-        &FilterContext::empty(),
-    )
-    .expect("baja a SQL");
+    let plan = lower(&model(), &sources, &atoms, &FilterContext::empty()).expect("baja a SQL");
 
     println!("\n{}", indent(&plan.sql, "   "));
     let started = Instant::now();
@@ -157,10 +151,15 @@ fn main() {
 
     // 3. Con filtro. El filtro de la dimension tiene que llegar a los hechos por el semijoin.
     println!("\n3. SQL generado, con filtro Region = 'Norte'");
-    let filters = FilterContext::empty()
-        .with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
-    let atoms = extract_atoms("SUM('fact_sales'[qty])", &model(), &filters, &[PRODUCT_QUARTER])
-        .expect("extrae atomos");
+    let filters =
+        FilterContext::empty().with_equal(PRODUCT_REGION, FilterValue::Text("Norte".to_string()));
+    let atoms = extract_atoms(
+        "SUM('fact_sales'[qty])",
+        &model(),
+        &filters,
+        &[PRODUCT_QUARTER],
+    )
+    .expect("extrae atomos");
     let plan = lower(&model(), &sources, &atoms, &filters).expect("baja a SQL");
 
     println!("\n{}", indent(&plan.sql, "   "));
@@ -194,7 +193,9 @@ fn main() {
     println!("\n5. Comparacion de resultados, con EXCEPT");
     match compare(&engine, &plan.sql, MANUAL_FILTERED) {
         Ok(true) => {
-            println!("\n   COINCIDEN. El lowering produce la misma consulta que el spike demostro.");
+            println!(
+                "\n   COINCIDEN. El lowering produce la misma consulta que el spike demostro."
+            );
             println!("   El generador no esta mintiendo.");
         }
         Ok(false) => {
@@ -250,7 +251,12 @@ fn read_count(batches: &[datan_storage::arrow::record_batch::RecordBatch]) -> i6
 }
 
 fn report_plan(plan: &str, indent: &str) {
-    for node in ["HASH_GROUP_BY", "PERFECT_HASH_GROUP_BY", "DELIM_JOIN", "IE_JOIN"] {
+    for node in [
+        "HASH_GROUP_BY",
+        "PERFECT_HASH_GROUP_BY",
+        "DELIM_JOIN",
+        "IE_JOIN",
+    ] {
         if plan.contains(node) {
             println!("{indent}nodo de plan: {node}");
         }
@@ -263,4 +269,3 @@ fn indent(text: &str, prefix: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-

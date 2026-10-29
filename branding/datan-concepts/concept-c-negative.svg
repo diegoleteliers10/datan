@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">Datan concept C: negative connection</title>
+  <rect x="16" y="16" width="224" height="224" rx="56" fill="#111111"/>
+  <path fill="#ffffff" d="M62 54H120A74 74 0 0 1 120 202H62Z M96 88H120A40 40 0 0 1 120 168H96Z" fill-rule="evenodd"/>
+  <path fill="#111111" d="M96 112H178V144H96Z"/>
+</svg>

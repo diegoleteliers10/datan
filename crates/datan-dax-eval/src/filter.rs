@@ -354,90 +354,90 @@ impl FilterContext {
     }
 
     /// Propaga a lo largo de una relationship.
-///
-/// La propagacion es a nivel de TABLA, no de columna. Un filtro sobre cualquier columna de
-/// `Dim Product` filtra filas de `Dim Product`, y eso filtra `Fact Sales` por la clave de la
-/// relacion. Por eso se comprueba si la tabla del lado de la dimension tiene algun filtro,
-/// no si la columna concreta lo tiene.
-///
-/// El filtro viaja como `Propagated`, no con valores copiados.
-fn propagate_one(&self, model: &Model, relationship: &Relationship) -> FilterContext {
-    let mut result = self.clone();
+    ///
+    /// La propagacion es a nivel de TABLA, no de columna. Un filtro sobre cualquier columna de
+    /// `Dim Product` filtra filas de `Dim Product`, y eso filtra `Fact Sales` por la clave de la
+    /// relacion. Por eso se comprueba si la tabla del lado de la dimension tiene algun filtro,
+    /// no si la columna concreta lo tiene.
+    ///
+    /// El filtro viaja como `Propagated`, no con valores copiados.
+    fn propagate_one(&self, model: &Model, relationship: &Relationship) -> FilterContext {
+        let mut result = self.clone();
 
-    if relationship.role == RelationshipRole::Inactive {
-        return result;
-    }
+        if relationship.role == RelationshipRole::Inactive {
+            return result;
+        }
 
-    let from_table = model.column(relationship.from_column).map(|(t, _)| t.id);
-    let to_table = model.column(relationship.to_column).map(|(t, _)| t.id);
+        let from_table = model.column(relationship.from_column).map(|(t, _)| t.id);
+        let to_table = model.column(relationship.to_column).map(|(t, _)| t.id);
 
-    // Filtros que viven en la tabla de la dimension.
-    let origin_filters: Vec<Filter> = match from_table {
-        Some(table_id) => self.filters_in_table(model, table_id).to_vec(),
-        None => Vec::new(),
-    };
-
-    if !origin_filters.is_empty() {
-        // El conjunto que sale de aplicar esos filtros en la tabla de origen.
-        let origin_context = FilterContext::from_filters(origin_filters);
-        let propagated = Filter {
-            column: relationship.to_column,
-            operator: FilterOperator::In,
-            source: FilterSource::Propagated {
-                origin_column: relationship.from_column,
-                origin_filters: origin_context.filters.into_values().flatten().collect(),
-            },
-        };
-        // Un semijoin REEMPLAZA a los anteriores de la misma columna, no se suma.
-        //
-        // Sin esto, `ALLEXCEPT(Dim Product, [Region])` conserva el semijoin viejo que
-        // todavia lleva `category = 'A'` y ademas anade el nuevo que solo lleva
-        // `region = 'Norte'`. Los dos se aplican a la vez y el filtro que `ALLEXCEPT`
-        // pretendia quitar sigue restringiendo el resultado. Es silencioso: el contexto
-        // tiene mas filtros de los que deberia y el numero sale mal sin que nada avise.
-        // Solo se quitan los semijoins anteriores. Un filtro CONCRETO sobre la misma columna
-        // sigue mandando: `product_id = 3` Y `product_id IN (los de la region Norte)` es una
-        // conjuncion, y quitar el primero devuelve el subtotal de la region entera.
-        let mut next = result.without_propagated_column(relationship.to_column);
-        next = next.with(propagated);
-        result = next;
-    }
-
-    // Bidireccional: tambien al reves. Un ciclo aca es lo que hace que el backend SQL no
-    // pueda expresar la consulta, porque SQL exige arbol de joins aciclico.
-    if relationship.direction == FilterDirection::Both {
-        let reverse_filters: Vec<Filter> = match to_table {
+        // Filtros que viven en la tabla de la dimension.
+        let origin_filters: Vec<Filter> = match from_table {
             Some(table_id) => self.filters_in_table(model, table_id).to_vec(),
             None => Vec::new(),
         };
-        if !reverse_filters.is_empty() {
-            let origin_context = FilterContext::from_filters(reverse_filters);
-            result = result.with(Filter {
-                column: relationship.from_column,
+
+        if !origin_filters.is_empty() {
+            // El conjunto que sale de aplicar esos filtros en la tabla de origen.
+            let origin_context = FilterContext::from_filters(origin_filters);
+            let propagated = Filter {
+                column: relationship.to_column,
                 operator: FilterOperator::In,
                 source: FilterSource::Propagated {
-                    origin_column: relationship.to_column,
+                    origin_column: relationship.from_column,
                     origin_filters: origin_context.filters.into_values().flatten().collect(),
                 },
-            });
+            };
+            // Un semijoin REEMPLAZA a los anteriores de la misma columna, no se suma.
+            //
+            // Sin esto, `ALLEXCEPT(Dim Product, [Region])` conserva el semijoin viejo que
+            // todavia lleva `category = 'A'` y ademas anade el nuevo que solo lleva
+            // `region = 'Norte'`. Los dos se aplican a la vez y el filtro que `ALLEXCEPT`
+            // pretendia quitar sigue restringiendo el resultado. Es silencioso: el contexto
+            // tiene mas filtros de los que deberia y el numero sale mal sin que nada avise.
+            // Solo se quitan los semijoins anteriores. Un filtro CONCRETO sobre la misma columna
+            // sigue mandando: `product_id = 3` Y `product_id IN (los de la region Norte)` es una
+            // conjuncion, y quitar el primero devuelve el subtotal de la region entera.
+            let mut next = result.without_propagated_column(relationship.to_column);
+            next = next.with(propagated);
+            result = next;
         }
+
+        // Bidireccional: tambien al reves. Un ciclo aca es lo que hace que el backend SQL no
+        // pueda expresar la consulta, porque SQL exige arbol de joins aciclico.
+        if relationship.direction == FilterDirection::Both {
+            let reverse_filters: Vec<Filter> = match to_table {
+                Some(table_id) => self.filters_in_table(model, table_id).to_vec(),
+                None => Vec::new(),
+            };
+            if !reverse_filters.is_empty() {
+                let origin_context = FilterContext::from_filters(reverse_filters);
+                result = result.with(Filter {
+                    column: relationship.from_column,
+                    operator: FilterOperator::In,
+                    source: FilterSource::Propagated {
+                        origin_column: relationship.to_column,
+                        origin_filters: origin_context.filters.into_values().flatten().collect(),
+                    },
+                });
+            }
+        }
+
+        let _ = to_table;
+        result
     }
 
-    let _ = to_table;
-    result
-}
-
-/// Los filtros que viven en una tabla, en cualquier columna.
-fn filters_in_table(&self, model: &Model, table: ObjectId) -> Vec<Filter> {
-    let Some(owner) = model.table(table) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for column in &owner.columns {
-        found.extend(self.filters_on(column.id).iter().cloned());
+    /// Los filtros que viven en una tabla, en cualquier columna.
+    fn filters_in_table(&self, model: &Model, table: ObjectId) -> Vec<Filter> {
+        let Some(owner) = model.table(table) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for column in &owner.columns {
+            found.extend(self.filters_on(column.id).iter().cloned());
+        }
+        found
     }
-    found
-}
 
     /// Todas las tablas que el contexto toca, calculadas propagando. Sirve para saber que
     /// joins necesita la consulta SQL.
@@ -458,7 +458,7 @@ fn filters_in_table(&self, model: &Model, table: ObjectId) -> Vec<Filter> {
     }
 
     /// Todas las columnas del modelo que participan en alguna relationship. Son las que el
-/// extractor de atomos tiene que mirar.
+    /// extractor de atomos tiene que mirar.
     pub fn relationship_columns(model: &Model) -> BTreeSet<ObjectId> {
         model
             .relationships
@@ -523,48 +523,48 @@ impl ColumnInfo {
 /// es unico. Si alguna difiere, el algebra no define una semantica y hay que negarse a
 /// evaluar ese modelo.
 pub fn propagate_ordered(model: &Model, start: &FilterContext, order: &[usize]) -> FilterContext {
-let mut current = start.clone();
-let max_rounds = model.tables.iter().map(|t| t.columns.len()).sum::<usize>() + 1;
+    let mut current = start.clone();
+    let max_rounds = model.tables.iter().map(|t| t.columns.len()).sum::<usize>() + 1;
 
-for _ in 0..max_rounds {
-    let mut changed = false;
-    for index in order {
-        let Some(relationship) = model.relationships.get(*index) else {
-            continue;
-        };
-        let before = current.column_count();
-        current = current.propagate_one(model, relationship);
-        if current.column_count() != before {
-            changed = true;
+    for _ in 0..max_rounds {
+        let mut changed = false;
+        for index in order {
+            let Some(relationship) = model.relationships.get(*index) else {
+                continue;
+            };
+            let before = current.column_count();
+            current = current.propagate_one(model, relationship);
+            if current.column_count() != before {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
-    if !changed {
-        break;
-    }
-}
-current
+    current
 }
 
 /// Enumera todas las permutaciones del orden y devuelve las que dan un resultado distinto.
 ///
 /// Es el metodo, no una muestra: el numero de permutaciones de N relaciones es N!, asi que
 /// solo sirve para N chico. Para un grafo de 5 relaciones son 120, que es lo que hace falta
-    /// para responder la pregunta con certeza en vez de con ejemplos.
-    pub fn distinct_propagation_results(
-        model: &Model,
-        start: &FilterContext,
-    ) -> Vec<(Vec<usize>, FilterContext)> {
-        let mut seen: BTreeSet<Vec<ObjectId>> = BTreeSet::new();
-        let mut results = Vec::new();
-        for order in permutations(model.relationships.len()) {
-            let context = propagate_ordered(model, start, &order);
-            let signature: Vec<ObjectId> = context.filtered_columns().collect();
-            if seen.insert(signature) {
-                results.push((order, context));
-            }
+/// para responder la pregunta con certeza en vez de con ejemplos.
+pub fn distinct_propagation_results(
+    model: &Model,
+    start: &FilterContext,
+) -> Vec<(Vec<usize>, FilterContext)> {
+    let mut seen: BTreeSet<Vec<ObjectId>> = BTreeSet::new();
+    let mut results = Vec::new();
+    for order in permutations(model.relationships.len()) {
+        let context = propagate_ordered(model, start, &order);
+        let signature: Vec<ObjectId> = context.filtered_columns().collect();
+        if seen.insert(signature) {
+            results.push((order, context));
         }
-        results
     }
+    results
+}
 
 /// Genera todas las permutaciones de `0..n`.
 ///
@@ -578,20 +578,20 @@ current
 /// veredicto falso, y un veredicto falso sobre la ambiguedad del ciclo manda cambiar el
 /// diseno del motor por nada.
 fn permutations(count: usize) -> Vec<Vec<usize>> {
-        let mut items: Vec<usize> = (0..count).collect();
-        let mut out = Vec::new();
-        permute(&mut items, 0, &mut out);
-        out
-    }
+    let mut items: Vec<usize> = (0..count).collect();
+    let mut out = Vec::new();
+    permute(&mut items, 0, &mut out);
+    out
+}
 
-    fn permute(items: &mut Vec<usize>, index: usize, out: &mut Vec<Vec<usize>>) {
-        if index == items.len() {
-            out.push(items.clone());
-            return;
-        }
-        for position in index..items.len() {
-            items.swap(index, position);
-            permute(items, index + 1, out);
-            items.swap(index, position);
-        }
+fn permute(items: &mut Vec<usize>, index: usize, out: &mut Vec<Vec<usize>>) {
+    if index == items.len() {
+        out.push(items.clone());
+        return;
     }
+    for position in index..items.len() {
+        items.swap(index, position);
+        permute(items, index + 1, out);
+        items.swap(index, position);
+    }
+}

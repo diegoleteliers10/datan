@@ -82,7 +82,9 @@ pub fn resolve_modifier(expr: &CheckedExpr) -> Result<Modifier, ModifierError> {
         },
 
         // Un booleano es un filtro: `Dim Product[Region] = "Norte"`.
-        CheckedExpr::Binary { op, left, right, .. } if op.is_comparison() => {
+        CheckedExpr::Binary {
+            op, left, right, ..
+        } if op.is_comparison() => {
             let (column, value) = match (left.as_ref(), right.as_ref()) {
                 (CheckedExpr::Column { column, .. }, other) => (*column, other),
                 (other, CheckedExpr::Column { column, .. }) => (*column, other),
@@ -152,7 +154,10 @@ pub enum Modifier {
     All { table: Option<ObjectId> },
     /// `ALLEXCEPT(tabla, col, ...)`: quita los filtros de la tabla menos los de las columnas
     /// que se conservan. Es el modificador que mas mal se entiende y mas se usa.
-    AllExcept { table: ObjectId, keep: Vec<ObjectId> },
+    AllExcept {
+        table: ObjectId,
+        keep: Vec<ObjectId>,
+    },
     /// `KEEPFILTERS(expr)`: intersecta el contexto actual con el de la expresion.
     ///
     /// Guarda la expresion sin evaluar. Resolverla requiere los datos, y el contexto de
@@ -288,7 +293,9 @@ fn tables_reached_from(model: &Model, table: ObjectId) -> Vec<ObjectId> {
             }
 
             // Bidireccional: tambien al reves, que es lo que genera ciclos.
-            if relationship.direction == datan_model::FilterDirection::Both && to_table == Some(current) {
+            if relationship.direction == datan_model::FilterDirection::Both
+                && to_table == Some(current)
+            {
                 if let Some(from) = from_table {
                     if !reached.contains(&from) {
                         reached.push(from);

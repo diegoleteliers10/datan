@@ -200,12 +200,8 @@ fn removefilters_sin_argumento_lo_vacia_todo() {
         .with_equal(PRODUCT_REGION, norte())
         .with_equal(DATE_YEAR, FilterValue::Integer(2025));
 
-    let after = apply_modifiers(
-        &model,
-        &base,
-        &[Modifier::RemoveFilters { table: None }],
-    )
-    .expect("aplica");
+    let after =
+        apply_modifiers(&model, &base, &[Modifier::RemoveFilters { table: None }]).expect("aplica");
     assert!(after.is_empty());
 }
 
@@ -219,8 +215,14 @@ fn all_de_una_tabla_quita_tambien_lo_que_se_propaga() {
     let propagated = base.propagate(&model);
     assert!(!propagated.filters_on(FACT_PRODUCT_ID).is_empty());
 
-    let after = apply_modifiers(&model, &propagated, &[Modifier::All { table: Some(PRODUCT) }])
-        .expect("aplica");
+    let after = apply_modifiers(
+        &model,
+        &propagated,
+        &[Modifier::All {
+            table: Some(PRODUCT),
+        }],
+    )
+    .expect("aplica");
     assert!(after.filters_on(PRODUCT_REGION).is_empty());
     assert!(
         after.filters_on(FACT_PRODUCT_ID).is_empty(),
@@ -367,8 +369,7 @@ fn un_calculate_con_modificadores_fuerza_el_interprete() {
     )
     .expect("extrae");
 
-    for _a in &atoms.atoms {
-    }
+    for _a in &atoms.atoms {}
     assert!(
         atoms.needs_interpreter(),
         "un CALCULATE con modificadores debe necesitar el interprete"
@@ -398,8 +399,13 @@ fn el_atomo_captura_el_contexto_ya_propagado() {
     // interprete por celda de grupo no tiene que volver a propagar.
     let model = model();
     let context = FilterContext::empty().with_equal(PRODUCT_REGION, norte());
-    let atoms = extract_atoms("SUM('Fact Sales'[Qty])", &model, &context, &[PRODUCT_REGION])
-        .expect("extrae");
+    let atoms = extract_atoms(
+        "SUM('Fact Sales'[Qty])",
+        &model,
+        &context,
+        &[PRODUCT_REGION],
+    )
+    .expect("extrae");
 
     let atom = &atoms.atoms[0];
     assert!(!atom.context.filters_on(PRODUCT_REGION).is_empty());
@@ -473,7 +479,10 @@ fn las_tablas_tocadas_incluyen_las_alcanzadas_por_propagacion() {
     let context = FilterContext::empty().with_equal(PRODUCT_REGION, norte());
     let tables = context.tables_touched(&model);
     assert!(tables.contains(&PRODUCT));
-    assert!(tables.contains(&FACT), "los hechos se tocan por propagacion");
+    assert!(
+        tables.contains(&FACT),
+        "los hechos se tocan por propagacion"
+    );
     assert!(tables.contains(&CUSTOMER) == false);
 }
 

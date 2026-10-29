@@ -28,7 +28,9 @@ pub mod export;
 pub mod saved;
 pub mod source;
 
-use datan_dax_eval::{AtomSet, Filter, FilterContext, FilterValue, Interpreter, Scalar};
+use datan_dax_eval::{
+    AtomSet, DataSource, Filter, FilterContext, FilterValue, Interpreter, Scalar,
+};
 use datan_dax_sql::{SourceMap, lower, lower_scalar};
 use datan_model::{DataType, Measure, Model, ObjectId};
 use datan_storage::Engine;
@@ -38,12 +40,18 @@ use datan_storage::Engine;
 pub enum ReportError {
     #[error("la columna {0} no existe en el modelo")]
     UnknownColumn(ObjectId),
+    #[error(
+        "`{0}` es una columna calculada: sus valores no estan en la base, se calculan por fila"
+    )]
+    CalculatedColumn(String),
     #[error("la medida {0} no existe en el modelo")]
     UnknownMeasure(ObjectId),
     #[error("un informe sin medidas no muestra nada: se necesita al menos una")]
     NoMeasures,
-    #[error("el modelo no tiene una tabla de hechos. Un informe agrupa una tabla de hechos, \\
-             no una lista de tablas sueltas")]
+    #[error(
+        "el modelo no tiene una tabla de hechos. Un informe agrupa una tabla de hechos, \\
+             no una lista de tablas sueltas"
+    )]
     NoFactTable,
     #[error("`{measure}` necesita el interprete y no hay origen de datos en el informe")]
     NoSource { measure: String },
@@ -133,6 +141,103 @@ impl Report {
             totales: Totales::Ninguno,
             top_n: None,
         }
+    }
+
+    /// Lee los valores distintos de una columna en el orden del modelo.
+    pub fn distinct_values(
+        &self,
+        engine: &Engine,
+        column: ObjectId,
+        limit: usize,
+    ) -> Result<Vec<FilterValue>, ReportError> {
+        self.distinct_values_page(engine, column, 0, limit)
+    }
+
+    /// Lee una pagina de valores distintos en el orden del modelo.
+    pub fn distinct_values_page(
+        &self,
+        engine: &Engine,
+        column: ObjectId,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<FilterValue>, ReportError> {
+        let (_, definition) = self
+            .model
+            .column(column)
+            .ok_or(ReportError::UnknownColumn(column))?;
+        if definition.is_calculated() {
+            return Err(ReportError::CalculatedColumn(definition.name.clone()));
+        }
+
+        let source = source::DuckSource::new(engine, &self.model, &self.qualifier);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if self.filters.is_empty() {
+            return source
+                .distinct_values_page(column, offset, limit)
+                .map(|values| values.iter().map(FilterValue::from_scalar).collect())
+                .map_err(ReportError::Query);
+        }
+        match source.distinct_values_page_filtered(column, offset, limit, &self.filters) {
+            Ok(Some(values)) => {
+                return Ok(values.iter().map(FilterValue::from_scalar).collect());
+            }
+            Ok(None) => {}
+            Err(error) => return Err(ReportError::Query(error)),
+        }
+
+        let (table, _) = self.model.column(column).expect("validated column");
+        let calculated = datan_dax_eval::CalculatedSource::new(&self.model, &source);
+        let interpreter = Interpreter::new(&self.model, &calculated);
+        let context = FilterContext::from_filters(
+            self.filters
+                .entries()
+                .flat_map(|(_, filters)| filters.iter().cloned())
+                .collect(),
+        )
+        .propagate(&self.model);
+        let view = calculated
+            .column(column)
+            .ok_or_else(|| ReportError::Query(format!("no se pudo leer la columna {column}")))?;
+        let allowed: std::collections::HashSet<String> = interpreter
+            .select_rows(table.id, &context)
+            .into_iter()
+            .map(|row| format!("{:?}", FilterValue::from_scalar(&view.value_at(row))))
+            .collect();
+        if allowed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut values = Vec::with_capacity(limit);
+        let mut source_offset = 0;
+        const PAGE_SIZE: usize = 256;
+        loop {
+            let page = source
+                .distinct_values_page(column, source_offset, PAGE_SIZE)
+                .map_err(ReportError::Query)?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            source_offset += page.len();
+            for value in page {
+                let value = FilterValue::from_scalar(&value);
+                if allowed.contains(&format!("{value:?}")) {
+                    values.push(value);
+                    if values.len() >= offset.saturating_add(limit) {
+                        break;
+                    }
+                }
+            }
+            if values.len() >= offset.saturating_add(limit) {
+                break;
+            }
+            if page_len < PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(values.into_iter().skip(offset).take(limit).collect())
     }
 
     /// Elige los renglones de total.
@@ -551,76 +656,108 @@ impl Report {
             let measure_columns = atoms.outputs.len();
             let produced = self.dimensions.len() + measure_columns;
 
-            let (cells, kinds_del_plan) = if self.por_el_interprete(atoms) {
-                let source = source.ok_or_else(|| ReportError::NoSource {
-                    measure: members
-                        .first()
-                        .and_then(|index| self.measures.get(*index))
-                        .map(|id| self.measure_name(*id).unwrap_or("?").to_string())
-                        .unwrap_or_else(|| "?".to_string()),
-                })?;
-                let calculadas = datan_dax_eval::CalculatedSource::new(&self.model, source);
-                let interpreter = Interpreter::new(&self.model, &calculadas);
-                match totales {
-                    Totales::Subtotales => {
-                        subtotales_del_interprete(
-                            &interpreter,
-                            atoms,
-                            &self.filters,
-                            &self.dimensions,
-                        )?
-                    }
-                    Totales::General => {
-                        general_del_interprete(
-                            &interpreter,
-                            atoms,
-                            &self.filters,
-                            &self.dimensions,
-                        )?
-                    }
-                    Totales::Ninguno => {
-                    let grouped = interpreter
-                        .evaluate_grouped(
-                            &atoms.atoms,
-                            &atoms.outputs,
-                            &self.filters,
-                            &self.dimensions,
-                            MAX_CELLS,
-                        )
+            let (cells, kinds_del_plan) =
+                if self.dimensions.is_empty() && self.por_el_interprete(atoms) {
+                    let source = source.ok_or_else(|| ReportError::NoSource {
+                        measure: members
+                            .first()
+                            .and_then(|index| self.measures.get(*index))
+                            .map(|id| self.measure_name(*id).unwrap_or("?").to_string())
+                            .unwrap_or_else(|| "?".to_string()),
+                    })?;
+                    let calculadas = datan_dax_eval::CalculatedSource::new(&self.model, source);
+                    let interpreter = Interpreter::new(&self.model, &calculadas);
+                    let values = interpreter
+                        .evaluate_totals(&atoms.atoms, &atoms.outputs, &self.filters)
                         .map_err(|error| ReportError::Interp(error.to_string()))?;
-                    let filas = grouped
-                        .rows
-                        .iter()
-                        .map(|row| fila_a_texto(row, self.dimensions.len()))
-                        .collect::<Vec<Vec<String>>>();
-                    let tipos = vec![RowKind::Data; filas.len()];
-                    (filas, tipos)
+                    let row = values.iter().map(scalar_to_text).collect::<Vec<_>>();
+                    let kind = if totales == Totales::Ninguno {
+                        RowKind::Data
+                    } else {
+                        RowKind::GrandTotal
+                    };
+                    (vec![row], vec![kind])
+                } else if self.por_el_interprete(atoms) {
+                    let source = source.ok_or_else(|| ReportError::NoSource {
+                        measure: members
+                            .first()
+                            .and_then(|index| self.measures.get(*index))
+                            .map(|id| self.measure_name(*id).unwrap_or("?").to_string())
+                            .unwrap_or_else(|| "?".to_string()),
+                    })?;
+                    let calculadas = datan_dax_eval::CalculatedSource::new(&self.model, source);
+                    let interpreter = Interpreter::new(&self.model, &calculadas);
+                    match totales {
+                        Totales::Subtotales => subtotales_del_interprete(
+                            &interpreter,
+                            atoms,
+                            &self.filters,
+                            &self.dimensions,
+                        )?,
+                        Totales::General => general_del_interprete(
+                            &interpreter,
+                            atoms,
+                            &self.filters,
+                            &self.dimensions,
+                        )?,
+                        Totales::Ninguno => {
+                            let grouped = interpreter
+                                .evaluate_grouped(
+                                    &atoms.atoms,
+                                    &atoms.outputs,
+                                    &self.filters,
+                                    &self.dimensions,
+                                    MAX_CELLS,
+                                )
+                                .map_err(|error| ReportError::Interp(error.to_string()))?;
+                            let filas = grouped
+                                .rows
+                                .iter()
+                                .map(|row| fila_a_texto(row, self.dimensions.len()))
+                                .collect::<Vec<Vec<String>>>();
+                            let tipos = vec![RowKind::Data; filas.len()];
+                            (filas, tipos)
+                        }
                     }
-                }
-            } else {
-                let plan = match totales {
-                    Totales::Ninguno => lower(&self.model, &sources, atoms, &self.filters),
-                    Totales::General => {
-                        datan_dax_sql::lower_with_total(&self.model, &sources, atoms, &self.filters)
-                    }
-                    Totales::Subtotales => datan_dax_sql::lower_with_subtotals(
-                        &self.model,
-                        &sources,
-                        atoms,
-                        &self.filters,
-                    ),
-                }
-                .map_err(|error| ReportError::Interp(error.to_string()))?;
-                let crudas = engine
-                    .render_rows(&plan.sql)
-                    .map_err(|error| ReportError::Query(error.to_string()))?;
-                if totales == Totales::Ninguno {
-                    let tipos = vec![RowKind::Data; crudas.len()];
-                    (crudas, tipos)
                 } else {
-                    separar_banderas(crudas, self.dimensions.len(), produced)?
-                }
-            };
+                    let plan = if self.dimensions.is_empty() {
+                        datan_dax_sql::lower_scalar(&self.model, &sources, atoms, &self.filters)
+                    } else {
+                        match totales {
+                            Totales::Ninguno => lower(&self.model, &sources, atoms, &self.filters),
+                            Totales::General => datan_dax_sql::lower_with_total(
+                                &self.model,
+                                &sources,
+                                atoms,
+                                &self.filters,
+                            ),
+                            Totales::Subtotales => datan_dax_sql::lower_with_subtotals(
+                                &self.model,
+                                &sources,
+                                atoms,
+                                &self.filters,
+                            ),
+                        }
+                    }
+                    .map_err(|error| ReportError::Interp(error.to_string()))?;
+                    let crudas = engine
+                        .render_rows(&plan.sql)
+                        .map_err(|error| ReportError::Query(error.to_string()))?;
+                    if self.dimensions.is_empty() {
+                        let kind = if totales == Totales::Ninguno {
+                            RowKind::Data
+                        } else {
+                            RowKind::GrandTotal
+                        };
+                        let kinds = vec![kind; crudas.len()];
+                        (crudas, kinds)
+                    } else if totales == Totales::Ninguno {
+                        let tipos = vec![RowKind::Data; crudas.len()];
+                        (crudas, tipos)
+                    } else {
+                        separar_banderas(crudas, self.dimensions.len(), produced)?
+                    }
+                };
 
             for row in &cells {
                 if row.len() != produced {
@@ -796,7 +933,13 @@ fn subtotales_del_interprete(
     let niveles: Vec<Vec<Vec<String>>> = (0..dims.len())
         .map(|l| {
             interpreter
-                .evaluate_grouped(&atoms.atoms, &atoms.outputs, filters, &dims[..=l], MAX_CELLS)
+                .evaluate_grouped(
+                    &atoms.atoms,
+                    &atoms.outputs,
+                    filters,
+                    &dims[..=l],
+                    MAX_CELLS,
+                )
                 .map(|grouped| {
                     grouped
                         .rows
@@ -999,11 +1142,7 @@ impl Matrix {
             out
         };
 
-        let header: Vec<String> = self
-            .headers
-            .iter()
-            .map(|h| pad(h.label.clone()))
-            .collect();
+        let header: Vec<String> = self.headers.iter().map(|h| pad(h.label.clone())).collect();
         println!("  {}", header.join(" | "));
 
         for row in self.rows.iter().take(limit) {
