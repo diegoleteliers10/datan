@@ -3872,7 +3872,7 @@ impl Datan {
             );
         }
 
-        for report in reports.into_iter().take(8) {
+        for report in reports.iter().take(8) {
             let report_name = report.name.clone();
             let path = report.path.clone();
             let kind = report.kind;
@@ -4197,7 +4197,7 @@ impl Datan {
             );
         }
 
-        for entry in entries {
+        for entry in entries.iter() {
             // El archivo guarda el QUALIFIER del informe (`pg`), no el nombre de la base: es
             // la etiqueta con la que se califica cada tabla en el SQL. Compararlo con el
             // nombre de la base ponia todos los informes como ajenos.
@@ -10611,10 +10611,7 @@ impl Datan {
             .as_ref()
             .is_some_and(|(leido, _)| leido.elapsed() < std::time::Duration::from_millis(1000));
         if !vivo {
-            let cargadas = Connections::load_saved()
-                .map_err(|error| error.to_string())
-                .map(Arc::new)
-                .map_err(Arc::new);
+            let cargadas = Connections::load_saved().map_err(|error| error.to_string());
             self.conexiones = Some((Instant::now(), std::sync::Arc::new(cargadas)));
         }
         self.conexiones
@@ -20602,8 +20599,9 @@ impl Datan {
         // baja a SQL: el usuario ve un error de motor que es en realidad un informe
         // malformado.
         let fact = report.fact_table().ok();
+        let loaded_query_tables = self.loaded_query_tables.clone();
         let connected = |table: &datan_model::Table| -> bool {
-            self.loaded_query_tables
+            loaded_query_tables
                 .contains(&table.name.to_ascii_lowercase())
                 || match fact {
                     Some(fact_id) => {

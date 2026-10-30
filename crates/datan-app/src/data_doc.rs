@@ -345,16 +345,20 @@ impl DataDoc {
                                 table.name
                             ));
                         }
-                        let table = model
+                        let Some(table) = model
                             .tables
                             .iter_mut()
                             .find(|table| table.id == table_id)
-                            .expect("tabla encontrada");
-                        let target = table
+                        else {
+                            return Err("La tabla del paso ya no existe en el modelo.".to_string());
+                        };
+                        let Some(target) = table
                             .columns
                             .iter_mut()
                             .find(|known| known.id == id)
-                            .expect("columna encontrada");
+                        else {
+                            return Err("La columna del paso ya no existe en la tabla.".to_string());
+                        };
                         if !target
                             .aliases
                             .iter()
@@ -411,13 +415,14 @@ impl DataDoc {
                                 "No se puede quitar `{column}` porque una medida la usa."
                             ));
                         }
-                        model
+                        let Some(table) = model
                             .tables
                             .iter_mut()
                             .find(|table| table.id == table_id)
-                            .expect("tabla encontrada")
-                            .columns
-                            .retain(|known| known.id != id);
+                        else {
+                            return Err("La tabla del paso ya no existe en el modelo.".to_string());
+                        };
+                        table.columns.retain(|known| known.id != id);
                     }
                     _ => {}
                 }
