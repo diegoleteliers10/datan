@@ -85,6 +85,10 @@ actions!(
         ZoomLienzoMenos,
         /// Volver el zoom del lienzo a 100 %.
         ZoomLienzoReal,
+        /// Cerrar la capa superior: un diálogo, un editor o un renombre en curso.
+        CerrarCapa,
+        /// Ir a la lista de informes guardados.
+        AbrirInformes,
         /// Cerrar Datan, preguntando antes si hay cambios sin guardar.
         CerrarDatan,
     ]
@@ -5991,6 +5995,59 @@ impl Datan {
         };
         self.restaurar_historial(estado);
         self.refresh(cx);
+    }
+
+    /// Esc cierra la capa que este encima del informe: un dialogo, el editor de medidas,
+    /// un renombre. Cierra UNA capa por pulsacion, la de arriba, y nunca una de abajo de
+    /// otra: cerrar el dialogo de cierre no puede descartar a la vez el editor de filtros.
+    /// Sin capas abiertas, Esc suelta la seleccion del lienzo, como en un editor.
+    fn cerrar_capa_superior(&mut self, cx: &mut Context<Self>) {
+        if self.cerrar_dialogo {
+            self.cerrar_dialogo = false;
+            self.cerrar_al_guardar = false;
+            cx.notify();
+            return;
+        }
+        if self.pending_report_navigation.is_some() {
+            self.cancel_report_navigation(cx);
+            return;
+        }
+        if self.formula.is_some() {
+            self.cancel_measure_edit(cx);
+            return;
+        }
+        if self.data_connection_dialog.is_some() {
+            self.close_data_connection_dialog(cx);
+            return;
+        }
+        if self.pending_fact_selection.is_some() {
+            self.cancel_fact_selection(cx);
+            return;
+        }
+        if !matches!(self.filter_editor, FilterEditor::Closed) {
+            self.cancel_filter_editor(cx);
+            return;
+        }
+        let mut cerro_renombre = false;
+        if self.rename.take().is_some() {
+            cerro_renombre = true;
+        }
+        if self.pagina_rename.take().is_some() {
+            cerro_renombre = true;
+        }
+        if self.data_column_rename.take().is_some() {
+            cerro_renombre = true;
+        }
+        if self.bookmark_rename.take().is_some() {
+            cerro_renombre = true;
+        }
+        if cerro_renombre {
+            cx.notify();
+            return;
+        }
+        if self.visual_seleccionado.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn restaurar_historial(&mut self, estado: EstadoPagina) {
@@ -14705,6 +14762,12 @@ impl Render for Datan {
                     view.establecer_zoom_lienzo(100, cx);
                 }
             }))
+            .on_action(cx.listener(|view, _: &CerrarCapa, _window, cx| {
+                view.cerrar_capa_superior(cx);
+            }))
+            .on_action(cx.listener(|view, _: &AbrirInformes, _window, cx| {
+                view.request_open_report_list(cx);
+            }))
             .child(main);
         if self.data_connection_dialog.is_some() {
             root = root.child(self.render_connection_dialog(window, cx));
@@ -20497,7 +20560,9 @@ impl Datan {
     fn render_report(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(report) = self.report.clone() else {
-            return div().into_any_element();
+            // Ready sin informe: conecto pero el modelo no alcanzo a armarse. Una ventana
+            // en blanco no dice nada; la pantalla de inicio deja volver a empezar.
+            return self.render_home(cx);
         };
         let model = report.model.clone();
         let formatos_visuales = formatos_del_modelo(&model);
@@ -20647,6 +20712,21 @@ impl Datan {
                         )),
                 ),
             )
+            .children((!self.lectura
+                && self.visual_seleccionado.is_none()
+                && !self.paginas.is_empty())
+            .then(|| {
+                // Sin visual elegido, un clic en un campo no tiene destino: el clic muerto
+                // se explica aqui, donde va el clic, y no solo en la linea de estado.
+                div()
+                    .px_3()
+                    .pb_2()
+                    .flex_shrink_0()
+                    .text_size(px(tokens::LETRA_NOTA))
+                    .text_color(theme.muted_foreground)
+                    .child("Elige un visual del lienzo: sus campos se marcan aquí y un clic los añade.")
+                    .into_any_element()
+            }))
             .child(
                 div().flex_1().overflow_hidden().child(
                     div()
@@ -32452,6 +32532,11 @@ fn registrar_atajos(cx: &mut App) {
         KeyBinding::new("cmd-+", ZoomLienzoMas, None),
         KeyBinding::new("cmd--", ZoomLienzoMenos, None),
         KeyBinding::new("cmd-0", ZoomLienzoReal, None),
+        // Esc cierra la capa de arriba: un dialogo, el editor de medidas, un renombre.
+        // Sin atajo, cerrar un dialogo abierto por error exige ir con el mouse al boton.
+        KeyBinding::new("escape", CerrarCapa, None),
+        // Abrir pasa por la lista de informes guardados, igual que el boton.
+        KeyBinding::new("cmd-o", AbrirInformes, None),
         // Salir con el mismo flujo del boton de cierre: pregunta por los cambios.
         KeyBinding::new("cmd-q", CerrarDatan, None),
     ]);
