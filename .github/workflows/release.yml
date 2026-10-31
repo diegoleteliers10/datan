@@ -15,20 +15,32 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get_version.outputs.version }}
+      checkout_ref: ${{ steps.get_version.outputs.checkout_ref }}
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Resolve Version
         id: get_version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
+            TAG="${GITHUB_REF#refs/tags/}"
           else
-            VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+            TAG="v$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
           fi
-          echo "Resolved version: $VERSION"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Release tag must look like vX.Y.Z, got '${TAG}'."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            CHECKOUT_REF="$TAG"
+          else
+            CHECKOUT_REF="${GITHUB_REF}"
+          fi
+          echo "Resolved tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=$CHECKOUT_REF" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build - ${{ matrix.target }}
@@ -40,45 +52,93 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: datan-aarch64-apple-darwin.tar.gz
+            dmg_name: Datan_${{ needs.prepare.outputs.version }}_aarch64.dmg
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: datan-x86_64-apple-darwin.tar.gz
+            dmg_name: Datan_${{ needs.prepare.outputs.version }}_x86_64.dmg
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: datan-x86_64-unknown-linux-gnu.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: datan-x86_64-pc-windows-msvc.zip
+
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
 
-      - name: Install Rust toolchain
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libvulkan-dev libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libxfixes-dev
+
+      - name: Set up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ matrix.target }}-release-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-release-
-
-      - name: Build datan
+      - name: Build datan (Release Mode)
         run: cargo build --release --locked --target ${{ matrix.target }} -p datan-app
 
-      - name: Package
+      # macOS: app bundle + .tar.gz + .dmg (con symlink a /Applications)
+      - name: Package App Bundle (macOS)
+        if: runner.os == 'macOS'
         run: |
-          ARCHIVE="datan-v${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/datan-app" "dist/datan"
-          tar -czf "${ARCHIVE}" -C dist datan
-          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+          mkdir -p dist/Datan.app/Contents/MacOS
+          cp target/${{ matrix.target }}/release/datan-app dist/Datan.app/Contents/MacOS/datan-app
+          cp packaging/macos/Info.plist dist/Datan.app/Contents/Info.plist
+          # El plist trae la version fija de origen; dejarla igual a la del tag.
+          plutil -replace CFBundleShortVersionString -string "${{ env.VERSION }}" dist/Datan.app/Contents/Info.plist
+          plutil -replace CFBundleVersion -string "${{ env.VERSION }}" dist/Datan.app/Contents/Info.plist
+          codesign --force --deep -s - dist/Datan.app
+          cd dist
+          tar -czf ../${{ matrix.artifact_name }} Datan.app
+          cd ..
 
-      - name: Upload artifact
+      - name: Create DMG (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          STAGING_DIR=$(mktemp -d)
+          cp -R dist/Datan.app "$STAGING_DIR/"
+          ln -s /Applications "$STAGING_DIR/Applications"
+          hdiutil create \
+            -volname "Datan" \
+            -srcfolder "$STAGING_DIR" \
+            -ov -format UDZO \
+            "${{ matrix.dmg_name }}"
+          rm -rf "$STAGING_DIR"
+
+      # Linux: tarball autocontenido (sin .deb/.AppImage hasta tener icono y .desktop)
+      - name: Package Binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/datan-app dist/datan
+          tar -czf ${{ matrix.artifact_name }} -C dist datan
+
+      # Windows: zip del ejecutable (sin .msi hasta tener WiX + icono)
+      - name: Package Binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item -Path target\${{ matrix.target }}\release\datan-app.exe -Destination dist\datan.exe
+          Compress-Archive -Path dist\datan.exe -DestinationPath ${{ matrix.artifact_name }}
+
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARCHIVE }}
-          path: ${{ env.ARCHIVE }}
+          name: ${{ matrix.target }}
+          path: |
+            ${{ matrix.artifact_name }}
+            *.dmg
 
   release:
     name: Publish Release
@@ -91,12 +151,22 @@ jobs:
           merge-multiple: true
           path: dist
 
+      - name: Smoke check assets
+        run: |
+          ls -la dist
+          COUNT=$(ls dist | wc -l)
+          # macOS: tar.gz + dmg por arquitectura (4), Linux y Windows: 1 cada uno
+          if [ "$COUNT" -lt 6 ]; then
+            echo "::error::Se esperaban al menos 6 artifacts y hay $COUNT."
+            exit 1
+          fi
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          gh release create "v${VERSION}" dist/*.tar.gz \
+          gh release create "v${VERSION}" dist/* \
             --title "Datan v${VERSION}" \
             --generate-notes
