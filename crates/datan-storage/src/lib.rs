@@ -482,6 +482,34 @@ mod tests {
             "el scanner deberia exponer postgres_scan, encontro: {names}"
         );
     }
+
+    #[test]
+    fn los_dias_de_1970_son_una_fecha_legible() {
+        assert_eq!(fecha_iso(0), "1970-01-01");
+        assert_eq!(fecha_iso(1), "1970-01-02");
+        // 2026-10-16 son 20742 dias: 56 anos (14 bisiestos) mas 288 dias de 2026.
+        assert_eq!(fecha_iso(20_742), "2026-10-16");
+        // Un instante anterior a 1970 trunca a SU dia: -1 es 1969-12-31.
+        assert_eq!(fecha_iso(-1), "1969-12-31");
+        assert_eq!(fecha_iso(-365), "1969-01-01");
+    }
+
+    #[test]
+    fn un_timestamp_y_un_date_se_leen_como_fecha() {
+        // Sin esta rama, la celda caia al fallback y el eje mostraba el nombre del tipo de
+        // Arrow: Timestamp(Microsecond, Some("UTC")). Es lo que se veia en las categorias.
+        let engine = Engine::open(":memory:").expect("abre motor en memoria");
+        let rows = engine
+            .render_rows(
+                "SELECT TIMESTAMP '2026-10-16 04:58:16.777' AS t, \
+                 DATE '2024-02-29' AS d, 'texto' AS s",
+            )
+            .expect("consulta con fecha y timestamp");
+        assert_eq!(rows.len(), 1, "una fila");
+        assert_eq!(rows[0][0], "2026-10-16", "el timestamp se lee como su dia");
+        assert_eq!(rows[0][1], "2024-02-29", "el date se lee como fecha ISO");
+        assert_eq!(rows[0][2], "texto", "el texto no cambia");
+    }
 }
 #[cfg(test)]
 mod explain_tests {
@@ -535,10 +563,36 @@ mod explain_tests {
 /// `NULL`. El caracter de separacion de unidad no aparece en un catalogo real.
 pub const CELDA_EN_BLANCO: &str = "\u{1f}";
 
+/// Un dia contado desde 1970-01-01, en ano-mes-dia.
+///
+/// El calendario es el de Howard Hinnant (`civil_from_days`): puro, sin dependencias, y
+/// valido para cualquier fecha que DuckDB pueda devolver. El motor trabaja en dias: un
+/// `timestamp` llega aqui ya truncado a su dia, y una categoria de eje se lee como fecha
+/// y no como un contador de dias que nadie sabe interpretar.
+fn fecha_iso(dias: i32) -> String {
+    let z = dias as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let dia_de_era = z.rem_euclid(146_097);
+    let ano_de_era =
+        (dia_de_era - dia_de_era / 1460 + dia_de_era / 36_524 - dia_de_era / 146_096) / 365;
+    let ano = ano_de_era + era * 400;
+    let dia_de_ano = dia_de_era - (365 * ano_de_era + ano_de_era / 4 - ano_de_era / 100);
+    let mes_de_marzo = (5 * dia_de_ano + 2) / 153;
+    let dia = dia_de_ano - (153 * mes_de_marzo + 2) / 5 + 1;
+    let mes = if mes_de_marzo < 10 {
+        mes_de_marzo + 3
+    } else {
+        mes_de_marzo - 9
+    };
+    let ano = if mes <= 2 { ano + 1 } else { ano };
+    format!("{ano:04}-{mes:02}-{dia:02}")
+}
+
 fn render_cell(batch: &arrow::record_batch::RecordBatch, column: usize, row: usize) -> String {
     use arrow::array::{
         Array, Date32Array, Date64Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
-        LargeStringArray, StringArray,
+        LargeStringArray, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray,
     };
 
     let array = batch.column(column);
@@ -572,10 +626,26 @@ fn render_cell(batch: &arrow::record_batch::RecordBatch, column: usize, row: usi
         };
     }
     if let Some(values) = array.as_any().downcast_ref::<Date32Array>() {
-        return values.value(row).to_string();
+        return fecha_iso(values.value(row));
     }
     if let Some(values) = array.as_any().downcast_ref::<Date64Array>() {
-        return (values.value(row) / 86_400_000).to_string();
+        return fecha_iso((values.value(row) / 86_400_000) as i32);
     }
+    // Un `timestamp` se lee como su DIA, la misma decision de `datan-report::source`: la
+    // hora dentro del dia no cambia ninguna categoria de eje. Sin esta rama, la celda cae
+    // al final y muestra el nombre del tipo de Arrow, que es lo que salia en los ejes.
+    macro_rules! timestamp {
+        ($tipo:ty, $escala:expr) => {
+            if let Some(values) = array.as_any().downcast_ref::<$tipo>() {
+                // `div_euclid` y no `/`: un instante anterior a 1970 trunca hacia su dia,
+                // no hacia cero.
+                return fecha_iso((values.value(row).div_euclid($escala)) as i32);
+            }
+        };
+    }
+    timestamp!(TimestampSecondArray, 86_400);
+    timestamp!(TimestampMillisecondArray, 86_400_000);
+    timestamp!(TimestampMicrosecondArray, 86_400_000_000);
+    timestamp!(TimestampNanosecondArray, 86_400_000_000_000);
     format!("{:?}", array.data_type())
 }

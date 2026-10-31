@@ -1267,8 +1267,9 @@ impl<'a> Interpreter<'a> {
             .filter_map(|k| order.get(k).cloned())
             .collect();
         out.sort_by(|a, b| {
-            let ka = keys.get(&scalar_key(a.as_ref().unwrap()));
-            let kb = keys.get(&scalar_key(b.as_ref().unwrap()));
+            // A None scalar has no sort key; it sorts last via the arms below.
+            let ka = a.as_ref().and_then(|value| keys.get(&scalar_key(value)));
+            let kb = b.as_ref().and_then(|value| keys.get(&scalar_key(value)));
             match (ka, kb) {
                 (Some(x), Some(y)) => x.0.total_cmp(&y.0).then_with(|| x.1.cmp(&y.1)),
                 // Un valor que no tiene clave de orden (no aparecio) va al final.

@@ -187,7 +187,10 @@ impl Report {
             Err(error) => return Err(ReportError::Query(error)),
         }
 
-        let (table, _) = self.model.column(column).expect("validated column");
+        let (table, _) = self
+            .model
+            .column(column)
+            .ok_or(ReportError::UnknownColumn(column))?;
         let calculated = datan_dax_eval::CalculatedSource::new(&self.model, &source);
         let interpreter = Interpreter::new(&self.model, &calculated);
         let context = FilterContext::from_filters(
