@@ -7,6 +7,9 @@ on:
 
 permissions:
   contents: write
+  # Needed to dispatch release.yml after the tag push: newer repos default
+  # the workflow token to read-only for actions.
+  actions: write
 
 jobs:
   tag:
