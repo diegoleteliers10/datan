@@ -414,12 +414,22 @@ mod tests {
         assert!(matches!(result, Err(StorageError::EmptyResult)));
     }
 
+    /// Ruta del bundle de extensiones del usuario. `HOME` no existe en Windows: alli el
+    /// perfil esta en `USERPROFILE`. El test se salta si no hay home o si el bundle no
+    /// esta descargado en esta maquina.
+    fn extension_bundle_root() -> Option<std::path::PathBuf> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|home| std::path::PathBuf::from(home).join(".duckdb/extensions"))
+    }
+
     /// El motor precargado nunca intenta descargar. Este test falla si alguien deja el
     /// autoinstall activo, que es exactamente el bug que rompe la apuesta offline.
     #[test]
     fn el_motor_precargado_no_puede_descargar() {
-        let home = std::env::var("HOME").expect("HOME");
-        let root = Path::new(&home).join(".duckdb/extensions");
+        let Some(root) = extension_bundle_root() else {
+            return;
+        };
         if !root.exists() {
             // La extension no esta descargada en esta maquina. Ejecuta `probe_connectors`.
             return;
@@ -457,8 +467,9 @@ mod tests {
     /// la apuesta 4 del plan.
     #[test]
     fn postgres_carga_desde_el_bundle_sin_descargar() {
-        let home = std::env::var("HOME").expect("HOME");
-        let root = Path::new(&home).join(".duckdb/extensions");
+        let Some(root) = extension_bundle_root() else {
+            return;
+        };
         if !root.exists() {
             // La extension no esta descargada en esta maquina. Ejecuta `probe_connectors`.
             return;
