@@ -21,10 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows queda fuera hasta que haya un runner que compile GPUI sin el
-        # conjunto completo de dependencias de sistema. macOS y Linux cubren el
-        # código puro y el motor DuckDB.
-        os: [ubuntu-latest, macos-latest]
+        # Windows runs the same locked workspace test suite. Its test temp
+        # files must stay free of reserved characters, so test helpers build
+        # names from portable components only.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
