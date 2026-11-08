@@ -313,10 +313,8 @@ mod tests {
     }
 
     fn uuid_for_test() -> String {
-        format!(
-            "dtx-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        )
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("test").replace("::", "_");
+        format!("dtx-{}-{}", std::process::id(), name)
     }
 }
