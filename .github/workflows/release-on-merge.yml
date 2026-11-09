@@ -1,8 +1,12 @@
 name: Release on merge to main
 
-# Un release empieza cuando un PR se mergea a main con la version de
-# Cargo.toml ya bumpeada. El workflow crea el tag y dispara release.yml.
-# Un merge sin bump de version no crea tag ni release.
+# Cada merge a main genera un release. Si la version de Cargo.toml todavia no
+# tiene tag, se usa esa. Si el tag ya existe y el release ya se publico, el
+# workflow crea un commit de release que bumpea el patch (v0.1.0 -> v0.1.1),
+# lo taggea y lo construye. Ese commit vive solo en el tag, no en main.
+#
+# Si el tag de este merge existe pero el release no, se despacha el tag
+# existente: es el caso de recuperacion de un build que fallo.
 
 on:
   pull_request:
@@ -32,12 +36,24 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Resolve version and tag state
+      - name: Resolve version and next tag
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
+          set -euo pipefail
+
+          next_patch() {
+            local v="$1"
+            local core="${v%%+*}"
+            core="${core%%-*}"
+            local major minor patch
+            IFS=. read -r major minor patch <<< "$core"
+            echo "$major.$minor.$((patch + 1))"
+          }
+
           VERSION=$(awk '
             /^\[workspace\.package\]/ { in_section=1; next }
             /^\[/ { in_section=0 }
@@ -52,40 +68,134 @@ jobs:
             echo "::error::No se encontro version en [workspace.package] de Cargo.toml."
             exit 1
           fi
+
+          # Idempotencia: si ya hay un tag en el merge o en un commit hijo
+          # directo (el commit de bump), este merge ya se libero. En un
+          # re-run no se crea otro patch.
+          MERGE_TAG=""
+          if [[ -n "$MERGE_SHA" ]]; then
+            while read -r t; do
+              [[ -z "$t" ]] && continue
+              sha=$(git rev-list -n1 "$t" 2>/dev/null || true)
+              [[ -z "$sha" ]] && continue
+              if [[ "$sha" == "$MERGE_SHA" ]]; then
+                MERGE_TAG="$t"
+                break
+              fi
+              parent=$(git rev-parse "${sha}^" 2>/dev/null || true)
+              if [[ "$parent" == "$MERGE_SHA" ]]; then
+                MERGE_TAG="$t"
+                break
+              fi
+            done < <(git tag)
+          fi
+
+          if [[ -n "$MERGE_TAG" ]]; then
+            if gh release view "$MERGE_TAG" >/dev/null 2>&1; then
+              echo "Este merge ya se libero como ${MERGE_TAG}; no se crea otro."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "tag=${MERGE_TAG}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Tag ${MERGE_TAG} existe pero el release no; se recupera."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${MERGE_TAG}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           TAG="v${VERSION}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
+          tag_exists=false
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag ${TAG} ya existe."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Tag ${TAG} no existe."
+            tag_exists=true
           fi
 
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-            echo "Release ${TAG} ya publicado."
+          if [[ "$tag_exists" == "true" ]]; then
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Tag ${TAG} existe pero el release no; se recupera."
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "bump=false" >> "$GITHUB_OUTPUT"
+              echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+              echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            NEXT="$VERSION"
+            FREE=false
+            for _ in $(seq 1 200); do
+              NEXT=$(next_patch "$NEXT")
+              NEXT_TAG="v${NEXT}"
+              if ! git ls-remote --exit-code --tags origin "refs/tags/${NEXT_TAG}" >/dev/null 2>&1 \
+                 && ! gh release view "$NEXT_TAG" >/dev/null 2>&1; then
+                FREE=true
+                break
+              fi
+            done
+            if [[ "$FREE" != "true" ]]; then
+              echo "::error::No se encontro un tag libre despues de 200 intentos."
+              exit 1
+            fi
+            echo "Tag ${TAG} ya liberado; se usa ${NEXT_TAG}."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+            echo "next_version=${NEXT}" >> "$GITHUB_OUTPUT"
+            echo "tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "released=false" >> "$GITHUB_OUTPUT"
-            echo "Release ${TAG} todavia no publicado."
+            echo "Tag ${TAG} libre; se usa."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Push release tag
-        if: steps.version.outputs.exists == 'false'
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
+      - name: Configure git
+        if: steps.version.outputs.skip == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Rust Toolchain
+        if: steps.version.outputs.bump == 'true'
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable branch
+        with:
+          toolchain: stable
+
+      - name: Install cargo-edit
+        if: steps.version.outputs.bump == 'true'
+        run: cargo install cargo-edit --locked
+
+      # Si el tag actual ya se publico, se crea un commit de release que solo
+      # cambia la version del workspace. El tag apunta a ese commit; main no se
+      # toca. Asi el binario y el tag dicen lo mismo.
+      - name: Bump version and tag release commit
+        if: steps.version.outputs.bump == 'true'
+        env:
+          NEXT_VERSION: ${{ steps.version.outputs.next_version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          cargo set-version --workspace "$NEXT_VERSION"
+          git add -A
+          git commit -m "chore(release): bump to ${NEXT_VERSION}"
           git tag "$TAG"
-          git push origin "refs/tags/$TAG"
+
+      - name: Tag merged commit
+        if: steps.version.outputs.bump == 'false' && steps.version.outputs.tag_exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: git tag "$TAG"
+
+      - name: Push release tag
+        if: steps.version.outputs.bump == 'true' || steps.version.outputs.tag_exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: git push origin "refs/tags/$TAG"
 
       # Un tag pusheado con GITHUB_TOKEN no dispara otros workflows. Se despacha
-      # release.yml explicitamente, tambien en el caso de recuperacion: el tag
-      # existe pero el release no.
+      # release.yml explicitamente.
       - name: Dispatch release build
-        if: steps.version.outputs.exists == 'false' || steps.version.outputs.released == 'false'
+        if: steps.version.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

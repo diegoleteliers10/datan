@@ -1,8 +1,9 @@
 # Releasing Datan
 
-Un release empieza cuando un pull request se mergea a `main` con la version del
-workspace ya bumpeada. El workflow crea el tag, construye los cuatro targets y
-publica el GitHub Release. No se pushean tags a mano.
+Un release empieza cuando un pull request se mergea a `main`. Si la version del
+workspace ya tiene tag y release, el workflow crea un commit de release que
+bumpea el patch, lo taggea y construye los cuatro targets. No se pushean tags a
+mano.
 
 ## Publicar una version
 
@@ -11,6 +12,10 @@ publica el GitHub Release. No se pushean tags a mano.
    ```bash
    cargo set-version --workspace 0.2.0
    ```
+
+   Si no bumpeas, el merge igual genera un release: el workflow crea un commit
+   de release con el patch siguiente. El bump manual sirve para elegir
+   minor/major o para dejar la version explicita en `main`.
 
 2. Agrega la seccion al `CHANGELOG.md` con el formato `## 0.2.0 - YYYY-MM-DD`.
    El cuerpo del release sale de ahi. Sin seccion, el release se publica con un
@@ -28,8 +33,10 @@ publica el GitHub Release. No se pushean tags a mano.
 
 1. `.github/workflows/release-on-merge.yml` corre cuando un PR a `main` se
    cierra mergeado.
-2. Lee la version de `[workspace.package]` en `Cargo.toml`, arma `vX.Y.Z` y crea
-   el tag si no existe.
+2. Lee la version de `[workspace.package]` en `Cargo.toml`. Si `vX.Y.Z` no
+   existe, taggea el merge. Si ya existe y su release esta publicado, crea un
+   commit de release que bumpea el patch (`v0.1.0` -> `v0.1.1`), lo taggea y
+   sigue. Ese commit vive solo en el tag, no en `main`.
 3. Dispara `.github/workflows/release.yml` con `gh workflow run`. Es necesario:
    un tag pusheado con `GITHUB_TOKEN` no dispara otros workflows.
 4. `release.yml` construye:
@@ -45,10 +52,13 @@ publica el GitHub Release. No se pushean tags a mano.
 
 ## Reglas
 
-- El tag sale de `Cargo.toml`; si el tag no coincide con la version del
+- El tag sale de `Cargo.toml`. Si el tag no coincide con la version del
   workspace, `release.yml` falla antes de construir.
-- No pushees el tag a mano. Si el tag existe y el release no, el siguiente merge
-  con la misma version lo publica.
+- Si el tag ya existe y el release ya se publico, el workflow bumpea el patch en
+  un commit de release y usa ese tag. No hace falta bumpear a mano para que
+  salga un release.
+- No pushees el tag a mano. Si el tag existe y el release no, se despacha el tag
+  existente (recuperacion). Un re-run del mismo merge no crea otro release.
 - Linux se construye en `ubuntu-22.04` a proposito. Cambiarlo a `ubuntu-latest`
   sube el piso de glibc y deja afuera Ubuntu 22.04/24.04 y Debian 12. Si algun
   dia hay que moverlo, verifica `dpkg-deb -I dist/*.deb` antes de publicar.
