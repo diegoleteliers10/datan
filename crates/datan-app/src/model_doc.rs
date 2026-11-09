@@ -25,6 +25,15 @@
 
 use std::path::{Path, PathBuf};
 
+/// El home del usuario. En Windows `HOME` puede faltar; el perfil real esta
+/// en `USERPROFILE`.
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 use datan_model::{
     Cardinality, Column, DataType, FilterDirection, Measure, Model, ObjectId, Relationship,
     RelationshipRole,
@@ -316,8 +325,7 @@ pub enum DocError {
 impl ModelDoc {
     /// El archivo de una base. `~/.datan/models/<base>.toml`.
     pub fn path(database: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
+        home_dir()
             .join(".datan")
             .join("models")
             .join(format!("{database}.toml"))

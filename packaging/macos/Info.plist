@@ -4,8 +4,10 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>es</string>
+	<key>CFBundleDisplayName</key>
+	<string>Datan</string>
 	<key>CFBundleExecutable</key>
-	<string>datan-app</string>
+	<string>Datan</string>
 	<key>CFBundleIconFile</key>
 	<string>Datan</string>
 	<key>CFBundleIdentifier</key>
@@ -17,14 +19,20 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>__VERSION__</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>__VERSION__</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.productivity</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Diego Letelier</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Datan se conecta a bases de datos PostgreSQL en tu red local.</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
 </dict>
 </plist>

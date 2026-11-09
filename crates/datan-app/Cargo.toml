@@ -5,12 +5,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Binario thin. Solo wiring de GPUI."
+description = "Datan: analisis de datos local-first sobre Postgres, con motor DuckDB y medidas compatibles con DAX."
+homepage = "https://github.com/diegoleteliers10/datan"
+repository = "https://github.com/diegoleteliers10/datan"
 
 [dependencies]
 chrono = "0.4"
 gpui-kit.workspace = true
 gpui = { package = "gpui-pre", version = "0.3.9" }
+# GPUI necesita estos backends en Linux y compila los shaders de Metal en
+# runtime en macOS. Sin `runtime_shaders`, el build de macOS exige `xcrun metal`
+# (Xcode completo) y falla en un runner con solo Command Line Tools.
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.9", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+    "runtime_shaders",
+] }
 datan-storage = { path = "../datan-storage" }
 datan-model = { path = "../datan-model" }
 datan-report = { path = "../datan-report" }
@@ -27,3 +38,35 @@ datan-dax-sql = { path = "../datan-dax-sql" }
 [dev-dependencies]
 criterion = "0.7"
 datan-testkit = { path = "../datan-testkit" }
+
+# Icono y metadatos de version en el .exe de Windows. Solo se compila en Windows.
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+# Paquete .deb (cargo deb -p datan-app). Las rutas son relativas a este crate.
+[package.metadata.deb]
+name = "datan"
+maintainer = "Diego Letelier <diegoleteliers10@users.noreply.github.com>"
+copyright = "2026, Diego Letelier"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+Datan es una app de escritorio para analisis de datos local-first: se conecta a \
+Postgres, cachea el modelo en DuckDB y evalua medidas compatibles con DAX sin \
+depender de un servidor. La interfaz esta construida con GPUI y el motor corre \
+en el mismo proceso, sin llamadas a casa."""
+section = "utils"
+priority = "optional"
+revision = ""
+# `$auto` deja que cargo-deb agregue las libs que el binario enlaza; el resto
+# son las que GPUI carga con dlopen (Vulkan, X11/Wayland, fuentes) y que no
+# aparecen en DT_NEEDED.
+depends = "$auto, libvulkan1, libx11-6, libwayland-client0, libfontconfig1, libfreetype6"
+assets = [
+    ["target/release/datan-app", "usr/bin/datan", "755"],
+    ["../../dist/extensions/**/*", "usr/lib/datan/extensions/", "644"],
+    ["../../packaging/linux/datan.desktop", "usr/share/applications/datan.desktop", "644"],
+    ["../../assets/datan-512.png", "usr/share/icons/hicolor/512x512/apps/datan.png", "644"],
+    ["../../assets/datan-256.png", "usr/share/icons/hicolor/256x256/apps/datan.png", "644"],
+    ["../../README.md", "usr/share/doc/datan/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/datan/copyright", "644"],
+]

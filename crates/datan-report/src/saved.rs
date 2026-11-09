@@ -1015,10 +1015,18 @@ fn file_name(name: &str) -> Result<String, SavedError> {
     Ok(format!("{name}.toml"))
 }
 
+/// El home del usuario. En Windows `HOME` puede faltar; el perfil real esta
+/// en `USERPROFILE`.
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// La carpeta donde viven los informes.
 pub fn folder() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".datan").join("reports")
+    home_dir().join(".datan").join("reports")
 }
 
 fn recent_file_path() -> PathBuf {

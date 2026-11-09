@@ -8,3 +8,6 @@
 .cache/
 .codegraph/
 vendor/**/target
+
+# Artefactos de empaquetado
+/dist/

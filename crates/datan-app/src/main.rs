@@ -8470,9 +8470,7 @@ impl Datan {
             Archivo::Pdf => (datan_report::export::pdf(&matrix, &titulo), "pdf"),
         };
 
-        let base = std::env::var("HOME")
-            .map(|home| std::path::PathBuf::from(home).join("Desktop"))
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let base = crate::config::home_dir().join("Desktop");
         let ruta = datan_report::export::ruta_de_export(&base, &titulo, &dia, extension);
 
         match datan_report::export::write_unique(&ruta, &bytes) {
@@ -10630,8 +10628,37 @@ impl Datan {
 // ---------------------------------------------------------------------------------------------
 
 fn extension_root() -> std::path::PathBuf {
-    let home = std::env::var("HOME").expect("HOME");
-    Path::new(&home).join(".duckdb").join("extensions")
+    // Override explicito: tests, probes y empaquetados que mueven el arbol.
+    if let Some(dir) = std::env::var_os("DATAN_EXTENSION_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    // Bundle. El ejecutable esta en:
+    //   macOS   Datan.app/Contents/MacOS/Datan      -> ../Resources/extensions
+    //   Linux   /usr/bin/datan (o AppImage usr/bin) -> ../lib/datan/extensions
+    //   Windows Datan.exe                           -> extensions\ al lado
+    // Se prueban las tres formas para que el mismo binario sirva en los tres
+    // empaquetados sin variables de entorno.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for candidate in [
+                dir.join("extensions"),
+                dir.join("../Resources/extensions"),
+                dir.join("../lib/datan/extensions"),
+            ] {
+                if candidate.is_dir() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    // Desarrollo: la cache de DuckDB del usuario. En Windows no hay HOME.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(".duckdb").join("extensions")
 }
 
 /// Abre el motor y lee el modelo.
@@ -10651,8 +10678,7 @@ fn imported_database_path(
     connection: &config::PostgresConnection,
     report_data_scope: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("No se encontró la carpeta del usuario.")?;
-    let directory = PathBuf::from(home).join(".datan").join("imports");
+    let directory = crate::config::home_dir().join(".datan").join("imports");
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("No se pudo crear el almacén local: {error}"))?;
     let mut key = connection.document_key();
@@ -32566,7 +32592,11 @@ fn main() {
                     ..gpui_kit::component::TitleBar::window_options()
                 }
             } else {
-                WindowOptions::default()
+                WindowOptions {
+                    // X11/Wayland agrupan la ventana con el .desktop por este id.
+                    app_id: Some("Datan".to_string()),
+                    ..WindowOptions::default()
+                }
             };
             open_window(window_options, cx, |window, cx| {
                 let view = cx.new(Datan::new);

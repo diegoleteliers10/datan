@@ -1,0 +1,166 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  Instalador MSI de Datan (WiX Toolset v3).
+
+  Se compila con candle.exe/light.exe desde .github/workflows/release.yml.
+  Instala POR USUARIO en %LOCALAPPDATA%\Programs\Datan, sin UAC, para que el
+  usuario pueda actualizar la app despues sin permisos de administrador.
+
+  Variables que pasa el workflow con -d:
+    Version        version de la app (0.1.0)
+    BinDir         carpeta que contiene Datan.exe
+    ExtensionDir   carpeta que contiene postgres_scanner.duckdb_extension
+    DuckDbVersion  carpeta de version de DuckDB (v1.5.6)
+    Platform       carpeta de plataforma de DuckDB (windows_amd64)
+    IconFile       assets\datan.ico
+    LicenseFile    LICENSE
+    LicenseRtf     wix\License.rtf
+
+  El UpgradeCode no se cambia nunca: es lo que permite actualizar in place.
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+  <Product
+      Id='*'
+      Name='Datan'
+      UpgradeCode='C6D1F2A4-7B3E-4C58-9E21-5A8D3F0B7C16'
+      Manufacturer='Diego Letelier'
+      Language='1033'
+      Codepage='1252'
+      Version='$(var.Version)'>
+
+    <Package
+        Id='*'
+        Keywords='Installer'
+        Description='Datan $(var.Version)'
+        Manufacturer='Diego Letelier'
+        InstallerVersion='500'
+        Languages='1033'
+        Compressed='yes'
+        InstallScope='perUser'
+        SummaryCodepage='1252'/>
+
+    <MajorUpgrade
+        Schedule='afterInstallInitialize'
+        DowngradeErrorMessage='Ya hay una version mas nueva de Datan instalada. El instalador se cerrara.'/>
+
+    <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+    <Property Id='DiskPrompt' Value='Instalacion de Datan [1]'/>
+
+    <Property Id='WIXUI_INSTALLDIR' Value='APPLICATIONFOLDER'/>
+    <Property Id='ARPHELPLINK' Value='https://github.com/diegoleteliers10/datan'/>
+    <Property Id='ARPURLINFOABOUT' Value='https://github.com/diegoleteliers10/datan'/>
+    <Property Id='ARPNOREPAIR' Value='1' Secure='yes'/>
+
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='LocalAppDataFolder'>
+        <Directory Id='ProgramsFolder' Name='Programs'>
+          <Directory Id='APPLICATIONFOLDER' Name='Datan'>
+
+            <Component Id='binary0' Guid='2E7C4A19-8B5D-4F63-A0C2-91D6E4B7F305'>
+              <File
+                  Id='exe0'
+                  Name='Datan.exe'
+                  Source='$(var.BinDir)\Datan.exe'
+                  KeyPath='no'/>
+              <RegistryValue
+                  Root='HKCU'
+                  Key='Software\Datan'
+                  Name='BinaryInstalled'
+                  Type='integer'
+                  Value='1'
+                  KeyPath='yes'/>
+              <RemoveFolder Id='RemoveApplicationFolder' Directory='APPLICATIONFOLDER' On='uninstall'/>
+              <RemoveFolder Id='RemoveProgramsFolder' Directory='ProgramsFolder' On='uninstall'/>
+            </Component>
+
+            <Component Id='License' Guid='2F107AF7-DCA1-4C08-9F92-ACC4B463223B'>
+              <File Id='LicenseFile' Source='$(var.LicenseFile)' KeyPath='no'/>
+              <RegistryValue
+                  Root='HKCU'
+                  Key='Software\Datan'
+                  Name='LicenseInstalled'
+                  Type='integer'
+                  Value='1'
+                  KeyPath='yes'/>
+            </Component>
+
+            <!-- DuckDB busca extension_directory/v<version>/<platform>/. -->
+            <Directory Id='ExtensionsFolder' Name='extensions'>
+              <Directory Id='ExtVersionFolder' Name='$(var.DuckDbVersion)'>
+                <Directory Id='ExtPlatformFolder' Name='$(var.Platform)'>
+                  <Component Id='postgresExtension' Guid='F490FFF8-0C26-4965-B2F4-12A02E07F8D2'>
+                    <File
+                        Id='postgresExtensionFile'
+                        Name='postgres_scanner.duckdb_extension'
+                        Source='$(var.ExtensionDir)\postgres_scanner.duckdb_extension'
+                        KeyPath='no'/>
+                    <RegistryValue
+                        Root='HKCU'
+                        Key='Software\Datan'
+                        Name='PostgresExtensionInstalled'
+                        Type='integer'
+                        Value='1'
+                        KeyPath='yes'/>
+                    <RemoveFolder Id='RemoveExtPlatformFolder' Directory='ExtPlatformFolder' On='uninstall'/>
+                    <RemoveFolder Id='RemoveExtVersionFolder' Directory='ExtVersionFolder' On='uninstall'/>
+                    <RemoveFolder Id='RemoveExtensionsFolder' Directory='ExtensionsFolder' On='uninstall'/>
+                  </Component>
+                </Directory>
+              </Directory>
+            </Directory>
+
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <Directory Id='ProgramMenuFolder'>
+        <Directory Id='ApplicationProgramsFolder' Name='Datan'>
+          <Component Id='ApplicationShortcut' Guid='BA83849F-307B-4161-BAF4-AB2CAF530838'>
+            <Shortcut
+                Id='ApplicationStartMenuShortcut'
+                Name='Datan'
+                Description='Analisis de datos local-first sobre PostgreSQL'
+                Target='[#exe0]'
+                WorkingDirectory='APPLICATIONFOLDER'
+                Icon='ProductICO'/>
+            <RemoveFolder Id='ApplicationProgramsFolder' On='uninstall'/>
+            <RegistryValue
+                Root='HKCU'
+                Key='Software\Datan'
+                Name='installed'
+                Type='integer'
+                Value='1'
+                KeyPath='yes'/>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature
+        Id='MainApplication'
+        Title='Datan'
+        Description='Instala Datan, su extension de PostgreSQL y el acceso directo del menu Inicio.'
+        Level='1'
+        ConfigurableDirectory='APPLICATIONFOLDER'
+        AllowAdvertise='no'
+        Display='expand'
+        Absent='disallow'>
+      <ComponentRef Id='License'/>
+      <ComponentRef Id='binary0'/>
+      <ComponentRef Id='postgresExtension'/>
+      <ComponentRef Id='ApplicationShortcut'/>
+    </Feature>
+
+    <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+    <Icon Id='ProductICO' SourceFile='$(var.IconFile)'/>
+    <Property Id='ARPPRODUCTICON' Value='ProductICO'/>
+
+    <UI>
+      <UIRef Id='WixUI_InstallDir'/>
+    </UI>
+
+    <WixVariable Id='WixUILicenseRtf' Value='$(var.LicenseRtf)'/>
+
+  </Product>
+</Wix>

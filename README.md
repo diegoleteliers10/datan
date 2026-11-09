@@ -5,6 +5,28 @@ GPUI + gpui-kit.
 
 App de escritorio multiplataforma para analisis de datos. Local first, sin servidor.
 
+## Instalacion
+
+Descarga el artefacto de tu sistema desde [Releases](https://github.com/diegoleteliers10/datan/releases):
+
+| Sistema | Archivo |
+| --- | --- |
+| macOS Apple Silicon | `datan-aarch64-apple-darwin.dmg` |
+| macOS Intel | `datan-x86_64-apple-darwin.dmg` |
+| Linux Debian/Ubuntu | `datan_<version>_amd64.deb` |
+| Linux cualquier distro | `Datan_<version>_amd64.AppImage` |
+| Linux manual | `datan-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows | `datan_<version>_x64.msi` o `datan-x86_64-pc-windows-msvc.zip` |
+
+Requisitos: macOS 13+, Linux con glibc 2.35+ (Ubuntu 22.04 o posterior, Debian 12+), Windows 10
+x64 o posterior. En Linux hace falta un driver de Vulkan y las libs de X11/Wayland; el `.deb`
+las declara, el AppImage asume que el sistema las tiene.
+
+El instalador ya incluye la extension `postgres_scanner` de DuckDB (31 MB): el primer uso de
+PostgreSQL no descarga nada. En macOS, si bajaste el `.dmg` con el navegador y Gatekeeper se
+queja, el `.app` esta firmado ad-hoc; usa `xattr -cr /Applications/Datan.app` una vez, o instala
+con Homebrew cuando este disponible.
+
 ## Estado
 
 | Fase | Estado |
@@ -86,3 +108,23 @@ externa. Esa es la propiedad que hace que la parte dificil del proyecto itere ra
    en `datan-storage`, en el hilo de trabajo.
 5. **Las extensiones van precargadas, no descargadas.** `autoinstall_known_extensions = false`
    y `extension_directory` apuntando al bundle. La extension de Postgres pesa 31 MB.
+
+## Empaquetado
+
+Los scripts de `packaging/` arman los instaladores. El detalle (version, firma, notarizacion,
+release automatico) esta en [docs/releasing.md](docs/releasing.md).
+
+```sh
+# macOS: .app + .dmg + .tar.gz
+scripts/fetch-duckdb-extension.sh osx_arm64 dist/extensions
+EXTENSIONS_DIR=dist/extensions packaging/macos/bundle.sh aarch64-apple-darwin 0.1.0
+
+# Linux: .deb + AppImage + .tar.gz
+scripts/fetch-duckdb-extension.sh linux_amd64 dist/extensions
+cargo deb -p datan-app --no-build --output dist/datan_0.1.0_amd64.deb
+EXTENSIONS_DIR=dist/extensions packaging/linux/appimage.sh x86_64-unknown-linux-gnu 0.1.0
+```
+
+El `.deb` y el AppImage buscan la extension en `usr/lib/datan/extensions`; el `.app` en
+`Contents/Resources/extensions`; el `.exe` en `extensions\` al lado del ejecutable. En desarrollo,
+si no encuentran el bundle, caen en `~/.duckdb/extensions`.

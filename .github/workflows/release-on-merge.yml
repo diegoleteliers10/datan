@@ -1,5 +1,9 @@
 name: Release on merge to main
 
+# Un release empieza cuando un PR se mergea a main con la version de
+# Cargo.toml ya bumpeada. El workflow crea el tag y dispara release.yml.
+# Un merge sin bump de version no crea tag ni release.
+
 on:
   pull_request:
     types: [closed]
@@ -7,50 +11,93 @@ on:
 
 permissions:
   contents: write
-  # Needed to dispatch release.yml after the tag push: newer repos default
-  # the workflow token to read-only for actions.
   actions: write
+
+concurrency:
+  group: tag-release-main
+  cancel-in-progress: false
 
 jobs:
   tag:
     name: Tag merged release version
-    if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v7
+      - name: Checkout merged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.merge_commit_sha || 'main' }}
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Resolve version
+      - name: Resolve version and tag state
         id: version
-        run: |
-          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          TAG="v${VERSION}"
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag ${TAG} already exists; skipping."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Push release tag
-        if: steps.version.outputs.exists == 'false'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
-
-      - name: Trigger release build
-        # A tag pushed with the default GITHUB_TOKEN does not fire other
-        # workflows (GitHub blocks recursive events), so dispatch the Release
-        # workflow explicitly. release.yml resolves the version from the tag.
-        if: steps.version.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh workflow run release.yml --ref "${{ steps.version.outputs.tag }}"
+          VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_section=1; next }
+            /^\[/ { in_section=0 }
+            in_section && /^version[[:space:]]*=/ {
+              sub(/.*=[[:space:]]*"/, "")
+              sub(/".*/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::No se encontro version en [workspace.package] de Cargo.toml."
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} ya existe."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} no existe."
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} ya publicado."
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} todavia no publicado."
+          fi
+
+      - name: Push release tag
+        if: steps.version.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
+
+      # Un tag pusheado con GITHUB_TOKEN no dispara otros workflows. Se despacha
+      # release.yml explicitamente, tambien en el caso de recuperacion: el tag
+      # existe pero el release no.
+      - name: Dispatch release build
+        if: steps.version.outputs.exists == 'false' || steps.version.outputs.released == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh workflow run release.yml --ref "$TAG"; then
+              echo "Release despachado para ${TAG}."
+              exit 0
+            fi
+            echo "Intento ${attempt} fallo; reintentando en 5s."
+            sleep 5
+          done
+          echo "::error::No se pudo despachar el Release para ${TAG}."
+          exit 1

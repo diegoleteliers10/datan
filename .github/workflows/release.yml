@@ -1,43 +1,96 @@
 name: Release
 
+# Construye y publica Datan para macOS (arm64 + Intel), Linux x86_64 y Windows
+# x64. Linux se compila en ubuntu-22.04 a proposito: el binario queda con piso
+# glibc 2.35 y corre en Ubuntu 22.04+/Debian 12+, no solo en la ultima distro.
+#
+# Secretos opcionales:
+#   MACOS_SIGNING_IDENTITY       "Developer ID Application: ..." (si falta, firma ad-hoc)
+#   MACOS_NOTARY_APPLE_ID        Apple ID para notarizar
+#   MACOS_NOTARY_TEAM_ID         Team ID
+#   MACOS_NOTARY_PASSWORD        app-specific password
+#   MACOS_NOTARY_PROFILE         alternativa: perfil ya guardado con notarytool
+#   WINDOWS_CERTIFICATE_BASE64   .pfx en base64
+#   WINDOWS_CERTIFICATE_PASSWORD password del .pfx
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag a construir (ej. v0.1.0). Por defecto usa el ref actual o la version de Cargo.toml.'
+        required: false
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  DUCKDB_VERSION: '1.5.6'
+  CARGO_TERM_COLOR: always
 
 jobs:
   prepare:
     name: Resolve Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
+      tag: ${{ steps.get_version.outputs.tag }}
       version: ${{ steps.get_version.outputs.version }}
       checkout_ref: ${{ steps.get_version.outputs.checkout_ref }}
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Resolve Version
         id: get_version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          if [[ -n "$INPUT_TAG" ]]; then
+            TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
           else
-            TAG="v$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+            MANIFEST_VERSION=$(awk '
+              /^\[workspace\.package\]/ { in_section=1; next }
+              /^\[/ { in_section=0 }
+              in_section && /^version[[:space:]]*=/ {
+                sub(/.*=[[:space:]]*"/, ""); sub(/".*/, ""); print; exit
+              }
+            ' Cargo.toml)
+            TAG="v${MANIFEST_VERSION}"
           fi
+
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            echo "::error::Release tag must look like vX.Y.Z, got '${TAG}'."
+            echo "::error::El tag debe verse como vX.Y.Z, se recibio '${TAG}'."
             exit 1
           fi
+
+          MANIFEST_VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_section=1; next }
+            /^\[/ { in_section=0 }
+            in_section && /^version[[:space:]]*=/ {
+              sub(/.*=[[:space:]]*"/, ""); sub(/".*/, ""); print; exit
+            }
+          ' Cargo.toml)
+          if [[ "${TAG#v}" != "$MANIFEST_VERSION" ]]; then
+            echo "::error::El tag ${TAG} no coincide con la version de Cargo.toml (${MANIFEST_VERSION})."
+            exit 1
+          fi
+
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             CHECKOUT_REF="$TAG"
           else
             CHECKOUT_REF="${GITHUB_REF}"
           fi
-          echo "Resolved tag: $TAG"
+
+          echo "Tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "checkout_ref=$CHECKOUT_REF" >> "$GITHUB_OUTPUT"
@@ -48,28 +101,33 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+      MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+      MACOS_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact_name: datan-aarch64-apple-darwin.tar.gz
-            dmg_name: Datan_${{ needs.prepare.outputs.version }}_aarch64.dmg
+            duckdb_platform: osx_arm64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact_name: datan-x86_64-apple-darwin.tar.gz
-            dmg_name: Datan_${{ needs.prepare.outputs.version }}_x86_64.dmg
+            duckdb_platform: osx_amd64
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact_name: datan-x86_64-unknown-linux-gnu.tar.gz
+            os: ubuntu-22.04
+            duckdb_platform: linux_amd64
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact_name: datan-x86_64-pc-windows-msvc.zip
+            os: windows-2022
+            duckdb_platform: windows_amd64
 
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
 
@@ -77,96 +135,224 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libvulkan-dev libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libxfixes-dev
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev \
+            libvulkan-dev libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig1-dev libfreetype6-dev libxfixes-dev \
+            libfuse2 imagemagick dpkg-dev
 
       - name: Set up Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable branch
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Build datan (Release Mode)
-        run: cargo build --release --locked --target ${{ matrix.target }} -p datan-app
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      # macOS: app bundle + .tar.gz + .dmg (con symlink a /Applications)
-      - name: Package App Bundle (macOS)
+      - name: Build Binary (Release)
+        run: cargo build --release --locked -p datan-app --bin datan-app --target ${{ matrix.target }}
+
+      - name: Fetch DuckDB PostgreSQL Extension
+        shell: bash
+        run: bash scripts/fetch-duckdb-extension.sh ${{ matrix.duckdb_platform }} dist/extensions
+
+      # ----- macOS ---------------------------------------------------------
+      - name: Package macOS App, DMG and tar.gz
         if: runner.os == 'macOS'
-        run: |
-          mkdir -p dist/Datan.app/Contents/MacOS
-          cp target/${{ matrix.target }}/release/datan-app dist/Datan.app/Contents/MacOS/datan-app
-          cp packaging/macos/Info.plist dist/Datan.app/Contents/Info.plist
-          # El plist trae la version fija de origen; dejarla igual a la del tag.
-          plutil -replace CFBundleShortVersionString -string "${{ env.VERSION }}" dist/Datan.app/Contents/Info.plist
-          plutil -replace CFBundleVersion -string "${{ env.VERSION }}" dist/Datan.app/Contents/Info.plist
-          codesign --force --deep -s - dist/Datan.app
-          cd dist
-          tar -czf ../${{ matrix.artifact_name }} Datan.app
-          cd ..
+        env:
+          EXTENSIONS_DIR: dist/extensions
+        run: bash packaging/macos/bundle.sh ${{ matrix.target }} "$VERSION"
 
-      - name: Create DMG (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          STAGING_DIR=$(mktemp -d)
-          cp -R dist/Datan.app "$STAGING_DIR/"
-          ln -s /Applications "$STAGING_DIR/Applications"
-          hdiutil create \
-            -volname "Datan" \
-            -srcfolder "$STAGING_DIR" \
-            -ov -format UDZO \
-            "${{ matrix.dmg_name }}"
-          rm -rf "$STAGING_DIR"
-
-      # Linux: tarball autocontenido (sin .deb/.AppImage hasta tener icono y .desktop)
-      - name: Package Binary (Linux)
+      # ----- Linux ---------------------------------------------------------
+      - name: Package Linux tar.gz
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/datan-app dist/datan
-          tar -czf ${{ matrix.artifact_name }} -C dist datan
+          rm -rf dist/linux
+          mkdir -p dist/linux
+          cp "target/${{ matrix.target }}/release/datan-app" dist/linux/datan
+          cp -R dist/extensions dist/linux/extensions
+          tar -czf "dist/datan-${{ matrix.target }}.tar.gz" -C dist/linux datan extensions
 
-      # Windows: zip del ejecutable (sin .msi hasta tener WiX + icono)
-      - name: Package Binary (Windows)
+      - name: Install cargo-deb
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --locked
+
+      - name: Package .deb
+        if: runner.os == 'Linux'
+        run: |
+          cargo deb -p datan-app \
+            --target ${{ matrix.target }} \
+            --no-build \
+            --output "dist/datan_${VERSION}_amd64.deb"
+          ls -la "dist/datan_${VERSION}_amd64.deb"
+
+      - name: Package AppImage
+        if: runner.os == 'Linux'
+        env:
+          EXTENSIONS_DIR: dist/extensions
+        run: bash packaging/linux/appimage.sh ${{ matrix.target }} "$VERSION"
+
+      # ----- Windows -------------------------------------------------------
+      - name: Stage Windows files
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item -Path target\${{ matrix.target }}\release\datan-app.exe -Destination dist\datan.exe
-          Compress-Archive -Path dist\datan.exe -DestinationPath ${{ matrix.artifact_name }}
+          $stage = "dist\windows"
+          Remove-Item -Recurse -Force "$stage" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$stage\extensions" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\datan-app.exe" "$stage\Datan.exe" -Force
+          Copy-Item "dist\extensions\*" "$stage\extensions" -Recurse -Force
+          Get-ChildItem -Recurse "$stage" | Select-Object FullName
 
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Sign Windows executable
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "datan-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "No se encontro signtool.exe." }
+          & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr "http://timestamp.digicert.com" /td SHA256 "dist\windows\Datan.exe"
+          if ($LASTEXITCODE -ne 0) { throw "signtool fallo con el .exe" }
+          Remove-Item $pfx -Force
+
+      - name: Package Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\windows\*" -DestinationPath "dist\datan-${{ matrix.target }}.zip" -Force
+          Get-Item "dist\datan-${{ matrix.target }}.zip"
+
+      - name: Build MSI Installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candle = Join-Path $env:WIX "bin\candle.exe"
+          $light  = Join-Path $env:WIX "bin\light.exe"
+          $root   = (Get-Location).Path
+          $stage  = "$root\dist\windows"
+          $extDir = "$root\dist\extensions\v$env:DUCKDB_VERSION\windows_amd64"
+          $msi    = "$root\dist\datan_$($env:VERSION)_x64.msi"
+
+          & $candle -nologo -arch x64 `
+            -dVersion="$env:VERSION" `
+            -dBinDir="$stage" `
+            -dExtensionDir="$extDir" `
+            -dDuckDbVersion="v$env:DUCKDB_VERSION" `
+            -dPlatform="windows_amd64" `
+            -dIconFile="$root\assets\datan.ico" `
+            -dLicenseFile="$root\LICENSE" `
+            -dLicenseRtf="$root\wix\License.rtf" `
+            -out "$root\dist\windows\main.wixobj" `
+            "$root\wix\main.wxs"
+          if ($LASTEXITCODE -ne 0) { throw "candle.exe fallo con $LASTEXITCODE" }
+
+          & $light -nologo -ext WixUIExtension -sw69 -sw91 -out $msi "$root\dist\windows\main.wixobj"
+          if ($LASTEXITCODE -ne 0) { throw "light.exe fallo con $LASTEXITCODE" }
+          Get-Item $msi
+
+      - name: Sign Windows MSI
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "datan-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "No se encontro signtool.exe." }
+          $msi = "dist\datan_$($env:VERSION)_x64.msi"
+          & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr "http://timestamp.digicert.com" /td SHA256 $msi
+          if ($LASTEXITCODE -ne 0) { throw "signtool fallo con el .msi" }
+          Remove-Item $pfx -Force
+
+      # ----- Upload --------------------------------------------------------
+      - name: Upload macOS artifacts
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.target }}
           path: |
-            ${{ matrix.artifact_name }}
-            *.dmg
+            dist/datan-*.dmg
+            dist/datan-*.tar.gz
+          if-no-files-found: error
+
+      - name: Upload Linux artifacts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/datan-*.tar.gz
+            dist/datan_*_amd64.deb
+            dist/Datan_*_amd64.AppImage
+          if-no-files-found: error
+
+      - name: Upload Windows artifacts
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/datan-*.zip
+            dist/datan_*_x64.msi
+          if-no-files-found: error
 
   release:
-    name: Publish Release
+    name: Create GitHub Release
     needs: [prepare, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          merge-multiple: true
-          path: dist
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
 
-      - name: Smoke check assets
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: artifacts
+
+      - name: Flatten Artifacts
         run: |
-          ls -la dist
-          COUNT=$(ls dist | wc -l)
-          # macOS: tar.gz + dmg por arquitectura (4), Linux y Windows: 1 cada uno
-          if [ "$COUNT" -lt 6 ]; then
-            echo "::error::Se esperaban al menos 6 artifacts y hay $COUNT."
-            exit 1
+          mkdir -p release-assets
+          find artifacts -type f -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Extract Release Notes
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          awk -v ver="## $VERSION" '
+            $0 ~ ver { flag=1; next }
+            flag && /^## / { exit }
+            flag { print }
+          ' CHANGELOG.md > release_notes.md
+          if [[ ! -s release_notes.md ]]; then
+            echo "Release ${VERSION}." > release_notes.md
           fi
+          cat release_notes.md
 
-      - name: Create release
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@5113cdc90fd4d541c801c55356214017bf5ae34b # v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          files: release-assets/*
+          body_path: release_notes.md
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          gh release create "v${VERSION}" dist/* \
-            --title "Datan v${VERSION}" \
-            --generate-notes
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
