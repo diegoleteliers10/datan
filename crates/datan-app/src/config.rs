@@ -25,6 +25,18 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// El home del usuario.
+///
+/// En Windows `HOME` puede no existir fuera de Git Bash; el perfil real esta
+/// en `USERPROFILE`. Sin este fallback, la config se guardaba en `./.datan`
+/// relativa al directorio desde donde se abrio la app.
+pub(crate) fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// El archivo, con la tabla que el formato TOML exige.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct File {
@@ -236,8 +248,7 @@ impl Connections {
     /// `~/.datan/connections.toml`. La carpeta se crea al guardar si no existe, no al leer:
     /// crear carpetas al leer convierte un error de lectura en una escritura sorpresa.
     pub fn path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".datan").join("connections.toml")
+        home_dir().join(".datan").join("connections.toml")
     }
 
     /// Carga el archivo. Si no existe, devuelve la lista con la conexion de ejemplo.
@@ -376,8 +387,7 @@ pub struct Preferences {
 impl Preferences {
     /// El archivo del usuario.
     pub fn path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".datan").join("preferences.toml")
+        home_dir().join(".datan").join("preferences.toml")
     }
 
     /// Carga las preferencias.

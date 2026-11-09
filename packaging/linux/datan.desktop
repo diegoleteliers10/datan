@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Datan
+GenericName=Data Analysis
+Comment=Analisis de datos local-first sobre PostgreSQL, con motor DuckDB y medidas compatibles con DAX
+Exec=datan
+Icon=datan
+Terminal=false
+Categories=Office;Database;Utility;
+Keywords=analytics;bi;postgres;duckdb;dax;data;report;
+StartupWMClass=Datan
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=Nueva ventana
+Exec=datan

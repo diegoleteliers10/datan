@@ -2,6 +2,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// El home del usuario. En Windows `HOME` puede faltar; el perfil real esta
+/// en `USERPROFILE`.
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct File {
@@ -136,12 +145,11 @@ impl DataDoc {
     }
 
     pub fn path(database: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let filename = database
             .replace('%', "%25")
             .replace('/', "%2F")
             .replace('\\', "%5C");
-        PathBuf::from(home)
+        home_dir()
             .join(".datan")
             .join("queries")
             .join(format!("{filename}.toml"))
@@ -467,8 +475,7 @@ mod tests {
     #[test]
     fn nombre_de_base_no_puede_salir_del_directorio_queries() {
         let path = DataDoc::path("../../outside\\file");
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let expected_parent = PathBuf::from(home).join(".datan").join("queries");
+        let expected_parent = home_dir().join(".datan").join("queries");
 
         assert_eq!(path.parent(), Some(expected_parent.as_path()));
         assert_eq!(
