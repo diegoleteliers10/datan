@@ -1588,7 +1588,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "datan-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "criterion",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "datan-connect"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "datan-dax-check",
  "datan-dax-syntax",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "datan-dax-check"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "datan-dax-syntax",
  "datan-model",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "datan-dax-eval"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "datan-dax-check",
  "datan-dax-syntax",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "datan-dax-sql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "datan-dax-eval",
  "datan-model",
@@ -1655,21 +1655,21 @@ dependencies = [
 
 [[package]]
 name = "datan-dax-syntax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "datan-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "datan-report"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "datan-dax-eval",
  "datan-dax-sql",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "datan-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "duckdb",
@@ -1693,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "datan-testkit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "datan-dax-eval",
  "datan-dax-sql",
